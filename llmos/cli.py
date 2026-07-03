@@ -1,11 +1,13 @@
 """LLMOS shell — the (conversational-in-spirit) command surface.
 
-    python3 -m llmos.cli run [goal]     boot, spawn one process, run it to completion
-    python3 -m llmos.cli ps             list known processes
-    python3 -m llmos.cli replay <pid>   reconstruct a run's state from its trace
+    python3 -m llmos.cli run [goal]                    run with the deterministic MockCPU
+    python3 -m llmos.cli run "<goal>" --ollama         run with a real local model as the CPU
+    python3 -m llmos.cli ps                            list known processes
+    python3 -m llmos.cli replay <pid>                  reconstruct a run's state from its trace
 
-v0.1 ships one built-in program, "hello", which proves the whole spine:
-PLAN -> CALL(clock) -> WRITE_MEM -> YIELD -> RETURN.
+The built-in "hello" program proves the spine deterministically:
+PLAN -> CALL(clock) -> WRITE_MEM -> YIELD -> RETURN. With --ollama, a real LLM
+emits the instructions instead.
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ import argparse
 import os
 import tempfile
 
-from .cpu import MockCPU
+from .cpu import MockCPU, OllamaCPU
 from .isa import Instruction, Op
 from .kernel import Kernel
 from .replay import replay
@@ -42,21 +44,28 @@ def hello_program(pcb) -> Instruction:
 PROGRAMS = {"hello": hello_program}
 
 
-def _kernel():
+def _kernel(cpu=None):
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     store = Store(DB)
-    return Kernel(store, MockCPU(PROGRAMS)), store
+    return Kernel(store, cpu or MockCPU(PROGRAMS)), store
 
 
 def cmd_run(args):
-    kernel, store = _kernel()
+    cpu = OllamaCPU(model=args.model) if args.ollama else None
+    kernel, store = _kernel(cpu)
+    if args.ollama:
+        print(f"[cpu] OllamaCPU model={args.model}")
     kernel.boot()
-    pid = kernel.spawn(args.goal)
+    pid = kernel.spawn(args.goal, budget=args.budget)
     kernel.run()
     pcb = kernel.procs[pid]
     print(f"\n[done] pid={pid} status={pcb.status.value} result={pcb.result}")
-    print(f"[mem]  mem/hello.timestamp = {store.mem_read('mem', 'hello.timestamp')}")
-    print(f"[hint] inspect with:  python3 -m llmos.cli replay {pid}")
+    keys = store.mem_list("mem")
+    if keys:
+        print("[mem] contents:")
+        for k in keys:
+            print(f"       mem/{k} = {store.mem_read('mem', k)}")
+    print(f"[hint] python3 -m llmos.cli replay {pid}")
     store.close()
 
 
@@ -86,6 +95,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run a goal")
     r.add_argument("goal", nargs="?", default="hello")
+    r.add_argument("--ollama", action="store_true", help="use a real local model as the CPU")
+    r.add_argument("--model", default="qwen2.5:latest", help="ollama model tag")
+    r.add_argument("--budget", type=int, default=32, help="max instruction cycles")
     r.set_defaults(fn=cmd_run)
     p = sub.add_parser("ps", help="list processes")
     p.set_defaults(fn=cmd_ps)

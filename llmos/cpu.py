@@ -7,7 +7,9 @@ swappable device driver:
              machine without a stochastic model.
   ReplayCPU  re-emits the instructions recorded in a trace, so a stochastic run
              becomes deterministically replayable.
-  OllamaCPU  a real local model (via Ollama), temperature 0 + fixed seed.
+  OllamaCPU  a real local model (via Ollama), temperature 0 + fixed seed. Robust
+             to bad output: a malformed/illegal emission degrades to a clean
+             RETURN, so the deterministic kernel never crashes on CPU output.
 """
 from __future__ import annotations
 
@@ -49,11 +51,11 @@ class ReplayCPU:
 
 
 class OllamaCPU:
-    """Real CPU. Prompts a local model and parses structured JSON output into one
-    instruction. The model must be taught the ISA (future work); wired here so the
-    driver exists and can be pointed at the mini or pop's GPU."""
+    """Real CPU. Prompts a local model and parses its structured JSON output into one
+    instruction. Point it at the mini (localhost) or pop's GPU. temp 0 + fixed seed
+    for as-much-determinism-as-a-model-allows."""
 
-    def __init__(self, model: str = "llama3.2", host: str = "http://localhost:11434", seed: int = 0):
+    def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434", seed: int = 0):
         self.model = model
         self.host = host
         self.seed = seed
@@ -61,27 +63,53 @@ class OllamaCPU:
     def step(self, pcb) -> Instruction:
         import urllib.request
 
-        body = json.dumps({
-            "model": self.model,
-            "prompt": self._build_prompt(pcb),
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0, "seed": self.seed},
-        }).encode()
-        req = urllib.request.Request(
-            self.host + "/api/generate", data=body,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=120) as r:
-            resp = json.loads(r.read())
-        d = json.loads(resp.get("response", "{}"))
-        return Instruction(Op(d["op"]), d.get("args", {}) or {})
+        raw = None
+        try:
+            body = json.dumps({
+                "model": self.model,
+                "prompt": self._build_prompt(pcb),
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0, "seed": self.seed, "num_predict": 200},
+            }).encode()
+            req = urllib.request.Request(
+                self.host + "/api/generate", data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=180) as r:
+                resp = json.loads(r.read())
+            raw = resp.get("response", "{}")
+            d = json.loads(raw)
+            op = Op(str(d.get("op", "RETURN")).strip().upper())   # ValueError if illegal
+            args = d.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            return Instruction(op, args)
+        except ValueError as e:
+            # illegal opcode: an illegal-instruction fault. Degrade to a clean stop.
+            return Instruction(Op.RETURN, {"result": "illegal instruction from CPU", "error": str(e), "raw": raw})
+        except Exception as e:
+            # device error (model down, timeout, bad JSON): fail the process cleanly.
+            return Instruction(Op.RETURN, {"result": "CPU device error", "error": str(e), "raw": raw})
 
     def _build_prompt(self, pcb) -> str:
+        history = "\n".join(
+            f"  step {s['pc']}: {s['op']} {json.dumps(s['args'])} -> {json.dumps(s['result'])}"
+            for s in pcb.context
+        ) or "  (none yet)"
         return (
-            "You are the CPU of LLMOS. Emit the SINGLE next instruction as JSON: "
-            '{"op": one of PLAN|CALL|READ_MEM|WRITE_MEM|SPAWN|YIELD|RETURN, "args": {...}}.\n'
-            f"Goal: {pcb.goal}\n"
-            f"Steps so far: {json.dumps(pcb.context)}\n"
-            "Next instruction:"
+            "You are the CPU of LLMOS. Each turn you emit exactly ONE instruction as a single "
+            "JSON object and nothing else.\n\n"
+            "Instruction set (pick one op):\n"
+            '  {"op":"PLAN","args":{"text":"..."}}                 think; no world effect\n'
+            '  {"op":"CALL","args":{"name":"clock.now","args":{}}} call a device syscall\n'
+            '  {"op":"WRITE_MEM","args":{"key":"...","value":<any>}} save a value to memory\n'
+            '  {"op":"READ_MEM","args":{"key":"..."}}              load a value from memory\n'
+            '  {"op":"RETURN","args":{"result":<any>}}             finish the goal\n\n'
+            "Available syscalls for CALL: clock.now  (returns the current UTC time).\n"
+            "Rules: use the results of earlier steps (shown below); do NOT repeat a step you "
+            "already completed; when the goal is achieved, emit RETURN.\n\n"
+            f"GOAL: {pcb.goal}\n"
+            f"STEPS SO FAR:\n{history}\n\n"
+            "Next instruction (one JSON object):"
         )
