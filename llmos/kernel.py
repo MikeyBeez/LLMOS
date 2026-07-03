@@ -12,7 +12,7 @@ The cycle is the classic fetch-decode-execute-commit:
 """
 from __future__ import annotations
 
-from .isa import Op
+from .isa import Instruction, Op
 from .pcb import PCB, Status
 from .scheduler import Scheduler
 from .syscall import SyscallTable, CapabilityError
@@ -56,6 +56,17 @@ class Kernel:
     # --- the syscall channel (in-process now; a socket later) -----------
     def syscall(self, pcb, name: str, args: dict):
         return self.sys.dispatch(pcb, name, args)
+
+    def commit_external(self, pid: int, op_str: str, args: dict):
+        """Commit one instruction that arrived from an out-of-process agent over a
+        socket. Reuses _commit, so the capability check, syscall dispatch, and the
+        single-writer trace are identical to the in-process path. Returns
+        (result, done)."""
+        pcb = self.procs[pid]
+        instr = Instruction(Op(op_str), args or {})
+        done = self._commit(pcb, instr)
+        self.store.save_process(pcb.to_dict())   # keep the process snapshot fresh for ps
+        return pcb.context[-1]["result"], done
 
     # --- the main loop --------------------------------------------------
     def run(self) -> None:

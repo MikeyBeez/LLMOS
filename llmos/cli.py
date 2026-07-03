@@ -1,13 +1,10 @@
 """LLMOS shell — the (conversational-in-spirit) command surface.
 
-    python3 -m llmos.cli run [goal]                    run with the deterministic MockCPU
-    python3 -m llmos.cli run "<goal>" --ollama         run with a real local model as the CPU
-    python3 -m llmos.cli ps                            list known processes
-    python3 -m llmos.cli replay <pid>                  reconstruct a run's state from its trace
-
-The built-in "hello" program proves the spine deterministically:
-PLAN -> CALL(clock) -> WRITE_MEM -> YIELD -> RETURN. With --ollama, a real LLM
-emits the instructions instead.
+    python3 -m llmos.cli run [goal]                 in-process run (deterministic MockCPU)
+    python3 -m llmos.cli run "<goal>" --ollama       in-process run with a real local model
+    python3 -m llmos.cli runp <goal> [<goal> ...]    multi-process run: one macOS process per agent
+    python3 -m llmos.cli ps                          list known processes
+    python3 -m llmos.cli replay <pid>                reconstruct a run's state from its trace
 """
 from __future__ import annotations
 
@@ -16,38 +13,27 @@ import os
 import tempfile
 
 from .cpu import MockCPU, OllamaCPU
-from .isa import Instruction, Op
 from .kernel import Kernel
+from .programs import PROGRAMS
 from .replay import replay
 from .store import Store
 
 DB = os.path.expanduser("~/Code/LLMOS/state/llmos.db")
-
-
-def hello_program(pcb) -> Instruction:
-    """The CPU for the 'hello' goal. Note pc==2: the CPU reads the previous step's
-    result out of its own context window to build the next instruction — exactly
-    how a real model would carry data forward."""
-    pc = pcb.pc
-    if pc == 0:
-        return Instruction(Op.PLAN, {"text": "read the clock, then persist it to memory"})
-    if pc == 1:
-        return Instruction(Op.CALL, {"name": "clock.now", "args": {}})
-    if pc == 2:
-        t = pcb.context[-1]["result"]
-        return Instruction(Op.WRITE_MEM, {"ns": "mem", "key": "hello.timestamp", "value": t})
-    if pc == 3:
-        return Instruction(Op.YIELD, {})
-    return Instruction(Op.RETURN, {"result": {"saved": "hello.timestamp"}})
-
-
-PROGRAMS = {"hello": hello_program}
+STATE_DIR = os.path.expanduser("~/Code/LLMOS/state")
 
 
 def _kernel(cpu=None):
-    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
     store = Store(DB)
     return Kernel(store, cpu or MockCPU(PROGRAMS)), store
+
+
+def _dump_mem(store):
+    keys = store.mem_list("mem")
+    if keys:
+        print("[mem] contents:")
+        for k in keys:
+            print(f"       mem/{k} = {store.mem_read('mem', k)}")
 
 
 def cmd_run(args):
@@ -60,12 +46,20 @@ def cmd_run(args):
     kernel.run()
     pcb = kernel.procs[pid]
     print(f"\n[done] pid={pid} status={pcb.status.value} result={pcb.result}")
-    keys = store.mem_list("mem")
-    if keys:
-        print("[mem] contents:")
-        for k in keys:
-            print(f"       mem/{k} = {store.mem_read('mem', k)}")
+    _dump_mem(store)
     print(f"[hint] python3 -m llmos.cli replay {pid}")
+    store.close()
+
+
+def cmd_runp(args):
+    from .procd import ProcKernel
+    os.makedirs(STATE_DIR, exist_ok=True)
+    store = Store(DB)
+    pk = ProcKernel(store, sock_dir=STATE_DIR)
+    pk.run(args.goals, ollama=args.ollama, model=args.model, budget=args.budget)
+    print()
+    _dump_mem(store)
+    print("[hint] python3 -m llmos.cli ps")
     store.close()
 
 
@@ -93,17 +87,28 @@ def cmd_replay(args):
 def main():
     ap = argparse.ArgumentParser(prog="llmos")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="run a goal")
+
+    r = sub.add_parser("run", help="in-process run of a goal")
     r.add_argument("goal", nargs="?", default="hello")
     r.add_argument("--ollama", action="store_true", help="use a real local model as the CPU")
     r.add_argument("--model", default="qwen2.5:latest", help="ollama model tag")
     r.add_argument("--budget", type=int, default=32, help="max instruction cycles")
     r.set_defaults(fn=cmd_run)
+
+    rp = sub.add_parser("runp", help="multi-process run: one macOS process per agent")
+    rp.add_argument("goals", nargs="+", help="one or more goals; each runs as its own OS process")
+    rp.add_argument("--ollama", action="store_true")
+    rp.add_argument("--model", default="qwen2.5:latest")
+    rp.add_argument("--budget", type=int, default=16)
+    rp.set_defaults(fn=cmd_runp)
+
     p = sub.add_parser("ps", help="list processes")
     p.set_defaults(fn=cmd_ps)
-    rp = sub.add_parser("replay", help="reconstruct a run from its trace")
-    rp.add_argument("pid", type=int)
-    rp.set_defaults(fn=cmd_replay)
+
+    rpl = sub.add_parser("replay", help="reconstruct a run from its trace")
+    rpl.add_argument("pid", type=int)
+    rpl.set_defaults(fn=cmd_replay)
+
     args = ap.parse_args()
     args.fn(args)
 
