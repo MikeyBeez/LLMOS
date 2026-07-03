@@ -32,6 +32,7 @@ class PCB:
     working_set: list[str] = field(default_factory=list)   # memory keys paged in
     context: list[dict] = field(default_factory=list)      # the window: recent step records
     result: Any = None
+    tainted: bool = False               # has untrusted data entered this process's window?
 
     def to_dict(self) -> dict:
         d = asdict(self)

@@ -12,19 +12,30 @@ The cycle is the classic fetch-decode-execute-commit:
 """
 from __future__ import annotations
 
+import os
+
 from .isa import Instruction, Op
 from .pcb import PCB, Status
 from .scheduler import Scheduler
 from .syscall import SyscallTable, CapabilityError
 
-DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write"}
+_STATE = os.path.expanduser("~/Code/LLMOS/state")
+_EXAMPLES = os.path.expanduser("~/Code/LLMOS/examples")
+_DEFAULT_FS_POLICY = {
+    "allowed": [os.path.join(_EXAMPLES, "trusted"), os.path.join(_EXAMPLES, "untrusted")],
+    "untrusted": [os.path.join(_EXAMPLES, "untrusted")],
+}
+
+DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read"}
+# capabilities a process loses the instant untrusted data enters its window
+PRIVILEGED_CAPS = {"mem.write", "spawn"}
 
 
 class Kernel:
-    def __init__(self, store, cpu, log=print):
+    def __init__(self, store, cpu, log=print, fs_policy=None):
         self.store = store
         self.cpu = cpu
-        self.sys = SyscallTable(store)
+        self.sys = SyscallTable(store, fs_policy=fs_policy or _DEFAULT_FS_POLICY)
         self.sched = Scheduler()
         self.procs: dict[int, PCB] = {}
         self._next_pid = 1
@@ -67,6 +78,16 @@ class Kernel:
         done = self._commit(pcb, instr)
         self.store.save_process(pcb.to_dict())   # keep the process snapshot fresh for ps
         return pcb.context[-1]["result"], done
+
+    def _apply_taint(self, pcb: PCB) -> None:
+        """Prompt-injection defense: once untrusted data enters a process's window,
+        the kernel revokes its privileged capabilities, so whatever action injected
+        text tries to take is denied at the boundary — not left to the model."""
+        if not pcb.tainted:
+            dropped = sorted(pcb.capabilities & PRIVILEGED_CAPS)
+            pcb.capabilities -= PRIVILEGED_CAPS
+            pcb.tainted = True
+            self.log(f"[security] pid={pcb.pid} ingested untrusted data -> revoked caps {dropped}")
 
     # --- the main loop --------------------------------------------------
     def run(self) -> None:
@@ -131,6 +152,10 @@ class Kernel:
         except KeyError as e:
             result = {"error": f"malformed instruction, missing arg {e}"}
             self.log(f"[fault] pid={pcb.pid} malformed {op.value}: missing {e}")
+
+        # security: ingesting untrusted data drops this process's privileged caps
+        if isinstance(result, dict) and result.get("provenance") == "untrusted":
+            self._apply_taint(pcb)
 
         # commit: single-writer trace, then window + PCB, then advance the PC
         self.store.trace_append(pcb.pid, pcb.pc, op.value, args, result)

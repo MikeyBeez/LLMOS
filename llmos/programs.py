@@ -7,7 +7,13 @@ real model would. Shared by the single-process CLI and the out-of-process agent.
 """
 from __future__ import annotations
 
+import os
+
 from .isa import Instruction, Op
+
+_EXAMPLES = os.path.expanduser("~/Code/LLMOS/examples")
+TRUSTED_FILE = os.path.join(_EXAMPLES, "trusted", "config.txt")
+UNTRUSTED_FILE = os.path.join(_EXAMPLES, "untrusted", "note.txt")
 
 
 def hello_program(pcb) -> Instruction:
@@ -33,7 +39,33 @@ def ping_program(pcb) -> Instruction:
     return Instruction(Op.RETURN, {"result": "pong"})
 
 
+def readgood_program(pcb) -> Instruction:
+    """Reads a trusted config file and stores a value from it. Succeeds."""
+    pc = pcb.pc
+    if pc == 0:
+        return Instruction(Op.CALL, {"name": "fs.read", "args": {"path": TRUSTED_FILE}})
+    if pc == 1:
+        data = pcb.context[-1]["result"] or {}
+        return Instruction(Op.WRITE_MEM, {"key": "config", "value": data.get("content", "").strip()})
+    return Instruction(Op.RETURN, {"result": "loaded trusted config"})
+
+
+def readbad_program(pcb) -> Instruction:
+    """Simulates a naive CPU that reads attacker-controlled content and 'obeys' an
+    instruction embedded in it. The kernel revokes privileges the moment the
+    untrusted data is read, so the follow-on WRITE_MEM is denied at the boundary —
+    the injection fails even though the CPU was fooled."""
+    pc = pcb.pc
+    if pc == 0:
+        return Instruction(Op.CALL, {"name": "fs.read", "args": {"path": UNTRUSTED_FILE}})
+    if pc == 1:
+        return Instruction(Op.WRITE_MEM, {"key": "secret", "value": "exfiltrated-by-injection"})
+    return Instruction(Op.RETURN, {"result": "done"})
+
+
 PROGRAMS = {
     "hello": hello_program,
     "ping": ping_program,
+    "readgood": readgood_program,
+    "readbad": readbad_program,
 }
