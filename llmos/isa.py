@@ -17,6 +17,7 @@ class Op(str, Enum):
     READ_MEM = "READ_MEM"    # page a memory key into the window
     WRITE_MEM = "WRITE_MEM"  # persist a value to memory (capability-checked)
     SPAWN = "SPAWN"          # create a child process
+    REQUEST = "REQUEST"      # ask the authority (human/policy) to grant a capability
     YIELD = "YIELD"          # hand the CPU back to the scheduler
     RETURN = "RETURN"        # finish, with a result
 

@@ -63,9 +63,29 @@ def readbad_program(pcb) -> Instruction:
     return Instruction(Op.RETURN, {"result": "done"})
 
 
+def elevate_program(pcb) -> Instruction:
+    """Starts sandboxed (no mem.write). It must ask the authority for the capability
+    before it can persist anything — the process side of the human ask-channel."""
+    pc = pcb.pc
+    if pc == 0:
+        return Instruction(Op.REQUEST, {"capability": "mem.write",
+                                        "reason": "need to persist the task result"})
+    if pc == 1:
+        if not (pcb.context[-1]["result"] or {}).get("granted"):
+            return Instruction(Op.RETURN, {"result": "blocked: mem.write was not granted"})
+        return Instruction(Op.WRITE_MEM, {"key": "elevated", "value": "written after approval"})
+    return Instruction(Op.RETURN, {"result": "done"})
+
+
 PROGRAMS = {
     "hello": hello_program,
     "ping": ping_program,
     "readgood": readgood_program,
     "readbad": readbad_program,
+    "elevate": elevate_program,
+}
+
+# Initial capability sets for programs that start sandboxed (otherwise DEFAULT_CAPS).
+PROGRAM_CAPS = {
+    "elevate": {"dev.clock", "mem.read", "fs.read"},   # no mem.write until granted
 }

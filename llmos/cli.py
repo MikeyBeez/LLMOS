@@ -12,9 +12,10 @@ import argparse
 import os
 import tempfile
 
+from .authority import PolicyAuthority
 from .cpu import MockCPU, OllamaCPU
 from .kernel import Kernel
-from .programs import PROGRAMS
+from .programs import PROGRAM_CAPS, PROGRAMS
 from .replay import replay
 from .store import Store
 
@@ -22,10 +23,10 @@ DB = os.path.expanduser("~/Code/LLMOS/state/llmos.db")
 STATE_DIR = os.path.expanduser("~/Code/LLMOS/state")
 
 
-def _kernel(cpu=None):
+def _kernel(cpu=None, authority=None):
     os.makedirs(STATE_DIR, exist_ok=True)
     store = Store(DB)
-    return Kernel(store, cpu or MockCPU(PROGRAMS)), store
+    return Kernel(store, cpu or MockCPU(PROGRAMS), authority=authority), store
 
 
 def _dump_mem(store):
@@ -38,11 +39,14 @@ def _dump_mem(store):
 
 def cmd_run(args):
     cpu = OllamaCPU(model=args.model) if args.ollama else None
-    kernel, store = _kernel(cpu)
+    authority = PolicyAuthority(grant=set(args.grant)) if args.grant else None
+    kernel, store = _kernel(cpu, authority)
     if args.ollama:
         print(f"[cpu] OllamaCPU model={args.model}")
+    if args.grant:
+        print(f"[authority] PolicyAuthority granting on request: {sorted(set(args.grant))}")
     kernel.boot()
-    pid = kernel.spawn(args.goal, budget=args.budget)
+    pid = kernel.spawn(args.goal, capabilities=PROGRAM_CAPS.get(args.goal), budget=args.budget)
     kernel.run()
     pcb = kernel.procs[pid]
     print(f"\n[done] pid={pid} status={pcb.status.value} result={pcb.result}")
@@ -93,6 +97,7 @@ def main():
     r.add_argument("--ollama", action="store_true", help="use a real local model as the CPU")
     r.add_argument("--model", default="qwen2.5:latest", help="ollama model tag")
     r.add_argument("--budget", type=int, default=32, help="max instruction cycles")
+    r.add_argument("--grant", nargs="*", default=[], help="capabilities a PolicyAuthority will grant on request")
     r.set_defaults(fn=cmd_run)
 
     rp = sub.add_parser("runp", help="multi-process run: one macOS process per agent")

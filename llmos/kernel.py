@@ -18,6 +18,7 @@ from .isa import Instruction, Op
 from .pcb import PCB, Status
 from .scheduler import Scheduler
 from .syscall import SyscallTable, CapabilityError
+from .authority import DenyAuthority
 
 _STATE = os.path.expanduser("~/Code/LLMOS/state")
 _EXAMPLES = os.path.expanduser("~/Code/LLMOS/examples")
@@ -32,10 +33,11 @@ PRIVILEGED_CAPS = {"mem.write", "spawn"}
 
 
 class Kernel:
-    def __init__(self, store, cpu, log=print, fs_policy=None):
+    def __init__(self, store, cpu, log=print, fs_policy=None, authority=None):
         self.store = store
         self.cpu = cpu
         self.sys = SyscallTable(store, fs_policy=fs_policy or _DEFAULT_FS_POLICY)
+        self.authority = authority or DenyAuthority()
         self.sched = Scheduler()
         self.procs: dict[int, PCB] = {}
         self._next_pid = 1
@@ -137,6 +139,19 @@ class Kernel:
             elif op == Op.SPAWN:
                 child = self.spawn(args["goal"], args.get("capabilities"), ppid=pcb.pid)
                 result = {"spawned": child}
+            elif op == Op.REQUEST:
+                cap = args["capability"]
+                reason = args.get("reason", "")
+                if pcb.tainted and cap in PRIVILEGED_CAPS:
+                    result = {"denied": cap, "why": "a tainted process may not regain privileged capabilities"}
+                    self.log(f"[authority] pid={pcb.pid} auto-DENIED '{cap}' (tainted)")
+                elif self.authority.request(pcb, cap, reason):
+                    pcb.capabilities.add(cap)
+                    result = {"granted": cap}
+                    self.log(f"[authority] pid={pcb.pid} GRANTED '{cap}' — {reason}")
+                else:
+                    result = {"denied": cap}
+                    self.log(f"[authority] pid={pcb.pid} DENIED '{cap}' — {reason}")
             elif op == Op.YIELD:
                 result = {"yield": True}
             elif op == Op.RETURN:
