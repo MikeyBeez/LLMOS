@@ -1,8 +1,10 @@
 """Persistent store — delegated to SQLite (APFS-backed), per the implementation plan.
 
-Holds three things: memory (the brain / disk), the trace ledger (single-writer,
-append-only), and process snapshots (checkpoint/resume). We do not write a storage
-engine; SQLite gives us persistence, transactions, and locking for free.
+Holds four things: memory (the brain / disk), the trace ledger (single-writer,
+append-only), process snapshots (checkpoint/resume), and a metrics table
+(per-instruction timing/tokens, for measuring how slow the machine is and where
+the time goes). We do not write a storage engine; SQLite gives us persistence,
+transactions, and locking for free.
 """
 from __future__ import annotations
 
@@ -34,6 +36,23 @@ CREATE TABLE IF NOT EXISTS processes (
   snapshot    TEXT NOT NULL,
   updated_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS metrics (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  pid            INTEGER NOT NULL,
+  pc             INTEGER NOT NULL,
+  op             TEXT NOT NULL,
+  cpu_type       TEXT,
+  model          TEXT,
+  cpu_ms         REAL,      -- wall time of cpu.step() = one inference cycle (incl. retries)
+  commit_ms      REAL,      -- wall time of the kernel commit (syscall + trace + snapshot)
+  retries        INTEGER DEFAULT 0,
+  prompt_tokens  INTEGER,   -- ollama prompt_eval_count (context tokens read)
+  eval_tokens    INTEGER,   -- ollama eval_count (tokens generated)
+  eval_ms        REAL,      -- ollama eval_duration (generation only)
+  load_ms        REAL,      -- ollama load_duration (model cold-load; ~0 when warm)
+  fault          INTEGER DEFAULT 0,
+  ts             REAL NOT NULL
+);
 """
 
 
@@ -41,6 +60,14 @@ class Store:
     def __init__(self, path: str):
         self.path = path
         self.db = sqlite3.connect(path)
+        # Speed: WAL + NORMAL sync cut the per-instruction fsync cost of our
+        # commit-after-every-write pattern without risking corruption (only a
+        # crash mid-write loses the very last commit, which the trace tolerates).
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
         self.db.executescript(SCHEMA)
         self.db.commit()
 
@@ -91,6 +118,32 @@ class Store:
 
     def list_processes(self) -> list[dict]:
         return [json.loads(r[0]) for r in self.db.execute("SELECT snapshot FROM processes ORDER BY pid")]
+
+    # --- metrics: per-instruction timing / tokens ------------------------
+    def metrics_append(self, pid: int, pc: int, op: str, cpu_type: str = None, model: str = None,
+                        cpu_ms: float = None, commit_ms: float = None, retries: int = 0,
+                        prompt_tokens: int = None, eval_tokens: int = None,
+                        eval_ms: float = None, load_ms: float = None, fault: int = 0) -> None:
+        self.db.execute(
+            "INSERT INTO metrics(pid,pc,op,cpu_type,model,cpu_ms,commit_ms,retries,"
+            "prompt_tokens,eval_tokens,eval_ms,load_ms,fault,ts) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pid, pc, op, cpu_type, model, cpu_ms, commit_ms, retries,
+             prompt_tokens, eval_tokens, eval_ms, load_ms, fault, time.time()),
+        )
+        self.db.commit()
+
+    def metrics_rows(self, cpu_type: str = None) -> list[dict]:
+        q = ("SELECT pid,pc,op,cpu_type,model,cpu_ms,commit_ms,retries,"
+             "prompt_tokens,eval_tokens,eval_ms,load_ms,fault,ts FROM metrics")
+        params: tuple = ()
+        if cpu_type:
+            q += " WHERE cpu_type=?"
+            params = (cpu_type,)
+        q += " ORDER BY id"
+        cols = ["pid", "pc", "op", "cpu_type", "model", "cpu_ms", "commit_ms", "retries",
+                "prompt_tokens", "eval_tokens", "eval_ms", "load_ms", "fault", "ts"]
+        return [dict(zip(cols, r)) for r in self.db.execute(q, params).fetchall()]
 
     def close(self) -> None:
         self.db.close()

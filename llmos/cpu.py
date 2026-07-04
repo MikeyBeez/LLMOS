@@ -9,6 +9,11 @@ swappable device driver:
              becomes deterministically replayable.
   OllamaCPU  a real local model (via Ollama). Gives the model exactly ONE chance
              to fix an invalid instruction, then fails closed.
+
+Every CPU exposes `last_meta` after each step(): a small dict of timing/token
+info the kernel records into the metrics table. For the deterministic CPUs it is
+empty (the kernel still times the call itself); for OllamaCPU it carries the
+model's token counts and generation time, so we can see where the seconds go.
 """
 from __future__ import annotations
 
@@ -24,8 +29,11 @@ class MockCPU:
 
     def __init__(self, programs: dict):
         self.programs = programs
+        self.model = None
+        self.last_meta: dict = {}
 
     def step(self, pcb) -> Instruction:
+        self.last_meta = {}
         prog = self.programs.get(pcb.goal)
         if prog is None:
             return Instruction(Op.RETURN, {"result": f"no program for goal: {pcb.goal}"})
@@ -41,8 +49,11 @@ class ReplayCPU:
 
     def __init__(self, trace_rows: list[dict]):
         self.rows = trace_rows
+        self.model = None
+        self.last_meta: dict = {}
 
     def step(self, pcb) -> Instruction:
+        self.last_meta = {}
         if pcb.pc >= len(self.rows):
             return Instruction(Op.RETURN, {"result": "trace exhausted"})
         row = self.rows[pcb.pc]
@@ -57,29 +68,45 @@ class OllamaCPU:
     opcode, or missing a required field — the CPU sends a structured correction and
     regenerates once. If it is still invalid, the CPU fails closed: it returns a
     terminating RETURN carrying the error, which the kernel records in the trace.
+
+    keep_alive keeps the model resident between instructions/runs (Ollama unloads
+    after 5 min by default; a cold reload is the known latency spike). last_meta
+    exposes token counts and generation time for the metrics table.
     """
 
     def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434",
-                 seed: int = 0, max_retries: int = 1, log=None):
+                 seed: int = 0, max_retries: int = 1, log=None, keep_alive: str = "30m",
+                 num_predict: int = 200):
         self.model = model
         self.host = host
         self.seed = seed
         self.max_retries = max_retries
         self.log = log or (lambda *a: None)
+        self.keep_alive = keep_alive
+        self.num_predict = num_predict
+        self.last_meta: dict = {}
 
     def step(self, pcb) -> Instruction:
         reason = None
         raw = None
+        retries = 0
+        agg = {"prompt_tokens": 0, "eval_tokens": 0, "eval_ms": 0.0, "load_ms": 0.0}
         for attempt in range(self.max_retries + 1):
-            raw = self._generate(pcb, correction=reason)
+            out = self._generate(pcb, correction=reason)
+            raw, meta = out if isinstance(out, tuple) else (out, {})
+            for k in agg:
+                agg[k] += (meta.get(k) or 0)
             instr, err = self._parse_and_validate(raw)
             if err is None:
+                self.last_meta = {**agg, "retries": retries}
                 return instr
             reason = err
+            retries += 1
             if attempt < self.max_retries:
                 self.log(f"[cpu] rejected: {err} — giving the model one chance to fix it")
         # the one chance is spent and it's still invalid: throw the error (fail closed)
         self.log(f"[cpu] still invalid after retry: {reason} — failing closed")
+        self.last_meta = {**agg, "retries": retries}
         return Instruction(Op.RETURN, {"result": "SCHEMA VALIDATION FAILED", "error": reason, "raw": raw})
 
     def _parse_and_validate(self, raw):
@@ -102,7 +129,9 @@ class OllamaCPU:
             return None, f"{op.value} requires field(s) {miss}"
         return Instruction(op, args), None
 
-    def _generate(self, pcb, correction=None) -> str:
+    def _generate(self, pcb, correction=None):
+        """Return (response_text, meta). meta carries token counts and durations
+        (ms) pulled straight from Ollama's own timing fields."""
         import urllib.request
         try:
             body = json.dumps({
@@ -110,17 +139,25 @@ class OllamaCPU:
                 "prompt": self._build_prompt(pcb, correction),
                 "stream": False,
                 "format": "json",
-                "options": {"temperature": 0, "seed": self.seed, "num_predict": 200},
+                "keep_alive": self.keep_alive,
+                "options": {"temperature": 0, "seed": self.seed, "num_predict": self.num_predict},
             }).encode()
             req = urllib.request.Request(
                 self.host + "/api/generate", data=body,
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=180) as r:
-                return json.loads(r.read()).get("response", "")
+                resp = json.loads(r.read())
+            meta = {
+                "prompt_tokens": resp.get("prompt_eval_count"),
+                "eval_tokens": resp.get("eval_count"),
+                "eval_ms": (resp.get("eval_duration") or 0) / 1e6,
+                "load_ms": (resp.get("load_duration") or 0) / 1e6,
+            }
+            return resp.get("response", ""), meta
         except Exception as e:
             # device error (model down/timeout): fail closed with a valid terminating instruction
-            return json.dumps({"op": "RETURN", "args": {"result": "CPU device error", "error": str(e)}})
+            return json.dumps({"op": "RETURN", "args": {"result": "CPU device error", "error": str(e)}}), {}
 
     def _build_prompt(self, pcb, correction=None) -> str:
         history = "\n".join(

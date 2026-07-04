@@ -9,10 +9,14 @@ The cycle is the classic fetch-decode-execute-commit:
            which reads the process's context window)
   execute  run the opcode; anything touching the world goes through syscall()
   commit   append to the trace, update the window and the PCB, advance the PC
+
+Each cycle is timed: cpu_ms (the inference call) and commit_ms (kernel work) are
+recorded to the metrics table so we can see exactly where the time goes.
 """
 from __future__ import annotations
 
 import os
+import time
 
 from .isa import Instruction, Op
 from .pcb import PCB, Status
@@ -106,8 +110,13 @@ class Kernel:
                 pcb.status = Status.YIELDED
                 self.sched.add(pcb.pid)
                 break
-            instr = self.cpu.step(pcb)          # FETCH (+ DECODE in the CPU)
-            done = self._commit(pcb, instr)      # EXECUTE + COMMIT
+            t0 = time.perf_counter()
+            instr = self.cpu.step(pcb)                      # FETCH (+ DECODE in the CPU)
+            cpu_ms = (time.perf_counter() - t0) * 1000.0
+            t1 = time.perf_counter()
+            done = self._commit(pcb, instr)                 # EXECUTE + COMMIT
+            commit_ms = (time.perf_counter() - t1) * 1000.0
+            self._record_metrics(pcb, instr, cpu_ms, commit_ms)
             pcb.budget -= 1
             self.store.save_process(pcb.to_dict())
             if done:
@@ -117,6 +126,22 @@ class Kernel:
                 self.sched.add(pcb.pid)
                 self.log(f"[sched] pid={pcb.pid} yielded")
                 break
+
+    def _record_metrics(self, pcb, instr, cpu_ms, commit_ms) -> None:
+        """Persist one instruction's timing/token metrics. Never fatal to a run."""
+        meta = getattr(self.cpu, "last_meta", {}) or {}
+        res = pcb.context[-1]["result"] if pcb.context else None
+        fault = 1 if isinstance(res, dict) and "error" in res else 0
+        try:
+            self.store.metrics_append(
+                pid=pcb.pid, pc=pcb.pc - 1, op=instr.op.value,
+                cpu_type=type(self.cpu).__name__, model=getattr(self.cpu, "model", None),
+                cpu_ms=cpu_ms, commit_ms=commit_ms, retries=meta.get("retries", 0),
+                prompt_tokens=meta.get("prompt_tokens"), eval_tokens=meta.get("eval_tokens"),
+                eval_ms=meta.get("eval_ms"), load_ms=meta.get("load_ms"), fault=fault,
+            )
+        except Exception:
+            pass
 
     def _commit(self, pcb: PCB, instr) -> bool:
         """Execute one instruction, enforce capabilities, write the trace.

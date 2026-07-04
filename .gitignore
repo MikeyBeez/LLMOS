@@ -6,3 +6,5 @@ __pycache__/
 state/
 *.log
 .env
+.bak/
+run_bench.sh
