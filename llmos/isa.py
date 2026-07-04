@@ -33,3 +33,19 @@ class Instruction:
     @staticmethod
     def from_dict(d: dict) -> "Instruction":
         return Instruction(Op(d["op"]), d.get("args", {}) or {})
+
+
+# Per-opcode schema: the required fields an instruction's args must contain.
+# PLAN, YIELD, and RETURN take no required args.
+REQUIRED_ARGS: dict[Op, list[str]] = {
+    Op.CALL: ["name"],
+    Op.READ_MEM: ["key"],
+    Op.WRITE_MEM: ["key"],
+    Op.SPAWN: ["goal"],
+    Op.REQUEST: ["capability"],
+}
+
+
+def missing_args(op: Op, args: dict) -> list[str]:
+    """Required fields absent from args for this opcode (empty list == valid)."""
+    return [k for k in REQUIRED_ARGS.get(op, []) if k not in (args or {})]

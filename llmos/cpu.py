@@ -7,15 +7,14 @@ swappable device driver:
              machine without a stochastic model.
   ReplayCPU  re-emits the instructions recorded in a trace, so a stochastic run
              becomes deterministically replayable.
-  OllamaCPU  a real local model (via Ollama), temperature 0 + fixed seed. Robust
-             to bad output: a malformed/illegal emission degrades to a clean
-             RETURN, so the deterministic kernel never crashes on CPU output.
+  OllamaCPU  a real local model (via Ollama). Gives the model exactly ONE chance
+             to fix an invalid instruction, then fails closed.
 """
 from __future__ import annotations
 
 import json
 
-from .isa import Instruction, Op
+from .isa import Instruction, Op, missing_args
 
 
 class MockCPU:
@@ -51,23 +50,64 @@ class ReplayCPU:
 
 
 class OllamaCPU:
-    """Real CPU. Prompts a local model and parses its structured JSON output into one
-    instruction. Point it at the mini (localhost) or pop's GPU. temp 0 + fixed seed
-    for as-much-determinism-as-a-model-allows."""
+    """Real CPU. Prompts a local model and parses its JSON output into one instruction.
 
-    def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434", seed: int = 0):
+    Schema handling (Mikey, 2026-07-03): the model gets exactly ONE chance to fix an
+    invalid instruction. If the first emission is malformed — not JSON, unknown
+    opcode, or missing a required field — the CPU sends a structured correction and
+    regenerates once. If it is still invalid, the CPU fails closed: it returns a
+    terminating RETURN carrying the error, which the kernel records in the trace.
+    """
+
+    def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434",
+                 seed: int = 0, max_retries: int = 1, log=None):
         self.model = model
         self.host = host
         self.seed = seed
+        self.max_retries = max_retries
+        self.log = log or (lambda *a: None)
 
     def step(self, pcb) -> Instruction:
-        import urllib.request
-
+        reason = None
         raw = None
+        for attempt in range(self.max_retries + 1):
+            raw = self._generate(pcb, correction=reason)
+            instr, err = self._parse_and_validate(raw)
+            if err is None:
+                return instr
+            reason = err
+            if attempt < self.max_retries:
+                self.log(f"[cpu] rejected: {err} — giving the model one chance to fix it")
+        # the one chance is spent and it's still invalid: throw the error (fail closed)
+        self.log(f"[cpu] still invalid after retry: {reason} — failing closed")
+        return Instruction(Op.RETURN, {"result": "SCHEMA VALIDATION FAILED", "error": reason, "raw": raw})
+
+    def _parse_and_validate(self, raw):
+        """Return (Instruction, None) if valid, else (None, human-readable reason)."""
+        try:
+            d = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as e:
+            return None, f"output was not valid JSON ({e})"
+        if not isinstance(d, dict) or "op" not in d:
+            return None, "output must be a JSON object with an 'op' field"
+        try:
+            op = Op(str(d["op"]).strip().upper())
+        except ValueError:
+            return None, f"unknown op {d.get('op')!r}; must be one of {[o.value for o in Op]}"
+        args = d.get("args") or {}
+        if not isinstance(args, dict):
+            return None, "'args' must be an object"
+        miss = missing_args(op, args)
+        if miss:
+            return None, f"{op.value} requires field(s) {miss}"
+        return Instruction(op, args), None
+
+    def _generate(self, pcb, correction=None) -> str:
+        import urllib.request
         try:
             body = json.dumps({
                 "model": self.model,
-                "prompt": self._build_prompt(pcb),
+                "prompt": self._build_prompt(pcb, correction),
                 "stream": False,
                 "format": "json",
                 "options": {"temperature": 0, "seed": self.seed, "num_predict": 200},
@@ -77,38 +117,31 @@ class OllamaCPU:
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=180) as r:
-                resp = json.loads(r.read())
-            raw = resp.get("response", "{}")
-            d = json.loads(raw)
-            op = Op(str(d.get("op", "RETURN")).strip().upper())   # ValueError if illegal
-            args = d.get("args") or {}
-            if not isinstance(args, dict):
-                args = {}
-            return Instruction(op, args)
-        except ValueError as e:
-            # illegal opcode: an illegal-instruction fault. Degrade to a clean stop.
-            return Instruction(Op.RETURN, {"result": "illegal instruction from CPU", "error": str(e), "raw": raw})
+                return json.loads(r.read()).get("response", "")
         except Exception as e:
-            # device error (model down, timeout, bad JSON): fail the process cleanly.
-            return Instruction(Op.RETURN, {"result": "CPU device error", "error": str(e), "raw": raw})
+            # device error (model down/timeout): fail closed with a valid terminating instruction
+            return json.dumps({"op": "RETURN", "args": {"result": "CPU device error", "error": str(e)}})
 
-    def _build_prompt(self, pcb) -> str:
+    def _build_prompt(self, pcb, correction=None) -> str:
         history = "\n".join(
             f"  step {s['pc']}: {s['op']} {json.dumps(s['args'])} -> {json.dumps(s['result'])}"
             for s in pcb.context
         ) or "  (none yet)"
-        return (
-            "You are the CPU of LLMOS. Each turn you emit exactly ONE instruction as a single "
-            "JSON object and nothing else.\n\n"
-            "Instruction set (pick one op):\n"
-            '  {"op":"PLAN","args":{"text":"..."}}                 think; no world effect\n'
-            '  {"op":"CALL","args":{"name":"clock.now","args":{}}} call a device syscall\n'
-            '  {"op":"WRITE_MEM","args":{"key":"...","value":<any>}} save a value to memory\n'
-            '  {"op":"READ_MEM","args":{"key":"..."}}              load a value from memory\n'
-            '  {"op":"RETURN","args":{"result":<any>}}             finish the goal\n\n'
-            "Available syscalls for CALL: clock.now  (returns the current UTC time).\n"
-            "Rules: use the results of earlier steps (shown below); do NOT repeat a step you "
-            "already completed; when the goal is achieved, emit RETURN.\n\n"
+        head = ""
+        if correction:
+            head = (f"Your previous output was REJECTED: {correction}.\n"
+                    "Return exactly ONE corrected JSON instruction and nothing else.\n\n")
+        return head + (
+            "You are the CPU of LLMOS. Emit exactly ONE instruction as a single JSON object "
+            "and nothing else.\n\n"
+            "Instruction set (pick one op; required args shown):\n"
+            '  {"op":"PLAN","args":{"text":"..."}}\n'
+            '  {"op":"CALL","args":{"name":"clock.now","args":{}}}   (requires: name)\n'
+            '  {"op":"WRITE_MEM","args":{"key":"...","value":<any>}}  (requires: key)\n'
+            '  {"op":"READ_MEM","args":{"key":"..."}}                (requires: key)\n'
+            '  {"op":"RETURN","args":{"result":<any>}}\n\n'
+            "Available syscalls for CALL: clock.now (returns the current UTC time).\n"
+            "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"
             f"GOAL: {pcb.goal}\n"
             f"STEPS SO FAR:\n{history}\n\n"
             "Next instruction (one JSON object):"

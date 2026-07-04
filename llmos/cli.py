@@ -41,7 +41,7 @@ def _dump_mem(store):
 
 
 def cmd_run(args):
-    cpu = OllamaCPU(model=args.model) if args.ollama else None
+    cpu = OllamaCPU(model=args.model, log=print) if args.ollama else None
     authority = PolicyAuthority(grant=set(args.grant)) if args.grant else None
     kernel, store = _kernel(cpu, authority)
     if args.ollama:
