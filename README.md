@@ -25,6 +25,8 @@ Instead of a deterministic silicon CPU executing machine instructions, the execu
 
 **Interaction — the human ask-channel.** A sandboxed process that needs a privileged capability emits `REQUEST`; the kernel routes it to an `Authority`. Headless that's a policy; interactively it's you (a decision box), and your approval is the grant. A tainted process is auto-denied any privilege re-grant. See [INTERACTION.md](INTERACTION.md).
 
+**Boot — a persistent kernel service.** `kerneld` boots one kernel and keeps it running on a control socket; `llmos submit <goal>` sends it a job and streams the instruction trace back live (the spectator role). A launchd agent (`launchd/`) runs it as `llmos-kernel` at login with KeepAlive — boot, supervision, and restart delegated to macOS.
+
 ### Run it
 
 ```
@@ -55,7 +57,15 @@ python3 -m llmos.cli run elevate                      # default deny -> blocked
 # list processes, and reconstruct a run's state from its trace
 python3 -m llmos.cli ps
 python3 -m llmos.cli replay 1
+
+# or boot it as a persistent service and submit jobs you watch live
+python3 -m llmos.kerneld &                 # boot the kernel daemon
+python3 -m llmos.cli submit hello          # stream the trace back live
+python3 -m llmos.cli submit elevate --grant mem.write
+python3 -m llmos.cli shutdown              # halt the daemon
 ```
+
+To run the kernel as a real background service at login, see [launchd/README.md](launchd/README.md).
 
 ### Module map
 
@@ -71,8 +81,10 @@ python3 -m llmos.cli replay 1
 - `llmos/agent_runner.py` — one agent = one real macOS process, talking to the kernel over a socket
 - `llmos/procd.py` — the process supervisor (spawn, SIGSTOP/SIGCONT scheduling, reap)
 - `llmos/replay.py` — reconstruct state from the trace
-- `llmos/cli.py` — the shell: `run`, `runp`, `ps`, `replay`
+- `llmos/cli.py` — the shell: `run`, `runp`, `ps`, `replay`, `submit`, `shutdown`
+- `llmos/kerneld.py` — the persistent kernel daemon (boot once, submit jobs, stream traces live)
+- `bin/llmos-kernel`, `launchd/` — named wrapper + launchd agent to run the kernel as a macOS service
 
 ## Next
 
-Teach a local model the full ISA so a real LLM can drive multi-step goals reliably; stream the live trace to an attached human (`attach`) and turn corrections into durable protocols; run `procd` as a launchd daemon with a named wrapper (`llmos-kernel`) and shell-out hardening; add a `web` device (untrusted by default) and `sandbox-exec` profiles for web-content agents.
+Teach a local model the full ISA so a real LLM can drive multi-step goals reliably; `attach` to an in-flight process and turn corrections into durable protocols (the spectator and teacher roles); add a `web` device (untrusted by default) and `sandbox-exec` profiles for web-content agents; and let `kerneld` schedule many submitted jobs concurrently rather than one at a time.

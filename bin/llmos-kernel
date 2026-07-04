@@ -1,0 +1,15 @@
+#!/bin/bash
+# Named wrapper for the LLMOS kernel daemon.
+#
+# Two reasons this exists (both from Mikey's operational protocols):
+#  - named-process-wrappers: a LaunchAgent that execs a bare `python3` shows up
+#    anonymously in Login Items / `ps`. Running through this script makes it
+#    legible as `llmos-kernel`.
+#  - shell-out hardening: launchd respawns with a *different* environment than an
+#    interactive shell (no profile, minimal PATH). So we set PYTHONPATH explicitly
+#    and use an absolute interpreter path rather than relying on the login shell.
+
+export PYTHONPATH="$HOME/Code/LLMOS"
+PY="/opt/homebrew/bin/python3"
+[ -x "$PY" ] || PY="$(command -v python3)"
+exec "$PY" -m llmos.kerneld

@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import socket
 import tempfile
 
 from .authority import PolicyAuthority
@@ -21,6 +23,7 @@ from .store import Store
 
 DB = os.path.expanduser("~/Code/LLMOS/state/llmos.db")
 STATE_DIR = os.path.expanduser("~/Code/LLMOS/state")
+CONTROL_SOCK = os.path.join(STATE_DIR, "llmos-control.sock")
 
 
 def _kernel(cpu=None, authority=None):
@@ -88,6 +91,42 @@ def cmd_replay(args):
     store.close()
 
 
+def cmd_submit(args):
+    """Submit a job to a running kerneld and watch its trace stream back live."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(CONTROL_SOCK)
+    except (FileNotFoundError, ConnectionRefusedError):
+        print("kerneld is not running. Start it with:  PYTHONPATH=~/Code/LLMOS python3 -m llmos.kerneld")
+        return
+    s.sendall((json.dumps({"t": "submit", "goal": args.goal,
+                           "budget": args.budget, "grant": list(args.grant or [])}) + "\n").encode())
+    rfile = s.makefile("r", encoding="utf-8")
+    for line in rfile:
+        msg = json.loads(line)
+        if msg["t"] == "log":
+            print(msg["line"])
+        elif msg["t"] == "done":
+            print(f"\n[done] pid={msg['pid']} status={msg['status']} result={msg['result']}")
+            break
+        elif msg["t"] == "error":
+            print(f"[error] {msg['error']}")
+            break
+    s.close()
+
+
+def cmd_shutdown(args):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(CONTROL_SOCK)
+    except (FileNotFoundError, ConnectionRefusedError):
+        print("kerneld is not running.")
+        return
+    s.sendall((json.dumps({"t": "shutdown"}) + "\n").encode())
+    print("[shutdown] sent to kerneld")
+    s.close()
+
+
 def main():
     ap = argparse.ArgumentParser(prog="llmos")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -113,6 +152,15 @@ def main():
     rpl = sub.add_parser("replay", help="reconstruct a run from its trace")
     rpl.add_argument("pid", type=int)
     rpl.set_defaults(fn=cmd_replay)
+
+    sm = sub.add_parser("submit", help="submit a job to a running kerneld and watch it live")
+    sm.add_argument("goal")
+    sm.add_argument("--budget", type=int, default=32)
+    sm.add_argument("--grant", nargs="*", default=[])
+    sm.set_defaults(fn=cmd_submit)
+
+    sd = sub.add_parser("shutdown", help="ask a running kerneld to halt")
+    sd.set_defaults(fn=cmd_shutdown)
 
     args = ap.parse_args()
     args.fn(args)
