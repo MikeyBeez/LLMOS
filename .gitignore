@@ -8,3 +8,5 @@ state/
 .env
 .bak/
 run_bench.sh
+gsm8k_*.jsonl
+state/
