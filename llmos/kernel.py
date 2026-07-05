@@ -64,15 +64,17 @@ class Kernel:
         self.log(f"[boot] scheduler up; next pid={self._next_pid}; kernel ready")
 
     # --- process lifecycle ----------------------------------------------
-    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32, contract=None, background: bool = False) -> int:
+    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32, contract=None, background: bool = False, topic=None) -> int:
         pid = self._next_pid
         self._next_pid += 1
         caps = set(capabilities) if capabilities is not None else set(DEFAULT_CAPS)
         pcb = PCB(pid=pid, goal=goal, ppid=ppid, capabilities=caps, budget=budget, status=Status.READY)
         pcb.contract = contract if contract is not None else self._derive_contract(goal)
         pcb.background = background
+        pcb.topic = topic if topic is not None else self._classify_topic(goal)
         self.procs[pid] = pcb
         self.store.save_process(pcb.to_dict())
+        self._page_in_topic(pcb)
         if background:
             self.idle.append(("proc", pid))
             self.log(f"[spawn:bg] pid={pid} goal={goal!r} (idle-time)")
@@ -137,6 +139,52 @@ class Kernel:
                  "status": pcb.status.value, "instructions": pcb.pc}
         self.store.mem_write("catalog", f"proc-{pid}", entry)
         self.log(f"[curator] cataloged pid={pid}: wrote {wrote or []} -> catalog/proc-{pid}")
+
+    # --- topic routing: load only the relevant topic's context -----------
+    def _classify_topic(self, goal: str) -> str:
+        """Route a goal to a topic by keyword overlap with each topic's name and
+        the keys stored under it. Deterministic; a cheaper model can do the fuzzy
+        version in the background. Returns 'general' when nothing clearly matches."""
+        topics = [t for t in self.store.topics() if t and t != "general"]
+        if not topics:
+            return "general"
+        words = set(re.findall(r"[a-z0-9]+", (goal or "").lower()))
+        best, best_score = "general", 0
+        for t in topics:
+            kw = set(re.findall(r"[a-z0-9]+", t.lower()))
+            for k in self.store.mem_by_topic(t):
+                kw |= set(re.findall(r"[a-z0-9]+", k.lower()))
+            score = len(words & kw)
+            if score > best_score:
+                best, best_score = t, score
+        return best if best_score > 0 else "general"
+
+    def _page_in_topic(self, pcb) -> None:
+        """Page this process's topic into the window — and only that topic."""
+        if not pcb.topic or pcb.topic == "general":
+            return
+        loaded = self.store.mem_by_topic(pcb.topic)
+        for k, v in loaded.items():
+            pcb.context.append({"pc": -1, "op": "READ_MEM", "args": {"key": k, "topic": pcb.topic}, "result": v})
+            if k not in pcb.working_set:
+                pcb.working_set.append(k)
+        if loaded:
+            self.log(f"[paging] pid={pcb.pid} topic={pcb.topic!r}: paged in {list(loaded)} (other topics not loaded)")
+
+    def switch_topic(self, pcb, new_topic: str) -> None:
+        """The conversation moved to a new topic: evict the old topic's context
+        from the window and page in the new one. (real estate -> particle physics)"""
+        if new_topic == pcb.topic:
+            return
+        old = pcb.topic
+        old_keys = set(self.store.mem_by_topic(old)) if old and old != "general" else set()
+        if old_keys:
+            pcb.context = [c for c in pcb.context
+                           if not (c["op"] == "READ_MEM" and (c.get("args") or {}).get("key") in old_keys)]
+            pcb.working_set = [k for k in pcb.working_set if k not in old_keys]
+        pcb.topic = new_topic
+        self.log(f"[paging] pid={pcb.pid} topic switch {old!r} -> {new_topic!r}: evicted {sorted(old_keys)}")
+        self._page_in_topic(pcb)
 
     # --- the main loop --------------------------------------------------
     def run(self) -> None:

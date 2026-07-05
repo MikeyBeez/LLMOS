@@ -36,6 +36,7 @@ class PCB:
     contract: dict = field(default_factory=dict)   # required postconditions (keys that must exist before RETURN)
     contract_tries: int = 0                         # how many times the kernel has re-trapped a premature RETURN
     background: bool = False                        # runs in idle time (may use a cheaper CPU)
+    topic: str = "general"                          # which topic's context this process loads
 
     def to_dict(self) -> dict:
         d = asdict(self)
