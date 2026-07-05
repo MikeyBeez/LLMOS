@@ -77,7 +77,7 @@ class CodingCPU(OllamaCPU):
     the hand-escaped JSON-ISA. The kernel still receives ordinary Instructions."""
 
     def __init__(self, repo, problem, f2p, **kw):
-        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=32768, **kw)
+        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=16384, **kw)
         self.repo, self.problem, self.f2p = repo, problem, f2p
 
     def _system(self):
