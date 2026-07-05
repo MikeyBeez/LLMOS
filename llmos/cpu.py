@@ -268,6 +268,7 @@ class OllamaCPU:
             '  {"op":"CALL","args":{"name":"clock.now","args":{}}}   (requires: name)\n'
             '  {"op":"WRITE_MEM","args":{"key":"...","value":<any>}}  (requires: key)\n'
             '  {"op":"READ_MEM","args":{"key":"..."}}                (requires: key)\n'
+            '  {"op":"EVICT","args":{"key":"..."}}   (drop a paged-in key from your window once done)\n'
             '  {"op":"RETURN","args":{"result":<any>}}\n\n'
             "Available syscalls for CALL: clock.now (returns the current UTC time).\n"
             "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"

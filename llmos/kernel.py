@@ -224,6 +224,15 @@ class Kernel:
             elif op == Op.WRITE_MEM:
                 result = self.syscall(pcb, "mem.write",
                                       {"ns": args.get("ns", "mem"), "key": args["key"], "value": args.get("value")})
+            elif op == Op.EVICT:
+                # free the window: drop this key's paged-in span(s) from the context
+                # (RAM), but leave it in the store (disk) and in the trace (audit).
+                key = args["key"]
+                before = len(pcb.context)
+                pcb.context = [c for c in pcb.context
+                               if not (c["op"] == "READ_MEM" and (c.get("args") or {}).get("key") == key)]
+                pcb.working_set = [k for k in pcb.working_set if k != key]
+                result = {"evicted": key, "spans_freed": before - len(pcb.context)}
             elif op == Op.SPAWN:
                 child = self.spawn(args["goal"], args.get("capabilities"), ppid=pcb.pid)
                 result = {"spawned": child}

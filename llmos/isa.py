@@ -15,6 +15,7 @@ class Op(str, Enum):
     PLAN = "PLAN"            # reason / set a plan; no world effect
     CALL = "CALL"            # syscall to a device (capability-checked)
     READ_MEM = "READ_MEM"    # page a memory key into the window
+    EVICT = "EVICT"          # drop a paged-in key from the window (stays on disk)
     WRITE_MEM = "WRITE_MEM"  # persist a value to memory (capability-checked)
     SPAWN = "SPAWN"          # create a child process
     REQUEST = "REQUEST"      # ask the authority (human/policy) to grant a capability
@@ -40,6 +41,7 @@ class Instruction:
 REQUIRED_ARGS: dict[Op, list[str]] = {
     Op.CALL: ["name"],
     Op.READ_MEM: ["key"],
+    Op.EVICT: ["key"],
     Op.WRITE_MEM: ["key"],
     Op.SPAWN: ["goal"],
     Op.REQUEST: ["capability"],
