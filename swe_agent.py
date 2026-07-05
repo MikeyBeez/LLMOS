@@ -25,6 +25,7 @@ HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
 BUDGET = 30
+FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
 TOOLS = [
@@ -128,6 +129,15 @@ class CodingCPU(OllamaCPU):
                                  "tool_calls": [{"id": cid, "type": "function",
                                                  "function": {"name": "finish", "arguments": {"summary": summ}}}]})
                     msgs.append({"role": "tool", "tool_call_id": cid, "content": note})
+        # forcing function: if it has explored a while but never edited, push it to edit now
+        did_edit = any(s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.edit"
+                       for s in pcb.context)
+        n_calls = sum(1 for s in pcb.context if s.get("op") == "CALL")
+        if not did_edit and n_calls >= FORCE_AFTER:
+            msgs.append({"role": "user", "content":
+                         f"You have run {n_calls} tool calls and have already reproduced and located the bug, "
+                         "but you have not edited any file yet. Stop investigating now. Call fs_edit with the "
+                         "smallest change that fixes the bug, then re-run your reproduction to verify it."})
         return msgs
 
     def step(self, pcb):
