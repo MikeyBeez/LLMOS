@@ -11,6 +11,8 @@ uses that tag to defend against prompt injection (see Kernel._apply_taint).
 """
 from __future__ import annotations
 
+import ast
+import operator
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +42,7 @@ class SyscallTable:
         self.register("mem.read", "mem.read", self._mem_read)
         self.register("mem.write", "mem.write", self._mem_write)
         self.register("fs.read", "fs.read", self._fs_read)
+        self.register("calc", "dev.calc", self._calc)
 
     def dispatch(self, pcb, name: str, args: dict) -> Any:
         if name not in self.table:
@@ -78,3 +81,30 @@ class SyscallTable:
         untrusted = [os.path.realpath(os.path.expanduser(u)) for u in self.fs_policy.get("untrusted", [])]
         prov = "untrusted" if any(p == u or p.startswith(u + os.sep) for u in untrusted) else "trusted"
         return {"content": content, "provenance": prov, "path": p}
+
+    # a deterministic calculator: the CPU offloads exact arithmetic here instead
+    # of doing it in its head (the class of error a stochastic CPU makes).
+    _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+            ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos}
+
+    def _eval_node(self, node):
+        if isinstance(node, ast.Expression):
+            return self._eval_node(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in self._OPS:
+            return self._OPS[type(node.op)](self._eval_node(node.left), self._eval_node(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in self._OPS:
+            return self._OPS[type(node.op)](self._eval_node(node.operand))
+        raise ValueError("only numbers and + - * / // % ** are allowed")
+
+    def _calc(self, pcb, args) -> dict:
+        expr = str(args.get("expr", "")).strip()
+        try:
+            val = self._eval_node(ast.parse(expr, mode="eval"))
+        except Exception as e:
+            return {"expr": expr, "error": f"could not evaluate: {e}"}
+        if isinstance(val, float) and val.is_integer():
+            val = int(val)
+        return {"expr": expr, "value": val}

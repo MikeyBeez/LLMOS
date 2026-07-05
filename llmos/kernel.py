@@ -33,7 +33,7 @@ _DEFAULT_FS_POLICY = {
     "untrusted": [os.path.join(_EXAMPLES, "untrusted")],
 }
 
-DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read"}
+DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read", "dev.calc"}
 # capabilities a process loses the instant untrusted data enters its window
 PRIVILEGED_CAPS = {"mem.write", "spawn"}
 CONTRACT_MAX_TRIES = 4   # times the kernel re-traps a premature RETURN before letting it through

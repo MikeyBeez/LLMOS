@@ -270,7 +270,11 @@ class OllamaCPU:
             '  {"op":"READ_MEM","args":{"key":"..."}}                (requires: key)\n'
             '  {"op":"EVICT","args":{"key":"..."}}   (drop a paged-in key from your window once done)\n'
             '  {"op":"RETURN","args":{"result":<any>}}\n\n'
-            "Available syscalls for CALL: clock.now (returns the current UTC time).\n"
+            "Available syscalls for CALL: clock.now (current UTC time); "
+            "calc (evaluate an arithmetic expression EXACTLY).\n"
+            "Do ALL arithmetic by CALLing calc, for example:\n"
+            '  {"op":"CALL","args":{"name":"calc","args":{"expr":"34800/240"}}}\n'
+            "Never compute multi-step arithmetic in your head.\n"
             "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"
             f"GOAL: {pcb.goal}\n"
             f"STEPS SO FAR:\n{history}\n\n"
