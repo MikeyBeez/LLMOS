@@ -206,7 +206,10 @@ class OllamaCPU:
 
         if re.search(r"\b(return|final answer|task (is )?complete|done|finished|goal (is )?met|"
                      r"already saved|has been saved|saved (it|the))\b", t):
-            return Instruction(Op.RETURN, {"result": text[:200].strip()})
+            # take the last non-empty sentence/line as the answer, not the reasoning preamble
+            parts = [p.strip() for p in re.split(r"[\n.]+", text) if p.strip()]
+            answer = parts[-1] if parts else text.strip()
+            return Instruction(Op.RETURN, {"result": answer[:200]})
         if (("clock" in t) or ("current time" in t) or (" time" in t)) and not called_clock:
             return Instruction(Op.CALL, {"name": "clock.now", "args": {}})
         if re.search(r"\b(write|save|store|persist)\b", t) and ("mem" in t or "memory" in t or called_clock):
