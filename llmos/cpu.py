@@ -75,7 +75,7 @@ class OllamaCPU:
     counts and generation time for the metrics table.
     """
 
-    def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434",
+    def __init__(self, model: str = "ornith:35b", host: str = "http://127.0.0.1:11435",
                  seed: int = 0, max_retries: int = 1, log=None, keep_alive: str = "30m",
                  num_predict: int = 512):
         self.model = model
