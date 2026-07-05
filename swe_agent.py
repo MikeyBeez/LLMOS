@@ -24,7 +24,7 @@ from llmos.isa import Instruction, Op
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
-BUDGET = 40
+BUDGET = 30
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
 TOOLS = [
@@ -91,7 +91,9 @@ class CodingCPU(OllamaCPU):
             "3. FIX: fs_edit to replace a small VERBATIM snippet with the correction.\n"
             "4. VERIFY: re-run your reproduction with shell_exec and confirm the behavior is now correct.\n"
             "5. FINISH: only after verification, call finish with a short summary.\n\n"
-            "Do NOT modify test files. Make the smallest change that fixes the issue. Call exactly one tool per turn."
+            "Investigate just enough to find the cause, then EDIT -- do not keep exploring once you have located the bug. "
+            "Do NOT modify test files. Make the smallest change that fixes the issue. "
+            "Every turn MUST call exactly one tool; never reply with prose alone."
         )
 
     def _messages(self, pcb):
@@ -108,6 +110,14 @@ class CodingCPU(OllamaCPU):
                              "tool_calls": [{"id": cid, "type": "function",
                                              "function": {"name": tool, "arguments": targs}}]})
                 msgs.append({"role": "tool", "tool_call_id": cid, "content": _short(s["result"])})
+            elif op == "PLAN":
+                # the model replied with prose and no tool call; feed the reasoning back
+                # plus an explicit nudge so the next turn differs (breaks temp-0 loops)
+                txt = s["args"].get("text", "") if isinstance(s.get("args"), dict) else ""
+                msgs.append({"role": "assistant", "content": txt[:600]})
+                msgs.append({"role": "user", "content":
+                             "You replied with reasoning but did not call a tool. Call exactly ONE tool now "
+                             "(shell_exec, fs_read, fs_edit, or finish) to act on that reasoning. Do not reply with prose."})
             elif op == "RETURN":
                 # a trapped early finish (edit contract unmet): surface the note so the model corrects
                 note = (s.get("result") or {}).get("note") if isinstance(s.get("result"), dict) else None
