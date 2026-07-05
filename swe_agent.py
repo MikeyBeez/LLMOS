@@ -24,7 +24,7 @@ from llmos.isa import Instruction, Op
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
-BUDGET = 30
+BUDGET = 40
 FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
@@ -77,9 +77,11 @@ class CodingCPU(OllamaCPU):
     """Overrides step() to drive the model through native tool-calling instead of
     the hand-escaped JSON-ISA. The kernel still receives ordinary Instructions."""
 
-    def __init__(self, repo, problem, f2p, **kw):
+    def __init__(self, repo, problem, **kw):
         super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=16384, **kw)
-        self.repo, self.problem, self.f2p = repo, problem, f2p
+        # the agent receives ONLY the repo path and the issue text -- never the
+        # grading tests, gold patch, or any per-instance hint. keep it that way.
+        self.repo, self.problem = repo, problem
 
     def _system(self):
         return (
@@ -160,6 +162,16 @@ class CodingCPU(OllamaCPU):
             except Exception:
                 args = {"_raw": args}
         if tool == "finish":
+            # verify gate: don't allow finishing unless a reproduction was re-run
+            # AFTER the last edit. general operating discipline; no problem data.
+            edits = [i for i, s in enumerate(pcb.context)
+                     if s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.edit"]
+            shells = [i for i, s in enumerate(pcb.context)
+                      if s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "shell.exec"]
+            if edits and (not shells or max(shells) < max(edits)):
+                return Instruction(Op.PLAN, {"text":
+                    "Do not finish yet: you have not re-run your reproduction since your last edit. "
+                    "Run your reproduction with shell_exec to confirm the fix changes the behavior."})
             return Instruction(Op.RETURN, {"result": args.get("summary", "done")})
         sysname = TOOL2SYS.get(tool)
         if not sysname:
@@ -195,7 +207,7 @@ def setup(inst):
     shutil.rmtree(repo, ignore_errors=True)
     os.makedirs(repo)
     sh("git init -q", cwd=repo)
-    sh("git remote add origin https://github.com/sympy/sympy.git", cwd=repo)
+    sh(f"git remote add origin https://github.com/{inst['repo']}.git", cwd=repo)
     sh(f"git fetch -q --depth 1 origin {inst['base_commit']}", cwd=repo, timeout=300)
     sh("git checkout -q FETCH_HEAD", cwd=repo)
     sh("git config user.email a@b.c; git config user.name a", cwd=repo)
@@ -207,7 +219,7 @@ def setup(inst):
 def run_agent(inst, repo):
     db = tempfile.mktemp(suffix=".db")
     store = Store(db)
-    cpu = CodingCPU(repo, inst["problem_statement"], inst["FAIL_TO_PASS"], log=lambda *a: None)
+    cpu = CodingCPU(repo, inst["problem_statement"], log=lambda *a: None)
     pol = {"allowed": [repo], "writable": [repo], "untrusted": []}
     k = Kernel(store, cpu, log=lambda *a: None, fs_policy=pol)
     k.boot()
