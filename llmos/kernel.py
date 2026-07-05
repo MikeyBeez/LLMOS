@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections import deque
 
 from .isa import Instruction, Op
 from .pcb import PCB, Status
@@ -39,15 +40,17 @@ CONTRACT_MAX_TRIES = 4   # times the kernel re-traps a premature RETURN before l
 
 
 class Kernel:
-    def __init__(self, store, cpu, log=print, fs_policy=None, authority=None):
+    def __init__(self, store, cpu, log=print, fs_policy=None, authority=None, bg_cpu=None):
         self.store = store
         self.cpu = cpu
+        self.bg_cpu = bg_cpu          # optional cheaper CPU for idle-time work (e.g. llama on the mac)
         self.sys = SyscallTable(store, fs_policy=fs_policy or _DEFAULT_FS_POLICY)
         self.authority = authority or DenyAuthority()
         self.sched = Scheduler()
         self.procs: dict[int, PCB] = {}
         self._next_pid = 1
         self.log = log
+        self.idle = deque()          # idle-time work: ("task", fn) housekeeping or ("proc", pid)
 
     # --- boot -----------------------------------------------------------
     def boot(self, boot_rom_keys: tuple = ()) -> None:
@@ -61,16 +64,21 @@ class Kernel:
         self.log(f"[boot] scheduler up; next pid={self._next_pid}; kernel ready")
 
     # --- process lifecycle ----------------------------------------------
-    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32, contract=None) -> int:
+    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32, contract=None, background: bool = False) -> int:
         pid = self._next_pid
         self._next_pid += 1
         caps = set(capabilities) if capabilities is not None else set(DEFAULT_CAPS)
         pcb = PCB(pid=pid, goal=goal, ppid=ppid, capabilities=caps, budget=budget, status=Status.READY)
         pcb.contract = contract if contract is not None else self._derive_contract(goal)
+        pcb.background = background
         self.procs[pid] = pcb
         self.store.save_process(pcb.to_dict())
-        self.sched.add(pid)
-        self.log(f"[spawn] pid={pid} goal={goal!r} caps={sorted(caps)}")
+        if background:
+            self.idle.append(("proc", pid))
+            self.log(f"[spawn:bg] pid={pid} goal={goal!r} (idle-time)")
+        else:
+            self.sched.add(pid)
+            self.log(f"[spawn] pid={pid} goal={goal!r} caps={sorted(caps)}")
         return pid
 
     # --- the syscall channel (in-process now; a socket later) -----------
@@ -118,12 +126,42 @@ class Kernel:
         present = set(self.store.mem_list("mem"))
         return [k for k in req if k not in present]
 
+    # --- idle-time curation: catalog a finished process (deterministic) ---
+    def _curate(self, pid: int) -> None:
+        pcb = self.procs.get(pid)
+        if pcb is None:
+            return
+        wrote = [c["args"].get("key") for c in pcb.context
+                 if c["op"] == "WRITE_MEM" and c["args"].get("key")]
+        entry = {"goal": pcb.goal, "wrote": wrote, "result": pcb.result,
+                 "status": pcb.status.value, "instructions": pcb.pc}
+        self.store.mem_write("catalog", f"proc-{pid}", entry)
+        self.log(f"[curator] cataloged pid={pid}: wrote {wrote or []} -> catalog/proc-{pid}")
+
     # --- the main loop --------------------------------------------------
     def run(self) -> None:
-        while self.sched.has_work():
-            pid = self.sched.next()
-            self._run_slice(self.procs[pid])
-        self.log("[kernel] no ready processes; run loop idle")
+        # Foreground first. When the CPU would otherwise sit idle — nothing ready,
+        # e.g. while the human reads the last result — spend that time on background
+        # work: curation, cataloging, reflection, speculative inference. Idle-time
+        # processes can run on a cheaper CPU (self.bg_cpu, e.g. llama on the mac).
+        while self.sched.has_work() or self.idle:
+            if self.sched.has_work():
+                self._run_slice(self.procs[self.sched.next()])
+            else:
+                kind, item = self.idle.popleft()
+                if kind == "task":
+                    item()
+                elif kind == "proc":
+                    cpu = self.bg_cpu or self.cpu
+                    label = type(cpu).__name__ + (("/" + cpu.model) if getattr(cpu, "model", None) else "")
+                    self.log(f"[idle] background pid={item} on {label}")
+                    saved = self.cpu
+                    self.cpu = cpu
+                    try:
+                        self._run_slice(self.procs[item])
+                    finally:
+                        self.cpu = saved
+        self.log("[kernel] foreground + idle queues drained")
 
     def _run_slice(self, pcb: PCB) -> None:
         pcb.status = Status.RUNNING
@@ -219,6 +257,8 @@ class Kernel:
                     if missing:
                         result["contract_violation"] = missing
                         self.log(f"[contract] pid={pcb.pid} RETURN allowed after {pcb.contract_tries} retries but still missing {missing}")
+                    if not pcb.background:
+                        self.idle.append(("task", (lambda p=pcb.pid: self._curate(p))))
             else:
                 raise CapabilityError(f"illegal instruction: {op}")
         except CapabilityError as e:

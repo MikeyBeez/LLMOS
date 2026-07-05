@@ -35,6 +35,7 @@ class PCB:
     tainted: bool = False               # has untrusted data entered this process's window?
     contract: dict = field(default_factory=dict)   # required postconditions (keys that must exist before RETURN)
     contract_tries: int = 0                         # how many times the kernel has re-trapped a premature RETURN
+    background: bool = False                        # runs in idle time (may use a cheaper CPU)
 
     def to_dict(self) -> dict:
         d = asdict(self)
