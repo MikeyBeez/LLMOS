@@ -7,17 +7,23 @@ swappable device driver:
              machine without a stochastic model.
   ReplayCPU  re-emits the instructions recorded in a trace, so a stochastic run
              becomes deterministically replayable.
-  OllamaCPU  a real local model (via Ollama). Gives the model exactly ONE chance
-             to fix an invalid instruction, then fails closed.
+  OllamaCPU  a real local model (via Ollama).
 
-Every CPU exposes `last_meta` after each step(): a small dict of timing/token
-info the kernel records into the metrics table. For the deterministic CPUs it is
-empty (the kernel still times the call itself); for OllamaCPU it carries the
-model's token counts and generation time, so we can see where the seconds go.
+Decode is interpretive (ARCHITECTURE.md): the model does NOT have to return
+clean JSON. It may think out loud, wrap the answer in prose, or fence it in
+markdown. The CPU's decode stage does the work of turning that free output into
+a structured instruction — it strips reasoning, extracts any JSON object the
+model emitted, and if there is none, parses the intent from plain language.
+Whatever it produces is then run through the schema validator (the gate). The
+model gets one corrective retry; if decode still fails, the CPU fails closed.
+
+Every CPU exposes `last_meta` after each step(): timing/token info the kernel
+records into the metrics table.
 """
 from __future__ import annotations
 
 import json
+import re
 
 from .isa import Instruction, Op, missing_args
 
@@ -61,22 +67,17 @@ class ReplayCPU:
 
 
 class OllamaCPU:
-    """Real CPU. Prompts a local model and parses its JSON output into one instruction.
+    """Real CPU. Prompts a local model and DECODES its free-form output into one
+    instruction — the model is not required to return JSON.
 
-    Schema handling (Mikey, 2026-07-03): the model gets exactly ONE chance to fix an
-    invalid instruction. If the first emission is malformed — not JSON, unknown
-    opcode, or missing a required field — the CPU sends a structured correction and
-    regenerates once. If it is still invalid, the CPU fails closed: it returns a
-    terminating RETURN carrying the error, which the kernel records in the trace.
-
-    keep_alive keeps the model resident between instructions/runs (Ollama unloads
-    after 5 min by default; a cold reload is the known latency spike). last_meta
-    exposes token counts and generation time for the metrics table.
+    keep_alive keeps the model resident between calls (Ollama unloads after 5 min
+    by default; the cold reload is the big latency spike). last_meta exposes token
+    counts and generation time for the metrics table.
     """
 
     def __init__(self, model: str = "qwen2.5:latest", host: str = "http://localhost:11434",
                  seed: int = 0, max_retries: int = 1, log=None, keep_alive: str = "30m",
-                 num_predict: int = 200):
+                 num_predict: int = 512):
         self.model = model
         self.host = host
         self.seed = seed
@@ -96,25 +97,86 @@ class OllamaCPU:
             raw, meta = out if isinstance(out, tuple) else (out, {})
             for k in agg:
                 agg[k] += (meta.get(k) or 0)
-            instr, err = self._parse_and_validate(raw)
+            instr, err = self._decode(raw, pcb)
             if err is None:
                 self.last_meta = {**agg, "retries": retries}
                 return instr
             reason = err
             retries += 1
             if attempt < self.max_retries:
-                self.log(f"[cpu] rejected: {err} — giving the model one chance to fix it")
-        # the one chance is spent and it's still invalid: throw the error (fail closed)
-        self.log(f"[cpu] still invalid after retry: {reason} — failing closed")
+                self.log(f"[cpu] undecodable: {err} — giving the model one chance to fix it")
+        # the one chance is spent and it's still undecodable: fail closed
+        self.log(f"[cpu] still undecodable after retry: {reason} — failing closed")
         self.last_meta = {**agg, "retries": retries}
         return Instruction(Op.RETURN, {"result": "SCHEMA VALIDATION FAILED", "error": reason, "raw": raw})
 
-    def _parse_and_validate(self, raw):
-        """Return (Instruction, None) if valid, else (None, human-readable reason)."""
-        try:
-            d = json.loads(raw)
-        except (json.JSONDecodeError, TypeError) as e:
-            return None, f"output was not valid JSON ({e})"
+    # --- decode: free text -> one validated instruction -----------------
+    def _decode(self, raw, pcb):
+        """Return (Instruction, None) if we can build a valid instruction, else
+        (None, reason). Order: (1) any JSON object the model emitted is authoritative
+        and is validated as-is; (2) only if there is NO JSON object do we parse the
+        intent from plain language."""
+        text = self._strip_think(raw)
+        obj = self._find_json(text)
+        if obj is not None:
+            return self._validate_obj(obj)
+        instr = self._nl_parse(text, pcb)
+        if instr is not None:
+            return instr, None
+        return None, f"no instruction could be parsed from the model output: {text[:160]!r}"
+
+    @staticmethod
+    def _strip_think(raw) -> str:
+        """Remove reasoning-model scaffolding so it doesn't drown the instruction."""
+        if not raw:
+            return ""
+        t = re.sub(r"<think>.*?</think>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
+        t = re.sub(r"<think>.*$", " ", t, flags=re.DOTALL | re.IGNORECASE)   # unclosed = all thinking
+        return t.strip()
+
+    @staticmethod
+    def _find_json(text):
+        """Extract the model's instruction object from anywhere in the text: a
+        ```json fenced block, or the last balanced {...} that parses. Prefer an
+        object that actually carries an 'op' field."""
+        if not text:
+            return None
+        candidates = []
+        for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
+            candidates.append(m.group(1))
+        depth, start = 0, None
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(text[start:i + 1])
+        best = None
+        for c in candidates:
+            try:
+                d = json.loads(c)
+            except Exception:
+                continue
+            if isinstance(d, dict) and "op" in d:
+                best = d            # keep the LAST op-bearing object (the final answer)
+        if best is not None:
+            return best
+        for c in reversed(candidates):
+            try:
+                d = json.loads(c)
+                if isinstance(d, dict):
+                    return d
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _validate_obj(d):
+        """Return (Instruction, None) if the object is a valid instruction, else
+        (None, human-readable reason). This is the schema gate."""
         if not isinstance(d, dict) or "op" not in d:
             return None, "output must be a JSON object with an 'op' field"
         try:
@@ -129,16 +191,42 @@ class OllamaCPU:
             return None, f"{op.value} requires field(s) {miss}"
         return Instruction(op, args), None
 
+    @staticmethod
+    def _nl_parse(text, pcb):
+        """Last-resort decode: build an instruction from plain-language intent when
+        the model emitted no JSON at all. Conservative on purpose — it returns None
+        rather than guess, so a genuinely unparseable reply still triggers the retry.
+        Uses the window to avoid repeating a finished step."""
+        t = (text or "").lower().strip()
+        if not t:
+            return None
+        ctx = getattr(pcb, "context", []) or []
+        called_clock = any(c.get("op") == "CALL" for c in ctx)
+        last_result = ctx[-1]["result"] if ctx else None
+
+        if re.search(r"\b(return|final answer|task (is )?complete|done|finished|goal (is )?met|"
+                     r"already saved|has been saved|saved (it|the))\b", t):
+            return Instruction(Op.RETURN, {"result": text[:200].strip()})
+        if (("clock" in t) or ("current time" in t) or (" time" in t)) and not called_clock:
+            return Instruction(Op.CALL, {"name": "clock.now", "args": {}})
+        if re.search(r"\b(write|save|store|persist)\b", t) and ("mem" in t or "memory" in t or called_clock):
+            return Instruction(Op.WRITE_MEM, {"key": "result", "value": last_result})
+        if re.search(r"\b(read|recall|load|fetch)\b", t) and ("mem" in t or "memory" in t):
+            return Instruction(Op.READ_MEM, {"key": "result"})
+        if "plan" in t:
+            return Instruction(Op.PLAN, {"text": text[:200].strip()})
+        return None
+
+    # --- generation -----------------------------------------------------
     def _generate(self, pcb, correction=None):
-        """Return (response_text, meta). meta carries token counts and durations
-        (ms) pulled straight from Ollama's own timing fields."""
+        """Return (response_text, meta). No JSON grammar is forced on the model —
+        we decode whatever it says. meta carries token counts and durations (ms)."""
         import urllib.request
         try:
             body = json.dumps({
                 "model": self.model,
                 "prompt": self._build_prompt(pcb, correction),
                 "stream": False,
-                "format": "json",
                 "keep_alive": self.keep_alive,
                 "options": {"temperature": 0, "seed": self.seed, "num_predict": self.num_predict},
             }).encode()
@@ -154,7 +242,8 @@ class OllamaCPU:
                 "eval_ms": (resp.get("eval_duration") or 0) / 1e6,
                 "load_ms": (resp.get("load_duration") or 0) / 1e6,
             }
-            return resp.get("response", ""), meta
+            # some reasoning models put the answer in a separate 'thinking' field
+            return resp.get("response", "") or resp.get("thinking", ""), meta
         except Exception as e:
             # device error (model down/timeout): fail closed with a valid terminating instruction
             return json.dumps({"op": "RETURN", "args": {"result": "CPU device error", "error": str(e)}}), {}
@@ -166,11 +255,11 @@ class OllamaCPU:
         ) or "  (none yet)"
         head = ""
         if correction:
-            head = (f"Your previous output was REJECTED: {correction}.\n"
-                    "Return exactly ONE corrected JSON instruction and nothing else.\n\n")
+            head = (f"Your previous reply could not be decoded into an instruction: {correction}.\n"
+                    "End your reply with the next instruction as a single JSON object.\n\n")
         return head + (
-            "You are the CPU of LLMOS. Emit exactly ONE instruction as a single JSON object "
-            "and nothing else.\n\n"
+            "You are the CPU of LLMOS. Choose the ONE next instruction toward the goal.\n"
+            "You may reason first, but END your reply with a single JSON object for the instruction.\n\n"
             "Instruction set (pick one op; required args shown):\n"
             '  {"op":"PLAN","args":{"text":"..."}}\n'
             '  {"op":"CALL","args":{"name":"clock.now","args":{}}}   (requires: name)\n'
@@ -181,5 +270,5 @@ class OllamaCPU:
             "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"
             f"GOAL: {pcb.goal}\n"
             f"STEPS SO FAR:\n{history}\n\n"
-            "Next instruction (one JSON object):"
+            "Reason if needed, then end with one JSON instruction:"
         )
