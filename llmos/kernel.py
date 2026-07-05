@@ -131,11 +131,19 @@ class Kernel:
         return {"required_keys": req} if req else {}
 
     def _unmet_contract(self, pcb: PCB) -> list:
-        req = (pcb.contract or {}).get("required_keys", [])
-        if not req:
-            return []
-        present = set(self.store.mem_list("mem"))
-        return [k for k in req if k not in present]
+        c = pcb.contract or {}
+        missing = []
+        req = c.get("required_keys", [])
+        if req:
+            present = set(self.store.mem_list("mem"))
+            missing += [k for k in req if k not in present]
+        if c.get("require_edit"):
+            made = any(x["op"] == "CALL" and (x.get("args") or {}).get("name") == "fs.edit"
+                       and isinstance(x.get("result"), dict) and x["result"].get("edited")
+                       for x in pcb.context)
+            if not made:
+                missing.append("a file edit via fs.edit")
+        return missing
 
     # --- idle-time curation: catalog a finished process (deterministic) ---
     def _curate(self, pid: int) -> None:
@@ -394,10 +402,10 @@ class Kernel:
                 missing = self._unmet_contract(pcb)
                 if missing and pcb.contract_tries < CONTRACT_MAX_TRIES:
                     pcb.contract_tries += 1
-                    result = {"trap": "required step not completed", "missing_keys": missing,
-                              "note": ("A required step is unfinished: memory key(s) " + str(missing) +
-                                       " were named in the goal but never written. Do them now, then RETURN.")}
-                    self.log(f"[contract] pid={pcb.pid} RETURN blocked — missing required key(s) {missing} "
+                    result = {"trap": "required step not completed", "missing": missing,
+                              "note": ("A required step is unfinished: " + str(missing) +
+                                       ". Complete it, then RETURN. If a file edit is required, use fs.edit.")}
+                    self.log(f"[contract] pid={pcb.pid} RETURN blocked — unmet {missing} "
                              f"(attempt {pcb.contract_tries}/{CONTRACT_MAX_TRIES})")
                 else:
                     pcb.result = args.get("result")

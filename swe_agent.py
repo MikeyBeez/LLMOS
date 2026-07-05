@@ -73,7 +73,7 @@ def run_agent(inst, repo):
     k = Kernel(store, cpu, log=lambda *a: None, fs_policy=pol)
     k.boot()
     caps = {"fs.read", "fs.write", "fs.list", "shell.exec", "dev.calc"}
-    pid = k.spawn("fix the bug in this repo", capabilities=caps, budget=BUDGET, contract={})
+    pid = k.spawn("fix the bug in this repo", capabilities=caps, budget=BUDGET, contract={"require_edit": True})
     k.run()
     steps = k.procs[pid].pc
     rows = store.trace_read(pid)
