@@ -12,8 +12,10 @@ uses that tag to defend against prompt injection (see Kernel._apply_taint).
 from __future__ import annotations
 
 import ast
+import math
 import operator
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -82,11 +84,38 @@ class SyscallTable:
         prov = "untrusted" if any(p == u or p.startswith(u + os.sep) for u in untrusted) else "trusted"
         return {"content": content, "provenance": prov, "path": p}
 
-    # a deterministic calculator: the CPU offloads exact arithmetic here instead
-    # of doing it in its head (the class of error a stochastic CPU makes).
+    # a deterministic calculator. Two failure modes only: the CPU presents the wrong
+    # INPUT, or the program CALCULATES wrong. We remove input errors by understanding
+    # quantity words (dozen, half a dozen, score) so the model passes phrases verbatim
+    # instead of converting them by hand; the calculation is exact and PEMDAS-correct.
     _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
             ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
             ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos}
+    _FUNCS = {"sqrt": math.sqrt, "abs": abs, "round": round, "min": min, "max": max,
+              "floor": math.floor, "ceil": math.ceil, "int": int, "float": float, "pow": pow}
+    _WORDNUM = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+                "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+                "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
+                "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+                "hundred": 100, "thousand": 1000}
+    _UNITS = {"dozen": 12, "dozens": 12, "score": 20, "gross": 144, "pair": 2, "pairs": 2, "couple": 2}
+
+    def _resolve_words(self, expr: str) -> str:
+        """Turn English quantities into arithmetic before evaluation, so the model can
+        pass the problem's own words and cannot mis-convert them."""
+        e = expr.lower()
+        e = re.sub(r"\bhalf a dozen\b|\bhalf dozen\b", "6", e)
+        e = re.sub(r"\bhalf a gross\b", "72", e)
+        e = re.sub(r"\bhalf a score\b", "10", e)
+        for w, n in self._WORDNUM.items():
+            e = re.sub(rf"\b{w}\b", str(n), e)
+        e = re.sub(r"\b(?:a|an)\s+(dozen|dozens|score|gross|pair|pairs|couple)\b", r"1 \1", e)
+        for u, m in self._UNITS.items():
+            e = re.sub(rf"(\d+(?:\.\d+)?)\s+{u}\b", lambda mo, mm=m: f"({mo.group(1)}*{mm})", e)
+            e = re.sub(rf"\b{u}\b", str(m), e)
+        e = re.sub(r"\bhalf\b", "0.5", e)
+        return e
 
     def _eval_node(self, node):
         if isinstance(node, ast.Expression):
@@ -97,14 +126,20 @@ class SyscallTable:
             return self._OPS[type(node.op)](self._eval_node(node.left), self._eval_node(node.right))
         if isinstance(node, ast.UnaryOp) and type(node.op) in self._OPS:
             return self._OPS[type(node.op)](self._eval_node(node.operand))
-        raise ValueError("only numbers and + - * / // % ** are allowed")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self._FUNCS:
+            return self._FUNCS[node.func.id](*[self._eval_node(a) for a in node.args])
+        raise ValueError("only numbers, + - * / // % **, and sqrt/abs/round/min/max are allowed")
 
     def _calc(self, pcb, args) -> dict:
-        expr = str(args.get("expr", "")).strip()
+        raw = str(args.get("expr", "")).strip()
+        resolved = self._resolve_words(raw)
         try:
-            val = self._eval_node(ast.parse(expr, mode="eval"))
+            val = self._eval_node(ast.parse(resolved, mode="eval"))
         except Exception as e:
-            return {"expr": expr, "error": f"could not evaluate: {e}"}
+            return {"expr": raw, "resolved": resolved, "error": f"could not evaluate: {e}"}
         if isinstance(val, float) and val.is_integer():
             val = int(val)
-        return {"expr": expr, "value": val}
+        out = {"expr": raw, "value": val}
+        if resolved != raw.lower():
+            out["resolved"] = resolved
+        return out

@@ -271,10 +271,11 @@ class OllamaCPU:
             '  {"op":"EVICT","args":{"key":"..."}}   (drop a paged-in key from your window once done)\n'
             '  {"op":"RETURN","args":{"result":<any>}}\n\n'
             "Available syscalls for CALL: clock.now (current UTC time); "
-            "calc (evaluate an arithmetic expression EXACTLY).\n"
-            "Do ALL arithmetic by CALLing calc, for example:\n"
-            '  {"op":"CALL","args":{"name":"calc","args":{"expr":"34800/240"}}}\n'
-            "Never compute multi-step arithmetic in your head.\n"
+            "calc (evaluate arithmetic EXACTLY; it understands quantity words like "
+            "dozen, half a dozen, score, and sqrt/abs/round/min/max).\n"
+            "Do ALL arithmetic by CALLing calc, and pass quantities AS WRITTEN, e.g.:\n"
+            '  {"op":"CALL","args":{"name":"calc","args":{"expr":"half a dozen * 6000"}}}\n'
+            "Do NOT convert quantity words to numbers yourself; let calc do it.\n"
             "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"
             f"GOAL: {pcb.goal}\n"
             f"STEPS SO FAR:\n{history}\n\n"

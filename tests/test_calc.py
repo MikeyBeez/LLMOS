@@ -41,6 +41,21 @@ def main():
         r = st.dispatch(FakePCB(), "calc", {"expr": expr})
         assert r.get("value") == exp, f"{expr} -> {r} (expected {exp})"
 
+    # a BETTER calculator understands quantity words, so LLMOS passes the phrase as
+    # written and cannot mis-convert it (the problem-8 input-presentation fix)
+    word_cases = {
+        "half a dozen": 6,
+        "a dozen": 12,
+        "twenty dozen": 240,
+        "half a dozen * 6000": 36000,
+        "(half a dozen * 6000 - 1200) / (twenty dozen)": 145,
+        "sqrt(144)": 12,
+        "max(3, 7) + min(2, 9)": 9,
+    }
+    for expr, exp in word_cases.items():
+        r = st.dispatch(FakePCB(), "calc", {"expr": expr})
+        assert r.get("value") == exp, f"{expr} -> {r} (expected {exp})"
+
     # the evaluator is safe: no names, calls, or imports
     r = st.dispatch(FakePCB(), "calc", {"expr": "__import__('os').system('echo hi')"})
     assert "error" in r, r
