@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS memory (
   value       TEXT NOT NULL,
   provenance  TEXT NOT NULL DEFAULT 'trusted',
   topic       TEXT NOT NULL DEFAULT 'general',
+  project     TEXT NOT NULL DEFAULT 'general',
   updated_at  REAL NOT NULL,
   PRIMARY KEY (ns, key)
 );
@@ -74,15 +75,19 @@ class Store:
             self.db.execute("ALTER TABLE memory ADD COLUMN topic TEXT NOT NULL DEFAULT 'general'")
         except sqlite3.OperationalError:
             pass   # column already exists
+        try:
+            self.db.execute("ALTER TABLE memory ADD COLUMN project TEXT NOT NULL DEFAULT 'general'")
+        except sqlite3.OperationalError:
+            pass   # column already exists
         self.db.commit()
 
     # --- memory: the brain / disk ---------------------------------------
-    def mem_write(self, ns: str, key: str, value: Any, provenance: str = "trusted", topic: str = "general") -> None:
+    def mem_write(self, ns: str, key: str, value: Any, provenance: str = "trusted", topic: str = "general", project: str = "general") -> None:
         self.db.execute(
-            "INSERT INTO memory(ns,key,value,provenance,topic,updated_at) VALUES(?,?,?,?,?,?) "
+            "INSERT INTO memory(ns,key,value,provenance,topic,project,updated_at) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(ns,key) DO UPDATE SET "
-            "value=excluded.value, provenance=excluded.provenance, topic=excluded.topic, updated_at=excluded.updated_at",
-            (ns, key, json.dumps(value), provenance, topic, time.time()),
+            "value=excluded.value, provenance=excluded.provenance, topic=excluded.topic, project=excluded.project, updated_at=excluded.updated_at",
+            (ns, key, json.dumps(value), provenance, topic, project, time.time()),
         )
         self.db.commit()
 
@@ -93,12 +98,19 @@ class Store:
     def mem_list(self, ns: str) -> list[str]:
         return [r[0] for r in self.db.execute("SELECT key FROM memory WHERE ns=? ORDER BY key", (ns,))]
 
-    def mem_by_topic(self, topic: str, ns: str = "mem") -> dict:
-        rows = self.db.execute("SELECT key,value FROM memory WHERE ns=? AND topic=? ORDER BY key", (ns, topic)).fetchall()
+    def mem_by_topic(self, topic: str, ns: str = "mem", project: str = None) -> dict:
+        if project is None:
+            rows = self.db.execute("SELECT key,value FROM memory WHERE ns=? AND topic=? ORDER BY key", (ns, topic)).fetchall()
+        else:
+            rows = self.db.execute("SELECT key,value FROM memory WHERE ns=? AND topic=? AND project=? ORDER BY key", (ns, topic, project)).fetchall()
         return {r[0]: json.loads(r[1]) for r in rows}
 
-    def topics(self, ns: str = "mem") -> list[str]:
-        return [r[0] for r in self.db.execute("SELECT DISTINCT topic FROM memory WHERE ns=? ORDER BY topic", (ns,))]
+    def topics(self, ns: str = "mem", project: str = None) -> list[str]:
+        if project is None:
+            rows = self.db.execute("SELECT DISTINCT topic FROM memory WHERE ns=? ORDER BY topic", (ns,))
+        else:
+            rows = self.db.execute("SELECT DISTINCT topic FROM memory WHERE ns=? AND project=? ORDER BY topic", (ns, project))
+        return [r[0] for r in rows]
 
     # --- trace: the append-only ledger (single writer = the kernel) ------
     def trace_append(self, pid: int, pc: int, op: str, args: Any, result: Any) -> int:

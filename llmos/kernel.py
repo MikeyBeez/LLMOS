@@ -47,10 +47,11 @@ _TOPIC_STOP = {"the", "for", "and", "with", "how", "this", "that", "your", "you"
 
 
 class Kernel:
-    def __init__(self, store, cpu, log=print, fs_policy=None, authority=None, bg_cpu=None):
+    def __init__(self, store, cpu, log=print, fs_policy=None, authority=None, bg_cpu=None, project="general"):
         self.store = store
         self.cpu = cpu
         self.bg_cpu = bg_cpu          # optional cheaper CPU for idle-time work (e.g. llama on the mac)
+        self.project = project        # top-level category: the body of work (e.g. 'LLMOS')
         self.sys = SyscallTable(store, fs_policy=fs_policy or _DEFAULT_FS_POLICY)
         self.authority = authority or DenyAuthority()
         self.sched = Scheduler()
@@ -179,7 +180,7 @@ class Kernel:
         if not topic or topic == "general" or topic in seen:
             return
         seen.add(topic)
-        loaded = self.store.mem_by_topic(topic)
+        loaded = self.store.mem_by_topic(topic, project=self.project)
         for k, v in loaded.items():
             pcb.context.append({"pc": -1, "op": "READ_MEM", "args": {"key": k, "topic": topic}, "result": v})
             if k not in pcb.working_set:
@@ -226,11 +227,11 @@ class Kernel:
         """Every known topic -> its keyword set, drawn from (a) topics that tag
         memory and (b) the topic index of past prompts."""
         cand: dict = {}
-        for t in self.store.topics():
+        for t in self.store.topics(project=self.project):
             if not t or t == "general":
                 continue
             kw = set(self._sig(t))
-            for k in self.store.mem_by_topic(t):
+            for k in self.store.mem_by_topic(t, project=self.project):
                 kw |= set(self._sig(k))
             cand.setdefault(t, set()).update(kw)
         for t in self.store.mem_list("topic_index"):
