@@ -29,13 +29,14 @@ from .authority import DenyAuthority
 _STATE = os.path.expanduser("~/Code/LLMOS/state")
 _EXAMPLES = os.path.expanduser("~/Code/LLMOS/examples")
 _DEFAULT_FS_POLICY = {
-    "allowed": [os.path.join(_EXAMPLES, "trusted"), os.path.join(_EXAMPLES, "untrusted")],
+    "allowed": [os.path.join(_EXAMPLES, "trusted"), os.path.join(_EXAMPLES, "untrusted"), os.path.join(_STATE, "work")],
+    "writable": [os.path.join(_STATE, "work")],
     "untrusted": [os.path.join(_EXAMPLES, "untrusted")],
 }
 
-DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read", "dev.calc"}
+DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read", "dev.calc", "fs.write"}
 # capabilities a process loses the instant untrusted data enters its window
-PRIVILEGED_CAPS = {"mem.write", "spawn"}
+PRIVILEGED_CAPS = {"mem.write", "spawn", "fs.write", "shell.exec"}
 CONTRACT_MAX_TRIES = 4   # times the kernel re-traps a premature RETURN before letting it through
 TOPIC_FIT_THRESHOLD = 1   # shared significant keywords for a prompt to 'fit' an existing topic
 _TOPIC_STOP = {"the", "for", "and", "with", "how", "this", "that", "your", "you", "please",

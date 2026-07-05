@@ -16,6 +16,7 @@ import math
 import operator
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,6 +46,9 @@ class SyscallTable:
         self.register("mem.write", "mem.write", self._mem_write)
         self.register("fs.read", "fs.read", self._fs_read)
         self.register("calc", "dev.calc", self._calc)
+        self.register("fs.write", "fs.write", self._fs_write)
+        self.register("fs.list", "fs.read", self._fs_list)
+        self.register("shell.exec", "shell.exec", self._shell_exec)
 
     def dispatch(self, pcb, name: str, args: dict) -> Any:
         if name not in self.table:
@@ -143,3 +147,52 @@ class SyscallTable:
         if resolved != raw.lower():
             out["resolved"] = resolved
         return out
+
+    # --- world-touching devices: sandboxed to fs_policy roots, capability-gated ---
+    def _within(self, path, roots):
+        """Return the realpath if it is inside one of the roots, else None (sandbox)."""
+        p = os.path.realpath(os.path.expanduser(str(path)))
+        for r in roots:
+            rr = os.path.realpath(os.path.expanduser(r))
+            if p == rr or p.startswith(rr + os.sep):
+                return p
+        return None
+
+    def _writable_roots(self):
+        return self.fs_policy.get("writable") or self.fs_policy.get("allowed", [])
+
+    def _fs_write(self, pcb, args) -> dict:
+        p = self._within(args["path"], self._writable_roots())
+        if p is None:
+            raise CapabilityError(f"fs.write denied: {args['path']!r} is outside the writable roots")
+        content = args.get("content", "")
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"written": p, "bytes": len(content)}
+
+    def _fs_list(self, pcb, args) -> dict:
+        p = self._within(args.get("path", "."), self.fs_policy.get("allowed", []))
+        if p is None:
+            raise CapabilityError("fs.list denied: path is outside the allowed roots")
+        if os.path.isdir(p):
+            return {"path": p, "entries": sorted(os.listdir(p))}
+        return {"path": p, "entries": [], "note": "not a directory"}
+
+    def _shell_exec(self, pcb, args) -> dict:
+        """Run a shell command with cwd sandboxed to the writable roots, a timeout,
+        and truncated output. This is the most powerful device: it is NOT granted by
+        default, it is in PRIVILEGED_CAPS (a tainted process loses it), and it only
+        runs inside the allowed roots. Network/seccomp hardening is future work."""
+        roots = self._writable_roots()
+        default_cwd = roots[0] if roots else "."
+        cwd = self._within(args.get("cwd", default_cwd), roots) if roots else None
+        if cwd is None:
+            raise CapabilityError("shell.exec denied: cwd is outside the allowed roots")
+        timeout = min(int(args.get("timeout", 60)), 600)
+        try:
+            r = subprocess.run(args["cmd"], shell=True, cwd=cwd, capture_output=True,
+                               text=True, timeout=timeout)
+            return {"exit_code": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
+        except subprocess.TimeoutExpired:
+            return {"error": f"timed out after {timeout}s", "exit_code": 124}
