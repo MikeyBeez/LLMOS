@@ -77,7 +77,7 @@ class OllamaCPU:
 
     def __init__(self, model: str = "ornith:35b", host: str = "http://127.0.0.1:11435",
                  seed: int = 0, max_retries: int = 1, log=None, keep_alive: str = "30m",
-                 num_predict: int = 512):
+                 num_predict: int = 512, num_ctx: int = 8192):
         self.model = model
         self.host = host
         self.seed = seed
@@ -85,6 +85,7 @@ class OllamaCPU:
         self.log = log or (lambda *a: None)
         self.keep_alive = keep_alive
         self.num_predict = num_predict
+        self.num_ctx = num_ctx
         self.last_meta: dict = {}
 
     def step(self, pcb) -> Instruction:
@@ -231,7 +232,7 @@ class OllamaCPU:
                 "prompt": self._build_prompt(pcb, correction),
                 "stream": False,
                 "keep_alive": self.keep_alive,
-                "options": {"temperature": 0, "seed": self.seed, "num_predict": self.num_predict},
+                "options": {"temperature": 0, "seed": self.seed, "num_predict": self.num_predict, "num_ctx": self.num_ctx},
             }).encode()
             req = urllib.request.Request(
                 self.host + "/api/generate", data=body,
