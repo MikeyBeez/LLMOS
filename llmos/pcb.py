@@ -33,6 +33,8 @@ class PCB:
     context: list[dict] = field(default_factory=list)      # the window: recent step records
     result: Any = None
     tainted: bool = False               # has untrusted data entered this process's window?
+    contract: dict = field(default_factory=dict)   # required postconditions (keys that must exist before RETURN)
+    contract_tries: int = 0                         # how many times the kernel has re-trapped a premature RETURN
 
     def to_dict(self) -> dict:
         d = asdict(self)

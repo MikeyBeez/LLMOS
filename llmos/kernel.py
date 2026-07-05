@@ -16,6 +16,7 @@ recorded to the metrics table so we can see exactly where the time goes.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 from .isa import Instruction, Op
@@ -34,6 +35,7 @@ _DEFAULT_FS_POLICY = {
 DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read"}
 # capabilities a process loses the instant untrusted data enters its window
 PRIVILEGED_CAPS = {"mem.write", "spawn"}
+CONTRACT_MAX_TRIES = 4   # times the kernel re-traps a premature RETURN before letting it through
 
 
 class Kernel:
@@ -59,11 +61,12 @@ class Kernel:
         self.log(f"[boot] scheduler up; next pid={self._next_pid}; kernel ready")
 
     # --- process lifecycle ----------------------------------------------
-    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32) -> int:
+    def spawn(self, goal: str, capabilities=None, ppid: int | None = None, budget: int = 32, contract=None) -> int:
         pid = self._next_pid
         self._next_pid += 1
         caps = set(capabilities) if capabilities is not None else set(DEFAULT_CAPS)
         pcb = PCB(pid=pid, goal=goal, ppid=ppid, capabilities=caps, budget=budget, status=Status.READY)
+        pcb.contract = contract if contract is not None else self._derive_contract(goal)
         self.procs[pid] = pcb
         self.store.save_process(pcb.to_dict())
         self.sched.add(pid)
@@ -94,6 +97,26 @@ class Kernel:
             pcb.capabilities -= PRIVILEGED_CAPS
             pcb.tainted = True
             self.log(f"[security] pid={pcb.pid} ingested untrusted data -> revoked caps {dropped}")
+
+    # --- goal contract: required steps the kernel enforces at RETURN ------
+    @staticmethod
+    def _derive_contract(goal: str) -> dict:
+        """Deterministically read a goal's required postconditions from its text.
+        Any memory key the goal names (\"... under key X ...\") MUST exist before the
+        process may RETURN, so a known-required step cannot be skipped by the CPU."""
+        keys = re.findall(r"key\s+['\"]?([A-Za-z_]\w*)['\"]?", goal or "", flags=re.IGNORECASE)
+        seen, req = set(), []
+        for k in keys:
+            if k not in seen:
+                seen.add(k); req.append(k)
+        return {"required_keys": req} if req else {}
+
+    def _unmet_contract(self, pcb: PCB) -> list:
+        req = (pcb.contract or {}).get("required_keys", [])
+        if not req:
+            return []
+        present = set(self.store.mem_list("mem"))
+        return [k for k in req if k not in present]
 
     # --- the main loop --------------------------------------------------
     def run(self) -> None:
@@ -180,10 +203,22 @@ class Kernel:
             elif op == Op.YIELD:
                 result = {"yield": True}
             elif op == Op.RETURN:
-                pcb.result = args.get("result")
-                pcb.status = Status.DONE
-                result = {"return": pcb.result}
-                done = True
+                missing = self._unmet_contract(pcb)
+                if missing and pcb.contract_tries < CONTRACT_MAX_TRIES:
+                    pcb.contract_tries += 1
+                    result = {"trap": "required step not completed", "missing_keys": missing,
+                              "note": ("A required step is unfinished: memory key(s) " + str(missing) +
+                                       " were named in the goal but never written. Do them now, then RETURN.")}
+                    self.log(f"[contract] pid={pcb.pid} RETURN blocked — missing required key(s) {missing} "
+                             f"(attempt {pcb.contract_tries}/{CONTRACT_MAX_TRIES})")
+                else:
+                    pcb.result = args.get("result")
+                    pcb.status = Status.DONE
+                    result = {"return": pcb.result}
+                    done = True
+                    if missing:
+                        result["contract_violation"] = missing
+                        self.log(f"[contract] pid={pcb.pid} RETURN allowed after {pcb.contract_tries} retries but still missing {missing}")
             else:
                 raise CapabilityError(f"illegal instruction: {op}")
         except CapabilityError as e:
