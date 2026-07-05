@@ -37,6 +37,13 @@ DEFAULT_CAPS = {"dev.clock", "mem.read", "mem.write", "fs.read"}
 # capabilities a process loses the instant untrusted data enters its window
 PRIVILEGED_CAPS = {"mem.write", "spawn"}
 CONTRACT_MAX_TRIES = 4   # times the kernel re-traps a premature RETURN before letting it through
+TOPIC_FIT_THRESHOLD = 1   # shared significant keywords for a prompt to 'fit' an existing topic
+_TOPIC_STOP = {"the", "for", "and", "with", "how", "this", "that", "your", "you", "please",
+               "give", "need", "want", "about", "into", "from", "will", "should", "would",
+               "could", "what", "which", "does", "have", "tell", "find", "explain", "under",
+               "key", "save", "store", "its", "are", "was", "get", "did", "not", "but", "then",
+               "than", "them", "they", "our", "out", "use", "let", "also", "one", "two", "new",
+               "old", "good", "fair", "make", "made", "just", "some", "any", "all", "can", "may"}
 
 
 class Kernel:
@@ -71,7 +78,7 @@ class Kernel:
         pcb = PCB(pid=pid, goal=goal, ppid=ppid, capabilities=caps, budget=budget, status=Status.READY)
         pcb.contract = contract if contract is not None else self._derive_contract(goal)
         pcb.background = background
-        pcb.topic = topic if topic is not None else self._classify_topic(goal)
+        pcb.topic = topic if topic is not None else self.route_topic(goal)
         self.procs[pid] = pcb
         self.store.save_process(pcb.to_dict())
         self._page_in_topic(pcb)
@@ -139,6 +146,8 @@ class Kernel:
                  "status": pcb.status.value, "instructions": pcb.pc}
         self.store.mem_write("catalog", f"proc-{pid}", entry)
         self.log(f"[curator] cataloged pid={pid}: wrote {wrote or []} -> catalog/proc-{pid}")
+        if pcb.topic and pcb.topic != "general":
+            self.record_response(pcb.topic, pcb.goal, pcb.result)
 
     # --- topic routing: load only the relevant topic's context -----------
     def _classify_topic(self, goal: str) -> str:
@@ -160,16 +169,36 @@ class Kernel:
         return best if best_score > 0 else "general"
 
     def _page_in_topic(self, pcb) -> None:
-        """Page this process's topic into the window — and only that topic."""
+        """Page in this process's topic — and the topics it depends on (the
+        index's 'uses' links) — and only those."""
         if not pcb.topic or pcb.topic == "general":
             return
-        loaded = self.store.mem_by_topic(pcb.topic)
+        self._load_topic(pcb, pcb.topic, set())
+
+    def _load_topic(self, pcb, topic, seen) -> None:
+        if not topic or topic == "general" or topic in seen:
+            return
+        seen.add(topic)
+        loaded = self.store.mem_by_topic(topic)
         for k, v in loaded.items():
-            pcb.context.append({"pc": -1, "op": "READ_MEM", "args": {"key": k, "topic": pcb.topic}, "result": v})
+            pcb.context.append({"pc": -1, "op": "READ_MEM", "args": {"key": k, "topic": topic}, "result": v})
             if k not in pcb.working_set:
                 pcb.working_set.append(k)
         if loaded:
-            self.log(f"[paging] pid={pcb.pid} topic={pcb.topic!r}: paged in {list(loaded)} (other topics not loaded)")
+            note = "" if topic == pcb.topic else f" (dependency of {pcb.topic!r})"
+            self.log(f"[paging] pid={pcb.pid} paged in topic {topic!r}: {list(loaded)}{note}")
+        for dep in (self.store.mem_read("topic_index", topic) or {}).get("uses", []):
+            self._load_topic(pcb, dep, seen)
+
+    def link_topics(self, topic: str, uses: str) -> None:
+        """Note in the index that `topic` depends on `uses`, so loading topic also
+        loads its dependency (topics that use another topic get recorded)."""
+        e = self.store.mem_read("topic_index", topic) or {"keywords": [], "prompts": [], "entries": [], "uses": []}
+        u = e.setdefault("uses", [])
+        if uses not in u:
+            u.append(uses)
+        self.store.mem_write("topic_index", topic, e)
+        self.log(f"[topic] {topic!r} uses {uses!r}")
 
     def switch_topic(self, pcb, new_topic: str) -> None:
         """The conversation moved to a new topic: evict the old topic's context
@@ -185,6 +214,66 @@ class Kernel:
         pcb.topic = new_topic
         self.log(f"[paging] pid={pcb.pid} topic switch {old!r} -> {new_topic!r}: evicted {sorted(old_keys)}")
         self._page_in_topic(pcb)
+
+    # --- topic index: prompts+responses per topic, with fit-before-name ---
+    @staticmethod
+    def _sig(text: str) -> list:
+        """Significant words: length >= 3, not a stopword."""
+        return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+                if len(w) >= 3 and w not in _TOPIC_STOP]
+
+    def _topic_candidates(self) -> dict:
+        """Every known topic -> its keyword set, drawn from (a) topics that tag
+        memory and (b) the topic index of past prompts."""
+        cand: dict = {}
+        for t in self.store.topics():
+            if not t or t == "general":
+                continue
+            kw = set(self._sig(t))
+            for k in self.store.mem_by_topic(t):
+                kw |= set(self._sig(k))
+            cand.setdefault(t, set()).update(kw)
+        for t in self.store.mem_list("topic_index"):
+            e = self.store.mem_read("topic_index", t) or {}
+            cand.setdefault(t, set()).update(e.get("keywords", []))
+        return cand
+
+    def _mint_name(self, goal: str, existing: set) -> str:
+        sig = self._sig(goal)
+        base = "_".join(sig[:2]) if sig else "topic"
+        name, n = base, 2
+        while name in existing:
+            name, n = f"{base}_{n}", n + 1
+        return name
+
+    def route_topic(self, goal: str) -> str:
+        """Return the topic this prompt belongs to. FIRST check whether it fits a
+        topic already in the index; only mint a new one if nothing fits. Records
+        the prompt into the index either way (building the list of prompts)."""
+        gsig = set(self._sig(goal))
+        cand = self._topic_candidates()
+        best, score = None, 0
+        for t, kw in cand.items():
+            o = len(gsig & kw)
+            if o > score:
+                best, score = t, o
+        if best is not None and score >= TOPIC_FIT_THRESHOLD:
+            topic = best
+            self.log(f"[topic] {goal[:40]!r} fits existing topic {topic!r} (score {score})")
+        else:
+            topic = self._mint_name(goal, set(cand))
+            self.log(f"[topic] {goal[:40]!r} fits nothing -> new topic {topic!r}")
+        e = self.store.mem_read("topic_index", topic) or {"keywords": [], "prompts": [], "entries": []}
+        e.setdefault("prompts", []).append(goal)
+        e["keywords"] = sorted(set(e.get("keywords", [])) | gsig)
+        self.store.mem_write("topic_index", topic, e)
+        return topic
+
+    def record_response(self, topic: str, prompt: str, response) -> None:
+        """Attach a response to its topic in the index (the list of prompts+responses)."""
+        e = self.store.mem_read("topic_index", topic) or {"keywords": [], "prompts": [], "entries": []}
+        e.setdefault("entries", []).append({"prompt": prompt, "response": response})
+        self.store.mem_write("topic_index", topic, e)
 
     # --- the main loop --------------------------------------------------
     def run(self) -> None:
