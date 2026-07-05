@@ -16,7 +16,7 @@ from llmos.cpu import OllamaCPU
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
-BUDGET = 14
+BUDGET = 40
 
 
 class CodingCPU(OllamaCPU):
@@ -32,17 +32,21 @@ class CodingCPU(OllamaCPU):
         if correction:
             head = f"Your previous reply could not be decoded: {correction}. End with ONE JSON instruction.\n\n"
         return head + (
-            "You are an automated bug-fixing agent in a Python repository.\n"
+            "You are a software engineer fixing a bug in a Python repository.\n"
             f"REPO (your working directory): {self.repo}\n"
-            f"ISSUE:\n{self.problem[:1400]}\n\n"
-            f"You must make this failing test pass: {self.f2p}\n\n"
+            f"ISSUE:\n{self.problem[:1600]}\n\n"
             "Emit exactly ONE instruction as a single JSON object each step:\n"
-            '  {"op":"CALL","args":{"name":"shell.exec","args":{"cmd":"grep -rn TERM sympy/ | head"}}}\n'
-            '  {"op":"CALL","args":{"name":"fs.read","args":{"path":"sympy/x/y.py"}}}\n'
-            '  {"op":"CALL","args":{"name":"fs.edit","args":{"path":"sympy/x/y.py","old":"<exact snippet copied verbatim>","new":"<replacement>"}}}\n'
-            '  {"op":"RETURN","args":{"result":"done"}}\n'
-            "Use shell.exec (grep/find) and fs.read to locate the exact buggy lines, then fs.edit to replace a SMALL unique\n"
-            "snippet (copy the old text VERBATIM incl indentation) with the fix. Do NOT rewrite whole files. Then RETURN.\n\n"
+            '  {"op":"CALL","args":{"name":"shell.exec","args":{"cmd":"<any shell: grep, python3 -c \'...\', run a script, pytest ...>"}}}\n'
+            '  {"op":"CALL","args":{"name":"fs.read","args":{"path":"path/to/file.py"}}}\n'
+            '  {"op":"CALL","args":{"name":"fs.edit","args":{"path":"path/to/file.py","old":"<exact snippet copied VERBATIM incl indentation>","new":"<fixed snippet>"}}}\n'
+            '  {"op":"RETURN","args":{"result":"summary of the fix"}}\n'
+            "WORKFLOW (do NOT skip verification):\n"
+            "1. REPRODUCE: with shell.exec, write and run a tiny script (python3 -c \'...\') that triggers the issue, so you SEE the wrong output.\n"
+            "2. LOCATE: grep and fs.read to find the exact buggy lines.\n"
+            "3. FIX: fs.edit to replace a small VERBATIM snippet with the correction.\n"
+            "4. VERIFY: RE-RUN your reproduction with shell.exec to confirm the bug is gone.\n"
+            "5. RETURN only after your reproduction shows the fix works.\n"
+            "You MAY and SHOULD run code — read each output and iterate; if it still fails, edit again.\n\n"
             f"STEPS SO FAR:\n{hist}\n\nNext instruction (one JSON object):"
         )
 
@@ -99,6 +103,8 @@ def score(inst, repo):
 def main():
     os.makedirs(WORK, exist_ok=True)
     insts = json.load(open(os.path.expanduser("~/swe/instances.json")))
+    N = int(sys.argv[1]) if len(sys.argv) > 1 else len(insts)
+    insts = insts[:N]
     results = []
     for i, inst in enumerate(insts, 1):
         t0 = time.time()
