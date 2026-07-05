@@ -167,9 +167,11 @@ class Kernel:
         pcb.status = Status.RUNNING
         while True:
             if pcb.budget <= 0:
-                self.log(f"[sched] pid={pcb.pid} budget exhausted -> preempt")
-                pcb.status = Status.YIELDED
-                self.sched.add(pcb.pid)
+                # hard cap = the watchdog. A runaway that never RETURNs is TERMINATED,
+                # not re-queued (re-queuing a budget-0 process spins forever).
+                self.log(f"[watchdog] pid={pcb.pid} budget exhausted -> terminated (runaway guard)")
+                pcb.status = Status.KILLED
+                self.store.save_process(pcb.to_dict())
                 break
             t0 = time.perf_counter()
             instr = self.cpu.step(pcb)                      # FETCH (+ DECODE in the CPU)
