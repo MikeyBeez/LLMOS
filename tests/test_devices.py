@@ -43,6 +43,24 @@ def main():
     r = st.dispatch(P({"fs.read"}), "fs.list", {"path": work})
     assert "a.txt" in r["entries"], r
 
+    # fs.edit: targeted unique replace (own file, so it doesn't disturb a.txt)
+    open(os.path.join(work, "e.txt"), "w").write("hello world")
+    r = st.dispatch(P({"fs.write"}), "fs.edit", {"path": os.path.join(work, "e.txt"), "old": "hello", "new": "HELLO"})
+    assert r.get("replaced") == 1 and open(os.path.join(work, "e.txt")).read() == "HELLO world", r
+    # fs.edit: snippet not found -> error (no write)
+    r = st.dispatch(P({"fs.write"}), "fs.edit", {"path": os.path.join(work, "e.txt"), "old": "zzz", "new": "x"})
+    assert "error" in r, r
+    # fs.edit: not unique -> error
+    open(os.path.join(work, "d.txt"), "w").write("x x")
+    r = st.dispatch(P({"fs.write"}), "fs.edit", {"path": os.path.join(work, "d.txt"), "old": "x", "new": "y"})
+    assert "error" in r and "unique" in r["error"], r
+    # fs.edit requires the fs.write capability
+    try:
+        st.dispatch(P(set()), "fs.edit", {"path": os.path.join(work, "a.txt"), "old": "H", "new": "h"})
+        assert False
+    except CapabilityError:
+        pass
+
     # shell.exec runs, cwd sandboxed, output captured
     r = st.dispatch(P({"shell.exec"}), "shell.exec", {"cmd": "echo hi && cat a.txt", "cwd": work})
     assert r["exit_code"] == 0 and "hi" in r["stdout"] and "hello" in r["stdout"], r

@@ -11,3 +11,6 @@ run_bench.sh
 gsm8k_*.jsonl
 state/
 patch_devices.py
+patch_edit.py
+patch_agent.py
+swe/

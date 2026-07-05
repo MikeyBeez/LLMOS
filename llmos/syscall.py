@@ -49,6 +49,7 @@ class SyscallTable:
         self.register("fs.write", "fs.write", self._fs_write)
         self.register("fs.list", "fs.read", self._fs_list)
         self.register("shell.exec", "shell.exec", self._shell_exec)
+        self.register("fs.edit", "fs.write", self._fs_edit)
 
     def dispatch(self, pcb, name: str, args: dict) -> Any:
         if name not in self.table:
@@ -196,3 +197,25 @@ class SyscallTable:
             return {"exit_code": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
         except subprocess.TimeoutExpired:
             return {"error": f"timed out after {timeout}s", "exit_code": 124}
+
+    def _fs_edit(self, pcb, args) -> dict:
+        """Replace a UNIQUE snippet in a file (search-and-replace). Far easier for a
+        model than rewriting the whole file: emit the exact old text and the new text.
+        Requires the old text to occur exactly once (include enough context)."""
+        p = self._within(args["path"], self._writable_roots())
+        if p is None:
+            raise CapabilityError(f"fs.edit denied: {args['path']!r} is outside the writable roots")
+        old, new = args["old"], args.get("new", "")
+        try:
+            with open(p, encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            return {"error": f"cannot read file: {e}", "path": p}
+        n = content.count(old)
+        if n == 0:
+            return {"error": "old text not found in file (it must match exactly)", "path": p}
+        if n > 1:
+            return {"error": f"old text is not unique ({n} matches); include more surrounding context", "path": p}
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content.replace(old, new, 1))
+        return {"edited": p, "replaced": 1}
