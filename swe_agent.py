@@ -32,7 +32,7 @@ FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring 
 TOOLS = [
     {"type": "function", "function": {
         "name": "shell_exec",
-        "description": "Run a shell command from the repo root: grep, python3 -c '...', run a script, pytest, etc. Returns exit_code, stdout, stderr.",
+        "description": "Run a shell command. Your shell is ALREADY at the repository root -- never use 'cd' and never use absolute paths; use paths relative to the repo root (e.g. \"grep -n foo sympy/core/expr.py\" or \"python3 -c '...'\"). Returns exit_code, stdout, stderr.",
         "parameters": {"type": "object",
                        "properties": {"cmd": {"type": "string", "description": "the shell command"}},
                        "required": ["cmd"]}}},
@@ -88,8 +88,8 @@ class CodingCPU(OllamaCPU):
     def _system(self):
         return (
             "You are an autonomous software engineer fixing a bug in a Python repository.\n"
-            f"The repository is checked out at: {self.repo}\n"
-            "Shell commands run from that directory; use paths relative to it.\n\n"
+            "You are ALREADY positioned at the repository root. Never use 'cd' and never use absolute paths -- "
+            "shell_exec runs from the repo root, and fs_read/fs_edit paths are relative to it (e.g. sympy/core/expr.py).\n\n"
             "Follow this loop and DO NOT skip verification:\n"
             "1. REPRODUCE: use shell_exec to run a tiny `python3 -c \"...\"` that triggers the bug, so you SEE the wrong output.\n"
             "2. LOCATE: grep and fs_read to find the exact buggy lines.\n"

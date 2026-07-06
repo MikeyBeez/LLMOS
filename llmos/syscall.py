@@ -76,8 +76,11 @@ class SyscallTable:
     def _fs_read(self, pcb, args) -> dict:
         """Read a file, but only within the allowed roots (path-traversal safe),
         and tag the result with provenance so the kernel can defend downstream."""
-        p = os.path.realpath(os.path.expanduser(args["path"]))
         allowed = [os.path.realpath(os.path.expanduser(a)) for a in self.fs_policy.get("allowed", [])]
+        raw = os.path.expanduser(args["path"])
+        if not os.path.isabs(raw) and allowed:
+            raw = os.path.join(allowed[0], raw)
+        p = os.path.realpath(raw)
         if not any(p == a or p.startswith(a + os.sep) for a in allowed):
             raise CapabilityError(f"fs.read denied: {p} is outside the allowed roots")
         try:
@@ -151,8 +154,13 @@ class SyscallTable:
 
     # --- world-touching devices: sandboxed to fs_policy roots, capability-gated ---
     def _within(self, path, roots):
-        """Return the realpath if it is inside one of the roots, else None (sandbox)."""
-        p = os.path.realpath(os.path.expanduser(str(path)))
+        """Return the realpath if it is inside one of the roots, else None (sandbox).
+        A RELATIVE path resolves against the first root (the process's repo/cwd) so a
+        model can pass repo-relative paths like 'sympy/core/expr.py'."""
+        raw = os.path.expanduser(str(path))
+        if not os.path.isabs(raw) and roots:
+            raw = os.path.join(os.path.expanduser(str(roots[0])), raw)
+        p = os.path.realpath(raw)
         for r in roots:
             rr = os.path.realpath(os.path.expanduser(r))
             if p == rr or p.startswith(rr + os.sep):
@@ -212,10 +220,36 @@ class SyscallTable:
         except OSError as e:
             return {"error": f"cannot read file: {e}", "path": p}
         n = content.count(old)
-        if n == 0:
-            return {"error": "old text not found in file (it must match exactly)", "path": p}
+        if n == 1:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content.replace(old, new, 1))
+            return {"edited": p, "replaced": 1}
         if n > 1:
             return {"error": f"old text is not unique ({n} matches); include more surrounding context", "path": p}
+        fuzzy = self._fuzzy_replace(content, old, new)
+        if fuzzy is None:
+            return {"error": "old text not found in file (it must match exactly)", "path": p}
+        if fuzzy == "ambiguous":
+            return {"error": "old text matches multiple places (whitespace-insensitive); add more context", "path": p}
         with open(p, "w", encoding="utf-8") as f:
-            f.write(content.replace(old, new, 1))
-        return {"edited": p, "replaced": 1}
+            f.write(fuzzy)
+        return {"edited": p, "replaced": 1, "match": "whitespace-tolerant"}
+
+    @staticmethod
+    def _fuzzy_replace(content, old, new):
+        """Replace 'old' with 'new' tolerating trailing-whitespace / blank-line
+        differences, matching on lines with trailing whitespace stripped. Returns new
+        content, None if no match, or 'ambiguous' if >1 match. Indentation is preserved."""
+        clines = content.split("\n")
+        olines = [ln.rstrip() for ln in old.split("\n")]
+        while olines and olines[-1] == "":
+            olines.pop()
+        if not olines:
+            return None
+        k = len(olines)
+        hits = [i for i in range(len(clines) - k + 1)
+                if all(clines[i + j].rstrip() == olines[j] for j in range(k))]
+        if len(hits) != 1:
+            return "ambiguous" if hits else None
+        i = hits[0]
+        return "\n".join(clines[:i] + new.split("\n") + clines[i + k:])
