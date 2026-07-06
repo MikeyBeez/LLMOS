@@ -24,6 +24,7 @@ from llmos.isa import Instruction, Op
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
+TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
 FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
 
@@ -230,6 +231,14 @@ def run_agent(inst, repo):
     rows = store.trace_read(pid)
     calls = [r["args"].get("name", "?") for r in rows if r["op"] == "CALL"]
     edits = [str(r["result"])[:90] for r in rows if r["op"] == "CALL" and r["args"].get("name") == "fs.edit"]
+    # persist the FULL execution trace: every instruction the CPU emitted and every
+    # syscall result. this is the record of HOW the OS drove the model, for later
+    # analysis. read-only artifact; it is never fed back into any agent.
+    os.makedirs(TRACES, exist_ok=True)
+    json.dump({"instance_id": inst["instance_id"], "model": MODEL, "budget": BUDGET,
+               "steps": steps, "calls": calls, "trace": rows},
+              open(os.path.join(TRACES, inst["instance_id"] + ".trace.json"), "w"),
+              indent=1, default=str)
     store.close()
     if os.path.exists(db):
         os.unlink(db)
@@ -238,6 +247,8 @@ def run_agent(inst, repo):
 
 def score(inst, repo):
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
+    os.makedirs(TRACES, exist_ok=True)
+    open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)   # the model's patch
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
     ap = sh("git apply _t.patch", cwd=repo)
     if ap.returncode != 0:
@@ -256,13 +267,19 @@ def score(inst, repo):
 
 def main():
     os.makedirs(WORK, exist_ok=True)
+    os.makedirs(TRACES, exist_ok=True)
     insts = json.load(open(os.path.expanduser("~/swe/instances.json")))
     N = int(sys.argv[1]) if len(sys.argv) > 1 else len(insts)
     insts = insts[:N]
-    results = []
+    rp = os.path.expanduser("~/swe/results.json")
+    results = json.load(open(rp)) if os.path.exists(rp) else []   # resume-safe: keep prior outcomes
+    done = {r["id"] for r in results}
     for i, inst in enumerate(insts, 1):
-        t0 = time.time()
         iid = inst["instance_id"]
+        if iid in done:
+            print(f"[{i}/{len(insts)}] {iid} -- already scored, skipping", flush=True)
+            continue
+        t0 = time.time()
         print(f"[{i}/{len(insts)}] {iid}", flush=True)
         try:
             repo = setup(inst)
