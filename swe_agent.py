@@ -83,6 +83,7 @@ class CodingCPU(OllamaCPU):
         # the agent receives ONLY the repo path and the issue text -- never the
         # grading tests, gold patch, or any per-instance hint. keep it that way.
         self.repo, self.problem = repo, problem
+        self.meta_log = []   # per-step token counts, to measure context fill/saturation
 
     def _system(self):
         return (
@@ -150,6 +151,9 @@ class CodingCPU(OllamaCPU):
         except Exception as e:
             return Instruction(Op.RETURN, {"result": "CPU device error", "error": str(e)})
         self.last_meta = meta
+        self.meta_log.append({"pc": getattr(pcb, "pc", None),
+                              "prompt_tokens": meta.get("prompt_tokens"),
+                              "eval_tokens": meta.get("eval_tokens")})
         tcs = msg.get("tool_calls") or []
         if not tcs:
             txt = (msg.get("content") or msg.get("thinking") or "").strip()
@@ -236,6 +240,7 @@ def run_agent(inst, repo):
     # analysis. read-only artifact; it is never fed back into any agent.
     os.makedirs(TRACES, exist_ok=True)
     json.dump({"instance_id": inst["instance_id"], "model": MODEL, "budget": BUDGET,
+               "num_ctx": cpu.num_ctx, "per_step_tokens": cpu.meta_log,
                "steps": steps, "calls": calls, "trace": rows},
               open(os.path.join(TRACES, inst["instance_id"] + ".trace.json"), "w"),
               indent=1, default=str)
