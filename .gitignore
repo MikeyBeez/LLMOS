@@ -14,3 +14,7 @@ patch_devices.py
 patch_edit.py
 patch_agent.py
 swe/
+patch_*.py
+diag*.py
+probe*.py
+*.db
