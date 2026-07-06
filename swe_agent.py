@@ -217,7 +217,8 @@ def setup(inst):
     sh("git checkout -q FETCH_HEAD", cwd=repo)
     sh("git config user.email a@b.c; git config user.name a", cwd=repo)
     sh("python3 -m venv .venv", cwd=repo)
-    sh(".venv/bin/pip install -q mpmath pytest", cwd=repo, timeout=300)
+    # setuptools<81 restores `distutils`, which py3.12 removed but older repos import
+    sh('.venv/bin/pip install -q mpmath pytest "setuptools<81"', cwd=repo, timeout=300)
     return repo
 
 
@@ -266,8 +267,12 @@ def score(inst, repo):
     names = " or ".join(inst["FAIL_TO_PASS"])
     r = sh(f'.venv/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header',
            cwd=repo, timeout=600)
-    ok = (r.returncode == 0) and ("passed" in r.stdout) and ("failed" not in r.stdout) and ("error" not in r.stdout.lower())
-    return ok, len(diff), r.stdout[-200:].replace("\n", " ")
+    # pytest returns 0 iff every selected test passed (non-zero on failure OR collection
+    # error); "passed" guards against a zero-test run. the old substring checks for
+    # "error"/"failed" false-negatived on any output that merely mentioned those words.
+    ok = (r.returncode == 0) and ("passed" in r.stdout)
+    tail = (r.stdout[-200:] or r.stderr[-200:]).replace("\n", " ")
+    return ok, len(diff), tail
 
 
 def main():
