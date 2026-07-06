@@ -28,6 +28,7 @@ WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
 FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
+CTX_RECENT_TOKENS = 8000   # keep this many tokens of most-recent steps verbatim; compact older ones into a digest
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
 TOOLS = [
@@ -71,10 +72,15 @@ SYS2TOOL = {v: k for k, v in TOOL2SYS.items()}
 
 
 def _short(result, n=1800):
+    """Truncate a JSON-ified result to ~n chars, honoring n (not a fixed size). Keeps a
+    head and a tail so a large read shows the top of the file plus its end; range reads
+    (start/end) stay under n and are returned whole."""
     s = json.dumps(result, default=str)
     if len(s) <= n:
         return s
-    return s[:300] + " ...<snip>... " + s[-1200:]
+    keep_tail = min(1200, n // 3)
+    keep_head = max(300, n - keep_tail - 20)
+    return s[:keep_head] + " ...<snip>... " + s[-keep_tail:]
 
 
 class CodingCPU(OllamaCPU):
@@ -104,45 +110,112 @@ class CodingCPU(OllamaCPU):
             "Every turn MUST call exactly one tool; never reply with prose alone."
         )
 
-    def _messages(self, pcb):
-        msgs = [{"role": "system", "content": self._system()},
-                {"role": "user", "content": f"ISSUE:\n{self.problem[:4000]}\n\nBegin by reproducing the bug."}]
-        for s in pcb.context:
-            op = s.get("op")
-            if op == "CALL":
-                name = s["args"].get("name", "")
-                targs = s["args"].get("args", {}) or {}
-                tool = SYS2TOOL.get(name, name.replace(".", "_"))
+    def _pair_for(self, s):
+        """Render one context step as its verbatim message(s)."""
+        op = s.get("op")
+        if op == "CALL":
+            name = s["args"].get("name", "")
+            targs = s["args"].get("args", {}) or {}
+            tool = SYS2TOOL.get(name, name.replace(".", "_"))
+            cid = f"c{s['pc']}"
+            # file reads get a larger window than shell/grep: the model must SEE the code it edits.
+            budget = 6000 if name == "fs.read" else 1800
+            return [{"role": "assistant", "content": "",
+                     "tool_calls": [{"id": cid, "type": "function",
+                                     "function": {"name": tool, "arguments": targs}}]},
+                    {"role": "tool", "tool_call_id": cid, "content": _short(s["result"], budget)}]
+        if op == "PLAN":
+            txt = s["args"].get("text", "") if isinstance(s.get("args"), dict) else ""
+            return [{"role": "assistant", "content": txt[:600]},
+                    {"role": "user", "content":
+                     "You replied with reasoning but did not call a tool. Call exactly ONE tool now "
+                     "(shell_exec, fs_read, fs_edit, or finish) to act on that reasoning. Do not reply with prose."}]
+        if op == "RETURN":
+            note = (s.get("result") or {}).get("note") if isinstance(s.get("result"), dict) else None
+            if note:
                 cid = f"c{s['pc']}"
-                msgs.append({"role": "assistant", "content": "",
-                             "tool_calls": [{"id": cid, "type": "function",
-                                             "function": {"name": tool, "arguments": targs}}]})
-                # file reads get a much larger window than shell/grep output: the model
-                # has to SEE the code it edits. targeted range reads keep this small anyway.
-                budget = 6000 if name == "fs.read" else 1800
-                msgs.append({"role": "tool", "tool_call_id": cid, "content": _short(s["result"], budget)})
-            elif op == "PLAN":
-                # the model replied with prose and no tool call; feed the reasoning back
-                # plus an explicit nudge so the next turn differs (breaks temp-0 loops)
-                txt = s["args"].get("text", "") if isinstance(s.get("args"), dict) else ""
-                msgs.append({"role": "assistant", "content": txt[:600]})
-                msgs.append({"role": "user", "content":
-                             "You replied with reasoning but did not call a tool. Call exactly ONE tool now "
-                             "(shell_exec, fs_read, fs_edit, or finish) to act on that reasoning. Do not reply with prose."})
+                summ = s["args"].get("result", "") if isinstance(s.get("args"), dict) else ""
+                return [{"role": "assistant", "content": "",
+                         "tool_calls": [{"id": cid, "type": "function",
+                                         "function": {"name": "finish", "arguments": {"summary": summ}}}]},
+                        {"role": "tool", "tool_call_id": cid, "content": note}]
+        return []
+
+    @staticmethod
+    def _est(msgs):
+        chars = sum(len(m.get("content") or "") + sum(len(json.dumps(t)) for t in (m.get("tool_calls") or []))
+                    for m in msgs)
+        return chars // 4   # ~4 chars/token
+
+    @staticmethod
+    def _digest(old_steps):
+        """A faithful, compact record of the compacted-away steps: one line each, keeping WHAT was
+        done and the key outcome, dropping bulky payloads (a file's contents are re-readable)."""
+        lines = ["PROGRESS SO FAR (older steps compacted; re-read a file if you need its full contents):"]
+        for s in old_steps:
+            op = s.get("op"); a = s.get("args") or {}; res = s.get("result"); aa = a.get("args") or {}
+            nm = a.get("name")
+            if op == "CALL" and nm == "shell.exec":
+                out = ""
+                if isinstance(res, dict):
+                    out = (res.get("stdout") or res.get("stderr") or "").strip().replace("\n", " ")
+                lines.append("- ran: %s -> %s" % (str(aa.get("cmd", ""))[:80], out[:90]))
+            elif op == "CALL" and nm == "fs.read":
+                n = res.get("lines") if isinstance(res, dict) else "?"
+                lines.append("- read %s (%s lines)" % (aa.get("path", ""), n))
+            elif op == "CALL" and nm == "fs.edit":
+                if isinstance(res, dict) and ("replaced" in res or "edited" in res) and not res.get("error"):
+                    lines.append("- EDITED %s" % aa.get("path", ""))
+                else:
+                    msg = res.get("error") if isinstance(res, dict) else str(res)
+                    lines.append("- edit %s FAILED: %s" % (aa.get("path", ""), str(msg)[:60]))
+            elif op == "CALL" and nm == "fs.list":
+                lines.append("- listed %s" % aa.get("path", ""))
             elif op == "RETURN":
-                # a trapped early finish (edit contract unmet): surface the note so the model corrects
-                note = (s.get("result") or {}).get("note") if isinstance(s.get("result"), dict) else None
-                if note:
-                    cid = f"c{s['pc']}"
-                    summ = s["args"].get("result", "") if isinstance(s.get("args"), dict) else ""
-                    msgs.append({"role": "assistant", "content": "",
-                                 "tool_calls": [{"id": cid, "type": "function",
-                                                 "function": {"name": "finish", "arguments": {"summary": summ}}}]})
-                    msgs.append({"role": "tool", "tool_call_id": cid, "content": note})
-        # forcing function: if it has explored a while but never edited, push it to edit now
-        did_edit = any(s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.edit"
-                       for s in pcb.context)
-        n_calls = sum(1 for s in pcb.context if s.get("op") == "CALL")
+                lines.append("- tried to finish but was told an edit is still required")
+        return "\n".join(lines)
+
+    def _messages(self, pcb):
+        # PINNED: identity + the task. never evicted.
+        head = [{"role": "system", "content": self._system()},
+                {"role": "user", "content": f"ISSUE:\n{self.problem[:4000]}\n\nBegin by reproducing the bug."}]
+        ctx = list(pcb.context)
+
+        # SUPERSEDE: a later read of a path makes earlier reads of it stale -> drop them
+        # (this alone removes the re-read waste that filled the window).
+        last_read = {}
+        for i, s in enumerate(ctx):
+            if s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.read":
+                p = ((s["args"].get("args") or {}).get("path"))
+                if p:
+                    last_read[p] = i
+        steps = []
+        for i, s in enumerate(ctx):
+            if (s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.read"
+                    and last_read.get(((s["args"].get("args") or {}).get("path"))) != i):
+                continue   # superseded read
+            steps.append(s)
+
+        # WORKING SET: keep the most-recent steps verbatim up to a token budget; compact the rest.
+        recent, acc = [], 0
+        for s in reversed(steps):
+            t = self._est(self._pair_for(s))
+            if recent and acc + t > CTX_RECENT_TOKENS:
+                break
+            recent.insert(0, s)
+            acc += t
+        old = steps[:len(steps) - len(recent)]
+
+        body = []
+        if old:
+            body.append({"role": "user", "content": self._digest(old)})
+        for s in recent:
+            body.extend(self._pair_for(s))
+        msgs = head + body
+
+        # forcing function judged on the FULL history, not the window
+        did_edit = any(s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.edit" for s in ctx)
+        n_calls = sum(1 for s in ctx if s.get("op") == "CALL")
         if not did_edit and n_calls >= FORCE_AFTER:
             msgs.append({"role": "user", "content":
                          f"You have run {n_calls} tool calls and have already reproduced and located the bug, "
