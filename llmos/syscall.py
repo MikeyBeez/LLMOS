@@ -200,8 +200,9 @@ class SyscallTable:
             raise CapabilityError("shell.exec denied: cwd is outside the allowed roots")
         timeout = min(int(args.get("timeout", 60)), 600)
         try:
+            env = {**os.environ, **self.fs_policy["shell_env"]} if self.fs_policy.get("shell_env") else None
             r = subprocess.run(args["cmd"], shell=True, cwd=cwd, capture_output=True,
-                               text=True, timeout=timeout)
+                               text=True, timeout=timeout, env=env)
             return {"exit_code": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
         except subprocess.TimeoutExpired:
             return {"error": f"timed out after {timeout}s", "exit_code": 124}

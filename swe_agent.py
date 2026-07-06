@@ -20,6 +20,7 @@ from llmos.store import Store
 from llmos.kernel import Kernel
 from llmos.cpu import OllamaCPU
 from llmos.isa import Instruction, Op
+import envcheck   # version checker: pick + uv-provision the right Python per repo
 
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
 MODEL = "ornith:35b"
@@ -216,9 +217,10 @@ def setup(inst):
     sh(f"git fetch -q --depth 1 origin {inst['base_commit']}", cwd=repo, timeout=300)
     sh("git checkout -q FETCH_HEAD", cwd=repo)
     sh("git config user.email a@b.c; git config user.name a", cwd=repo)
-    sh("python3 -m venv .venv", cwd=repo)
-    # setuptools<81 restores `distutils`, which py3.12 removed but older repos import
-    sh('.venv/bin/pip install -q mpmath pytest "setuptools<81"', cwd=repo, timeout=300)
+    # version checker: read the repo's declared Python, provision it with uv, install deps.
+    # setuptools<81 restores distutils for the middle-aged repos on newer interpreters.
+    venv_py, ver = envcheck.build_venv(repo, 'mpmath pytest "setuptools<81"')
+    print("   env: Python %s (uv)" % ver, flush=True)
     return repo
 
 
@@ -226,7 +228,12 @@ def run_agent(inst, repo):
     db = tempfile.mktemp(suffix=".db")
     store = Store(db)
     cpu = CodingCPU(repo, inst["problem_statement"], log=lambda *a: None)
-    pol = {"allowed": [repo], "writable": [repo], "untrusted": []}
+    # the agent's shell runs inside the repo's uv venv, so `python`/`python3`/`pytest`
+    # use the version the checker chose -- old repos import correctly during reproduction.
+    venv_bin = os.path.join(repo, ".venv", "bin")
+    pol = {"allowed": [repo], "writable": [repo], "untrusted": [],
+           "shell_env": {"PATH": venv_bin + ":" + os.environ.get("PATH", ""),
+                         "VIRTUAL_ENV": os.path.join(repo, ".venv")}}
     k = Kernel(store, cpu, log=lambda *a: None, fs_policy=pol)
     k.boot()
     caps = {"fs.read", "fs.write", "fs.list", "shell.exec", "dev.calc"}
@@ -265,13 +272,23 @@ def score(inst, repo):
              if l.startswith("+++ b/") and l.strip().endswith(".py")]
     target = " ".join(files) if files else "."
     names = " or ".join(inst["FAIL_TO_PASS"])
-    r = sh(f'.venv/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header',
-           cwd=repo, timeout=600)
-    # pytest returns 0 iff every selected test passed (non-zero on failure OR collection
-    # error); "passed" guards against a zero-test run. the old substring checks for
-    # "error"/"failed" false-negatived on any output that merely mentioned those words.
+    cmd = f'.venv/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header'
+    cur = envcheck.pick_python(repo)
+    for _ in range(2):
+        r = sh(cmd, cwd=repo, timeout=600)
+        ran = ("passed" in r.stdout) or ("failed" in r.stdout)
+        if ran:
+            break
+        # no test ran => collection/import failure. if it's a version signature, drop a
+        # Python minor, rebuild the venv, and retry once.
+        lower = envcheck.downgrade_for((r.stderr or "") + (r.stdout or ""), cur)
+        if not lower:
+            break
+        envcheck.build_venv(repo, 'mpmath pytest "setuptools<81"', py=lower)
+        cur = lower
+    # pytest returns 0 iff every selected test passed; "passed" guards a zero-test run.
     ok = (r.returncode == 0) and ("passed" in r.stdout)
-    tail = (r.stdout[-200:] or r.stderr[-200:]).replace("\n", " ")
+    tail = ("[py%s] " % cur) + (r.stdout[-200:] or r.stderr[-200:]).replace("\n", " ")
     return ok, len(diff), tail
 
 
