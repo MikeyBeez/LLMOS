@@ -39,9 +39,11 @@ TOOLS = [
                        "required": ["cmd"]}}},
     {"type": "function", "function": {
         "name": "fs_read",
-        "description": "Read a file in the repo.",
+        "description": "Read a file in the repo. Big files are truncated in your view, so after `grep -n` gives a line number, pass start and end to read just that window (raw text you can copy verbatim into fs_edit). The result reports the file's total line count.",
         "parameters": {"type": "object",
-                       "properties": {"path": {"type": "string"}},
+                       "properties": {"path": {"type": "string"},
+                                      "start": {"type": "integer", "description": "first line to read (1-based); optional"},
+                                      "end": {"type": "integer", "description": "last line to read; optional"}},
                        "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "fs_edit",
@@ -93,7 +95,7 @@ class CodingCPU(OllamaCPU):
             "shell_exec runs from the repo root, and fs_read/fs_edit paths are relative to it (e.g. sympy/core/expr.py).\n\n"
             "Follow this loop and DO NOT skip verification:\n"
             "1. REPRODUCE: use shell_exec to run a tiny `python3 -c \"...\"` that triggers the bug, so you SEE the wrong output.\n"
-            "2. LOCATE: grep and fs_read to find the exact buggy lines.\n"
+            "2. LOCATE: `grep -n` for the symbol to get a line number, then fs_read with start/end to read that exact window. Do NOT re-read the same whole file repeatedly.\n"
             "3. FIX: fs_edit to replace a small VERBATIM snippet with the correction.\n"
             "4. VERIFY: re-run your reproduction with shell_exec and confirm the behavior is now correct.\n"
             "5. FINISH: only after verification, call finish with a short summary.\n\n"
@@ -115,7 +117,10 @@ class CodingCPU(OllamaCPU):
                 msgs.append({"role": "assistant", "content": "",
                              "tool_calls": [{"id": cid, "type": "function",
                                              "function": {"name": tool, "arguments": targs}}]})
-                msgs.append({"role": "tool", "tool_call_id": cid, "content": _short(s["result"])})
+                # file reads get a much larger window than shell/grep output: the model
+                # has to SEE the code it edits. targeted range reads keep this small anyway.
+                budget = 6000 if name == "fs.read" else 1800
+                msgs.append({"role": "tool", "tool_call_id": cid, "content": _short(s["result"], budget)})
             elif op == "PLAN":
                 # the model replied with prose and no tool call; feed the reasoning back
                 # plus an explicit nudge so the next turn differs (breaks temp-0 loops)

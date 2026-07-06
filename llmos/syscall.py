@@ -90,7 +90,15 @@ class SyscallTable:
             raise CapabilityError(f"fs.read failed: {e}")
         untrusted = [os.path.realpath(os.path.expanduser(u)) for u in self.fs_policy.get("untrusted", [])]
         prov = "untrusted" if any(p == u or p.startswith(u + os.sep) for u in untrusted) else "trusted"
-        return {"content": content, "provenance": prov, "path": p}
+        total = content.count("\n") + 1
+        start, end = args.get("start"), args.get("end")
+        if start is not None or end is not None:
+            lines = content.split("\n")
+            s = max(int(start or 1), 1)
+            e = min(int(end or total), len(lines))
+            return {"content": "\n".join(lines[s - 1:e]), "provenance": prov, "path": p,
+                    "lines": total, "range": [s, e]}
+        return {"content": content, "provenance": prov, "path": p, "lines": total}
 
     # a deterministic calculator. Two failure modes only: the CPU presents the wrong
     # INPUT, or the program CALCULATES wrong. We remove input errors by understanding
