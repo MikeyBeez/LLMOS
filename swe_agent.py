@@ -28,7 +28,8 @@ WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
 FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
-CTX_RECENT_TOKENS = 8000   # keep this many tokens of most-recent steps verbatim; compact older ones into a digest
+CTX_HIGH = 9000    # verbatim tail budget in tokens; compact older steps once the tail exceeds this
+CTX_CHUNK = 6      # compact in blocks of this many steps, so the digest/cache prefix is stable between jumps
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
 TOOLS = [
@@ -175,6 +176,18 @@ class CodingCPU(OllamaCPU):
                 lines.append("- tried to finish but was told an edit is still required")
         return "\n".join(lines)
 
+    def _cut(self, steps):
+        """How many of the oldest steps to compact into the digest. Quantized to CTX_CHUNK
+        so the boundary only jumps when the verbatim tail exceeds CTX_HIGH -- the digest and
+        the cache prefix stay put between jumps (append-only growth), and we pay one reprefill
+        at a jump rather than churning every step. Always keeps at least the last step verbatim."""
+        toks = [self._est(self._pair_for(s)) for s in steps]
+        n = len(steps)
+        k = 0
+        while k < n and sum(toks[k:]) > CTX_HIGH:
+            k += CTX_CHUNK
+        return min(k, max(0, n - 1))
+
     def _messages(self, pcb):
         # PINNED: identity + the task. never evicted.
         head = [{"role": "system", "content": self._system()},
@@ -196,15 +209,11 @@ class CodingCPU(OllamaCPU):
                 continue   # superseded read
             steps.append(s)
 
-        # WORKING SET: keep the most-recent steps verbatim up to a token budget; compact the rest.
-        recent, acc = [], 0
-        for s in reversed(steps):
-            t = self._est(self._pair_for(s))
-            if recent and acc + t > CTX_RECENT_TOKENS:
-                break
-            recent.insert(0, s)
-            acc += t
-        old = steps[:len(steps) - len(recent)]
+        # WORKING SET: compact the oldest steps into a digest, quantized to CHUNK-sized blocks
+        # so the digest (and therefore the cache prefix) stays stable between compactions --
+        # append-only cache growth in between, one reprefill at a jump, not churn every step.
+        cut = self._cut(steps)
+        old, recent = steps[:cut], steps[cut:]
 
         body = []
         if old:
