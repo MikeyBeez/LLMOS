@@ -27,7 +27,8 @@ MODEL = "ornith:35b"
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
-FORCE_AFTER = 8   # tool calls with no edit -> push the model to stop exploring and edit
+FORCE_AFTER = 8    # tool calls with no edit -> nudge the model to stop exploring and edit
+EDIT_DEADLINE = 16   # tool calls with no edit -> HARD stop: restrict the toolset to fs_edit + finish
 CTX_HIGH = 9000    # verbatim tail budget in tokens; compact older steps once the tail exceeds this
 CTX_CHUNK = 6      # compact in blocks of this many steps, so the digest/cache prefix is stable between jumps
 
@@ -70,6 +71,7 @@ TOOLS = [
 ]
 TOOL2SYS = {"shell_exec": "shell.exec", "fs_read": "fs.read", "fs_edit": "fs.edit", "fs_list": "fs.list"}
 SYS2TOOL = {v: k for k, v in TOOL2SYS.items()}
+EDIT_ONLY_TOOLS = [t for t in TOOLS if t["function"]["name"] in ("fs_edit", "finish")]
 
 
 def _short(result, n=1800):
@@ -196,17 +198,18 @@ class CodingCPU(OllamaCPU):
 
         # SUPERSEDE: a later read of a path makes earlier reads of it stale -> drop them
         # (this alone removes the re-read waste that filled the window).
+        def _rkey(s):
+            a = (s["args"].get("args") or {})
+            return (a.get("path"), a.get("start"), a.get("end"))
         last_read = {}
         for i, s in enumerate(ctx):
             if s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.read":
-                p = ((s["args"].get("args") or {}).get("path"))
-                if p:
-                    last_read[p] = i
+                last_read[_rkey(s)] = i
         steps = []
         for i, s in enumerate(ctx):
             if (s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.read"
-                    and last_read.get(((s["args"].get("args") or {}).get("path"))) != i):
-                continue   # superseded read
+                    and last_read.get(_rkey(s)) != i):
+                continue   # identical earlier read (same path+range) superseded; distinct windows kept
             steps.append(s)
 
         # WORKING SET: compact the oldest steps into a digest, quantized to CHUNK-sized blocks
@@ -234,8 +237,14 @@ class CodingCPU(OllamaCPU):
 
     def step(self, pcb):
         self.last_meta = {}
+        # HARD forcing: after the exploration deadline with no edit, restrict the toolset to
+        # fs_edit + finish so the model cannot keep exploring -- it must edit (or finish). The
+        # restriction lifts once it edits, so it can then re-run its reproduction to verify.
+        did_edit = any(s.get("op") == "CALL" and (s.get("args") or {}).get("name") == "fs.edit" for s in pcb.context)
+        n_calls = sum(1 for s in pcb.context if s.get("op") == "CALL")
+        tools = EDIT_ONLY_TOOLS if (not did_edit and n_calls >= EDIT_DEADLINE) else TOOLS
         try:
-            msg, meta = self._chat(self._messages(pcb))
+            msg, meta = self._chat(self._messages(pcb), tools)
         except Exception as e:
             return Instruction(Op.RETURN, {"result": "CPU device error", "error": str(e)})
         self.last_meta = meta
@@ -271,10 +280,10 @@ class CodingCPU(OllamaCPU):
             return Instruction(Op.PLAN, {"text": f"unknown tool {tool}"})
         return Instruction(Op.CALL, {"name": sysname, "args": args})
 
-    def _chat(self, messages):
+    def _chat(self, messages, tools=TOOLS):
         body = json.dumps({
             "model": self.model, "stream": False, "keep_alive": self.keep_alive,
-            "messages": messages, "tools": TOOLS,
+            "messages": messages, "tools": tools,
             "options": {"temperature": 0, "seed": self.seed,
                         "num_ctx": self.num_ctx, "num_predict": self.num_predict},
         }).encode()
