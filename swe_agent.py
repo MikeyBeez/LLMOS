@@ -91,7 +91,9 @@ class CodingCPU(OllamaCPU):
     the hand-escaped JSON-ISA. The kernel still receives ordinary Instructions."""
 
     def __init__(self, repo, problem, **kw):
-        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=65536, **kw)
+        # keep_alive long so the 64K model stays resident for the whole batch -- reloading
+        # it at 64K costs ~50s and was stalling the run when ollama evicted it between steps.
+        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=65536, keep_alive="24h", **kw)
         # the agent receives ONLY the repo path and the issue text -- never the
         # grading tests, gold patch, or any per-instance hint. keep it that way.
         self.repo, self.problem = repo, problem
