@@ -14,6 +14,8 @@ Instead of a deterministic silicon CPU executing machine instructions, the execu
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — every OS subsystem and its LLMOS design, the central design tension (a nondeterministic CPU), and the boot sequence.
 - **[IMPLEMENTATION.md](IMPLEMENTATION.md)** — v1 runs as a hosted runtime on macOS (a process VM, JVM/BEAM-style), delegating boot/supervision (launchd), isolation/preemption (Unix processes + signals), storage/locking (SQLite), and inference (Ollama) to the host. One macOS process per agent.
 - **[INTERACTION.md](INTERACTION.md)** — how the system interacts with the human: the four roles (goal-setter, capability authority, spectator, teacher) and the ask-channel where a process escalates to you for a capability grant.
+- **[MEMORY.md](MEMORY.md)** — the working-set / KV-cache memory manager: what the CPU sees at each phase of a task, a segment table with a valid-up-to watermark, phase-boundary compaction, correctness before speed.
+- **[SWE-BENCH.md](SWE-BENCH.md)** — running SWE-bench with LLMOS driving a local model on a consumer GPU: how the same model went from 7% to 34% by fixing the system around it, not the weights.
 
 ## Status
 
