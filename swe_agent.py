@@ -29,7 +29,7 @@ TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (obse
 BUDGET = 40
 FORCE_AFTER = 8    # tool calls with no edit -> nudge the model to stop exploring and edit
 EDIT_DEADLINE = 16   # tool calls with no edit -> HARD stop: restrict the toolset to fs_edit + finish
-CTX_HIGH = 9000    # verbatim tail budget in tokens; compact older steps once the tail exceeds this
+CTX_HIGH = 48000   # verbatim tail budget in tokens; with num_ctx=64K the model gets real room before any compaction
 CTX_CHUNK = 6      # compact in blocks of this many steps, so the digest/cache prefix is stable between jumps
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
@@ -91,7 +91,7 @@ class CodingCPU(OllamaCPU):
     the hand-escaped JSON-ISA. The kernel still receives ordinary Instructions."""
 
     def __init__(self, repo, problem, **kw):
-        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=16384, **kw)
+        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=65536, **kw)
         # the agent receives ONLY the repo path and the issue text -- never the
         # grading tests, gold patch, or any per-instance hint. keep it that way.
         self.repo, self.problem = repo, problem
