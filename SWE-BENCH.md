@@ -6,11 +6,11 @@ The whole point of the accompanying essay (*Benchmarks Measure the Wrong Machine
 
 ## The short version
 
-The same model that posts **73.4% on SWE-bench Verified** on datacenter hardware first read **7%** here. We took it to **34%** (26 of 76 scored) without ever touching the model — every point came from fixing the operating system around it and the environment it ran in. The model was fine the whole time; the harness was broken in several ways, and the graphics card was starving the context.
+The same model that posts **75.6% on SWE-bench Verified** on datacenter hardware first read **7%** here. We took it to **34%** (26 of 76 scored) without ever touching the model — every point came from fixing the operating system around it and the environment it ran in. The model was fine the whole time; the harness was broken in several ways, and the graphics card was starving the context.
 
 ## What we ran on
 
-- **Model:** `ornith:35b` — architecture `qwen35moe`, 34.7B total parameters, a mixture-of-experts coder that activates ~3B per token (about 8 experts), with a reasoning ("thinking") block before it acts, and native tool-calling. Quantization `Q4_K_M`, ~22 GB on disk. Native context length **262,144** tokens. Published score 73.4% on SWE-bench Verified.
+- **Model:** `ornith:35b` — **Ornith-1.0-35B** from DeepReinforce (released June 2026), a self-scaffolding coding model (it learns its own agentic scaffold via RL) built on the `qwen35moe` mixture-of-experts architecture: 34.7B total parameters, ~3B active per token (about 8 experts), a reasoning ("thinking") block before it acts, native tool-calling. Quantization `Q4_K_M`, ~22 GB on disk. Native context length **262,144** tokens. Published score **75.6% on SWE-bench Verified** — the family runs from 69.4% (9B dense) to 82.4% (397B flagship). There is an irony worth naming: the published number partly reflects the scaffold the model *taught itself*, and here we replaced that with a hand-built one (LLMOS) on hardware that can barely hold the model.
 - **GPU box ("pop"):** consumer NVIDIA RTX 5070 Ti, **16,303 MiB VRAM** (~16 GB), 31 GB system RAM, roughly a $750 card. The 22 GB of weights do not fit in 16 GB, so ollama runs the model split **36% on the CPU / 64% on the GPU** — about 8 GB spilled to system memory. It is slower for it. This is the ordinary situation for local AI, not a corner case.
 - **Inference server:** ollama (llama.cpp underneath), temperature 0 and fixed seed for determinism.
 - **Benchmark:** the sympy slice of SWE-bench Lite — all **77 sympy instances**. sympy is the one large repo that provisions cleanly without the Docker images, so it is a uniform, sizable sample.
@@ -73,7 +73,7 @@ Final: **26 of 76 scored = 34.2%**, same model, same card. Of the 76: 26 solved,
 
 ## Honest caveats
 
-This is not the certified SWE-bench figure and shouldn't be quoted as one. Scoring is our own approximation — per-repo Python via uv rather than the official Docker harness — it's the sympy slice only, and it's a single attempt with no sampling. Runs on a temperature-0 mixture-of-experts model are not perfectly deterministic, so individual instances flip between runs; treat 34% as a self-consistent internal measurement on consumer hardware, not a leaderboard number. The remaining gap to 73% is precision (4-bit vs full), context (the card can't hold a big window at full speed), scaffold maturity, sampling, and real model misses — most of which a consumer cannot change, which is the whole point.
+This is not the certified SWE-bench figure and shouldn't be quoted as one. Scoring is our own approximation — per-repo Python via uv rather than the official Docker harness — it's the sympy slice only, and it's a single attempt with no sampling. Runs on a temperature-0 mixture-of-experts model are not perfectly deterministic, so individual instances flip between runs; treat 34% as a self-consistent internal measurement on consumer hardware, not a leaderboard number. The remaining gap to 75.6% is precision (4-bit vs full), context (the card can't hold a big window at full speed), scaffold maturity, sampling, and real model misses — most of which a consumer cannot change, which is the whole point.
 
 ## Files
 
