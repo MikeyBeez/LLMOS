@@ -23,7 +23,7 @@ from llmos.isa import Instruction, Op
 import envcheck   # version checker: pick + uv-provision the right Python per repo
 
 HOST = "http://127.0.0.1:11434"      # ornith is local on pop
-MODEL = "ornith:35b"
+MODEL = "ornith:9b"   # Ornith-1.0-9B dense, Q4_K_M, fits 100% on the 16GB GPU (no CPU offload)
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
