@@ -16,7 +16,7 @@ from llmos.kernel import Kernel
 from llamacpp_cpu import LlamaCppCPU
 
 HOST   = "http://127.0.0.1:8080"
-NUMCTX = 65536
+NUMCTX = 131072
 GRAMMAR = os.path.expanduser("~/Code/LLMOS/isa.gbnf")
 
 

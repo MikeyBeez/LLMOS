@@ -22,15 +22,20 @@ from llmos.cpu import OllamaCPU
 from llmos.isa import Instruction, Op
 import envcheck   # version checker: pick + uv-provision the right Python per repo
 
-HOST = "http://127.0.0.1:11434"      # ornith is local on pop
+HOST = "http://127.0.0.1:11434"      # ollama /api/chat — TODO: port to llama-server /v1/chat/completions
 MODEL = "ornith:9b"   # Ornith-1.0-9B dense, Q4_K_M, fits 100% on the 16GB GPU (no CPU offload)
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
 FORCE_AFTER = 8    # tool calls with no edit -> nudge the model to stop exploring and edit
 EDIT_DEADLINE = 16   # tool calls with no edit -> HARD stop: restrict the toolset to fs_edit + finish
-CTX_HIGH = 48000   # verbatim tail budget in tokens; with num_ctx=64K the model gets real room before any compaction
-CTX_CHUNK = 6      # compact in blocks of this many steps, so the digest/cache prefix is stable between jumps
+# Watermarks grown for 128K context (was 48K/6 at 64K ctx). Bigger CTX_HIGH keeps
+# more of the trace verbatim before compaction; bigger CTX_CHUNK keeps the
+# digest/cache-prefix stable across a longer stretch, so we pay the reprefill
+# tax less often. With cache_prompt in llama.cpp, the ideal is fewer, larger
+# compactions since each compaction invalidates the cached prefix.
+CTX_HIGH = 100000  # verbatim tail budget in tokens; at 128K ctx we still leave ~20K for system/prompt/digest
+CTX_CHUNK = 10     # compact in blocks of this many steps
 
 # --- native tool schema (Ollama /api/chat tools) ------------------------
 TOOLS = [
@@ -95,7 +100,11 @@ class CodingCPU(OllamaCPU):
         # it at 64K costs ~50s and was stalling the run when ollama evicted it between steps.
         # num_predict 8192: ornith is a thinking model; at 2048 it was being truncated mid-thought
         # before emitting its tool call (92% of no-tool-call steps hit the 2048 cap).
-        super().__init__(model=MODEL, host=HOST, num_predict=8192, num_ctx=65536, keep_alive="24h", **kw)
+        # num_ctx 131072 (128K): with 128K available, CTX_HIGH watermark grows to
+        # 100K so we compact less often and pay the reprefill tax less. The
+        # 9B fits comfortably at 128K on 16GB; the 35B would need the MoE offload
+        # server (llama-server on 8080) instead of ollama.
+        super().__init__(model=MODEL, host=HOST, num_predict=8192, num_ctx=131072, keep_alive="24h", **kw)
         # the agent receives ONLY the repo path and the issue text -- never the
         # grading tests, gold patch, or any per-instance hint. keep it that way.
         self.repo, self.problem = repo, problem

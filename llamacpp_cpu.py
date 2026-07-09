@@ -36,7 +36,7 @@ class LlamaCppCPU(OllamaCPU):
 
     def __init__(self, model="ornith:35b", host="http://127.0.0.1:8080",
                  grammar_path=None, cache_prompt=True,
-                 num_predict=4096, num_ctx=65536,
+                 num_predict=4096, num_ctx=131072,
                  seed=0, max_retries=1, log=None, keep_alive="24h"):
         super().__init__(model=model, host=host, seed=seed, max_retries=max_retries,
                          log=log, keep_alive=keep_alive,

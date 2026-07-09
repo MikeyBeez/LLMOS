@@ -21,7 +21,7 @@ BIN="${BIN:-$HOME/llama.cpp/build/bin/llama-server}"
 GGUF="${GGUF:-$HOME/ornith_35b.gguf}"      # symlink created by run_llamacpp.sh
 PORT="${PORT:-8080}"
 HOST="${HOST:-127.0.0.1}"
-CTX="${CTX:-65536}"
+CTX="${CTX:-131072}"    # 128K — leaves ~1.3GB VRAM headroom on a 16GB card with the MoE offload below
 PARALLEL="${PARALLEL:-1}"
 LOG="${LOG:-/tmp/llamacpp_moe.log}"
 
