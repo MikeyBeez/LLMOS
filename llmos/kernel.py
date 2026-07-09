@@ -122,8 +122,15 @@ class Kernel:
     def _derive_contract(goal: str) -> dict:
         """Deterministically read a goal's required postconditions from its text.
         Any memory key the goal names (\"... under key X ...\") MUST exist before the
-        process may RETURN, so a known-required step cannot be skipped by the CPU."""
-        keys = re.findall(r"key\s+['\"]?([A-Za-z_]\w*)['\"]?", goal or "", flags=re.IGNORECASE)
+        process may RETURN, so a known-required step cannot be skipped by the CPU.
+
+        Match only the STORAGE-INTENT phrasing (under/save/write/store/persist/put
+        + 'key <NAME>'), not any incidental 'key <word>' in the prose. Previously
+        MMLU questions containing 'the key insight' or 'a key ingredient' were
+        being read as memory-key contracts, causing false-positive RETURN traps."""
+        pat = (r"(?:under|save|write|store|persist|put|as)\s+"
+               r"(?:the\s+)?key\s+['\"]?([A-Za-z_]\w*)['\"]?")
+        keys = re.findall(pat, goal or "", flags=re.IGNORECASE)
         seen, req = set(), []
         for k in keys:
             if k not in seen:
@@ -408,7 +415,32 @@ class Kernel:
                     self.log(f"[contract] pid={pcb.pid} RETURN blocked — unmet {missing} "
                              f"(attempt {pcb.contract_tries}/{CONTRACT_MAX_TRIES})")
                 else:
-                    pcb.result = args.get("result")
+                    # RETURN backfill: if the CPU emitted `RETURN args={}` (no result
+                    # key) OR result is None but the process had a CALL that produced
+                    # a value, use that value. Ornith often computes the answer via
+                    # calc then emits an empty RETURN; the answer is right there in
+                    # the last CALL. This is a soft-recovery, not a spec violation:
+                    # if the model did explicitly say `result: null`, we honor that.
+                    # Guard: DO NOT backfill a numeric calc-value when the goal
+                    # asks for a categorical/letter answer (MCQ). Otherwise the
+                    # kernel returns 362880 when the question was "what is the
+                    # ones digit" (answer: C=0). For MCQ goals, empty RETURN
+                    # stays None; the CPU tail-extractor will already have run.
+                    ret_val = args.get("result")
+                    _goal_l = (pcb.goal or "").lower()
+                    _mcq = ("single letter" in _goal_l and "a, b, c, or d" in _goal_l)
+                    if not _mcq and ("result" not in args or ret_val is None):
+                        for step in reversed(pcb.context):
+                            if step.get("op") == "CALL" and isinstance(step.get("result"), dict):
+                                v = step["result"].get("value")
+                                if v is None:
+                                    v = step["result"].get("return") or step["result"].get("stdout")
+                                if v is not None:
+                                    ret_val = v
+                                    self.log(f"[return-backfill] pid={pcb.pid} empty RETURN "
+                                             f"-> backfilled result from pc={step['pc']} CALL: {str(v)[:40]!r}")
+                                    break
+                    pcb.result = ret_val
                     pcb.status = Status.DONE
                     result = {"return": pcb.result}
                     done = True

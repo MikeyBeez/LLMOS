@@ -205,6 +205,38 @@ class OllamaCPU:
         called_clock = any(c.get("op") == "CALL" for c in ctx)
         last_result = ctx[-1]["result"] if ctx else None
 
+        # Goal-conditioned tail extraction. When the goal specifies the answer
+        # SHAPE (a single letter A-D for MCQ, or a boxed value for math), pull
+        # the answer straight from the tail of a bare-prose reply rather than
+        # failing schema-validation. This turns "Let me think through this...
+        # therefore the answer is A." into RETURN(result="A"), matching the
+        # docstring's promise that "the model does NOT have to return JSON."
+        goal = getattr(pcb, "goal", "") or ""
+        goal_l = goal.lower()
+        if "single letter" in goal_l and "a, b, c, or d" in goal_l:
+            tail = text[-500:]
+            m_ans = re.search(r"(?:answer|choice|option|final|correct)[^A-Za-z0-9]{0,20}([ABCD])\b",
+                              tail, re.IGNORECASE)
+            if m_ans:
+                return Instruction(Op.RETURN, {"result": m_ans.group(1).upper()})
+            m_boxed = re.search(r"\\boxed\{([ABCD])\}", tail)
+            if m_boxed:
+                return Instruction(Op.RETURN, {"result": m_boxed.group(1)})
+            # last bare capital A-D in the tail (weakest signal, kept last)
+            letters = re.findall(r"\b([ABCD])\b", tail)
+            if letters:
+                return Instruction(Op.RETURN, {"result": letters[-1]})
+        # math short-answer: goal asks to RETURN the final answer as a value
+        if "solve this math problem" in goal_l or ("return" in goal_l and "final answer" in goal_l):
+            tail = text[-600:]
+            m_box = re.search(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", tail)
+            if m_box:
+                return Instruction(Op.RETURN, {"result": m_box.group(1).strip()})
+            m_ans = re.search(r"(?:answer|result)\s*(?:is|=|:)\s*([-+]?\d+(?:\.\d+)?(?:/\d+)?)",
+                              tail, re.IGNORECASE)
+            if m_ans:
+                return Instruction(Op.RETURN, {"result": m_ans.group(1)})
+
         if re.search(r"\b(return|final answer|task (is )?complete|done|finished|goal (is )?met|"
                      r"already saved|has been saved|saved (it|the))\b", t):
             # take the last non-empty sentence/line as the answer, not the reasoning preamble
