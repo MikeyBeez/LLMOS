@@ -11,6 +11,8 @@ ever emitting an edit; a `locate(pattern) -> read_range(file, start, end)
 """
 import os, re, shlex, subprocess
 
+from repo_bootstrap_tools import llm_call, _extract_json
+
 
 def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
     """Return handlers bound to this repo checkout + the FAIL_TO_PASS test
@@ -38,8 +40,10 @@ def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
                 "stderr": (r.stderr or "")[-2000:]}
 
     def h_locate(pcb, args):
-        """grep for a pattern, optionally scoped by a file glob. Returns
-        file:line matches (up to 40) so the model doesn't drown in output."""
+        """grep for a pattern, then ask the LLM which hit is most likely the
+        actual site to investigate. Deterministic search + intelligent
+        ranking = the caller gets 'go read line 227 of foo.py' instead of
+        40 mystery hits."""
         pat = str(args.get("pattern", ""))
         glob_pat = args.get("file_glob") or ""
         cmd = f'grep -RIn --include="*.py" {shlex.quote(pat)} .'
@@ -47,8 +51,23 @@ def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
             cmd = f'grep -RIn --include={shlex.quote(glob_pat)} {shlex.quote(pat)} .'
         r = _run(cmd, timeout=60)
         lines = (r.stdout or "").splitlines()[:40]
-        return {"matches": lines, "match_count": len(lines),
-                "truncated": len(lines) == 40}
+        result = {"matches": lines, "match_count": len(lines),
+                  "truncated": len(lines) == 40}
+        if len(lines) > 1:
+            # LLM ranking: the model has repo context from problem_statement,
+            # so it can name the hit that looks like it MATTERS for the bug.
+            hits_blob = "\n".join(lines[:30])
+            ranking = llm_call(
+                system=("You rank grep hits by likelihood of being the actual "
+                        "bug site vs test file / comment / unrelated match. "
+                        "Answer JSON."),
+                prompt=(f"grep pattern: {pat!r}\n\nHits:\n{hits_blob}\n\n"
+                        'Return JSON: {"top_hit":"path/to/file.py:LINE", '
+                        '"reason":"why this one", '
+                        '"discard":["path:LINE reasons to skip"]}'))
+            parsed = _extract_json(ranking) or {}
+            result["ranked"] = parsed
+        return result
 
     def h_read_range(pcb, args):
         """Read lines [start, end] of a specific file. Encodes the
@@ -109,10 +128,24 @@ def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
         ok = r.returncode == 0 and "passed" in (r.stdout or "")
         if ok and not override:
             state["fix_verified"] = True
-        return {"ok": ok, "exit": r.returncode,
-                "stdout": (r.stdout or "")[-2500:],
-                "stderr": (r.stderr or "")[-1000:],
-                "tested_ids": ids}
+        result = {"ok": ok, "exit": r.returncode,
+                  "stdout": (r.stdout or "")[-2500:],
+                  "stderr": (r.stderr or "")[-1000:],
+                  "tested_ids": ids}
+        if not ok:
+            # Explain the failure so the model doesn't have to parse
+            # thousands of chars of pytest output itself.
+            result["diagnosis"] = llm_call(
+                system=("You explain pytest failures for a bug-fix agent. "
+                        "Be specific about what the assertion / traceback "
+                        "shows and what to change next."),
+                prompt=(f"Target test(s): {ids}\n\n"
+                        f"pytest output:\n{result['stdout']}\n"
+                        f"{result['stderr']}\n\n"
+                        "In 2-4 sentences: what is the assertion or error, "
+                        "which line of code is the likely fault, and what "
+                        "should the fix look like?"))
+        return result
 
     def h_submit(pcb, args):
         """Terminal call. Rejected if run_failing_test hasn't succeeded on the
