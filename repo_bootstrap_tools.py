@@ -312,31 +312,64 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
         return cfg
 
     def h_web_search(pcb, args):
-        # Simple DuckDuckGo instant-answer JSON scraper. Not perfect but no
-        # API key required. If the network is blocked or the endpoint is
-        # rate-limited, we fail closed and tell the model.
+        # Two-tier search: try DuckDuckGo Instant Answer API (JSON, stable)
+        # first for a definitive answer; if that's empty, hit the HTML SERP
+        # and parse the newer container class names DDG uses (2024+).
+        # Historically the old class="result__a" regex was returning 0 hits
+        # because DDG changed its HTML — the model was flying blind.
         q = str(args.get("query", ""))
         n = int(args.get("n", 5))
+        hits = []
+        # Tier 1: Instant Answer API
         try:
-            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(q)
+            api_url = ("https://api.duckduckgo.com/?format=json&no_html=1&q="
+                       + urllib.parse.quote(q))
+            with urllib.request.urlopen(api_url, timeout=15) as r:
+                d = json.loads(r.read())
+            if d.get("AbstractText"):
+                hits.append({"title": d.get("Heading", ""),
+                             "snippet": d["AbstractText"][:400],
+                             "url": d.get("AbstractURL", "")})
+            for rel in (d.get("RelatedTopics") or [])[:n]:
+                if isinstance(rel, dict) and rel.get("Text"):
+                    hits.append({"title": rel.get("Text", "")[:200],
+                                 "snippet": rel.get("Text", "")[:400],
+                                 "url": rel.get("FirstURL", "")})
+        except Exception:
+            pass
+        # Tier 2: HTML SERP with the modern class names
+        try:
+            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q)
             req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 LLMOS-repo-bootstrap/1.0",
+                "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
             })
             with urllib.request.urlopen(req, timeout=15) as r:
                 html = r.read().decode("utf-8", errors="ignore")
-            hits = []
-            for m in re.finditer(
-                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
-                r'class="result__snippet"[^>]*>(.*?)</a>',
-                html, re.DOTALL,
-            ):
-                title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                snippet = re.sub(r"<[^>]+>", "", m.group(3)).strip()
-                url_hit = m.group(1)
-                hits.append({"title": title[:200], "snippet": snippet[:400],
-                             "url": url_hit[:300]})
+            # try several patterns (DDG changes class names periodically)
+            for pat in [
+                r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
+                r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+                r'<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>.*?'
+                r'result__snippet"[^>]*>(.*?)</',
+                r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>.*?'
+                r'<div[^>]*>(.*?)</div>',
+            ]:
+                for m in re.finditer(pat, html, re.DOTALL):
+                    title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+                    snippet = re.sub(r"<[^>]+>", "", m.group(3)).strip()
+                    url_hit = m.group(1)
+                    if title and snippet:
+                        hits.append({"title": title[:200],
+                                     "snippet": snippet[:400],
+                                     "url": url_hit[:300]})
+                    if len(hits) >= n:
+                        break
                 if len(hits) >= n:
                     break
+        except Exception:
+            pass
+        try:
             # Ask the LLM to synthesize the answer from the hits. This is
             # the whole point — search dumps snippets; the tool returns
             # actionable knowledge.
@@ -361,6 +394,11 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
         new_env = args.get("env_vars", {}) or {}
         if isinstance(new_env, dict):
             state["env_vars"].update({str(k): str(v) for k, v in new_env.items()})
+        # Wipe any prior .venv so uv can (re)create it. Without this, uv
+        # refuses to overwrite and the model's retries with different Python
+        # versions silently reuse the broken env — bootstrap can't converge.
+        import shutil as _sh
+        _sh.rmtree(os.path.join(repo_dir, ".venv"), ignore_errors=True)
         # create/replace the venv
         r1 = _run_in_venv(f"{UV} venv --python {pyv} .venv", timeout=180)
         # install the repo with extras (fall back to bare if extras missing)
