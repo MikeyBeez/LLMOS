@@ -107,8 +107,36 @@ class SyscallTable:
     _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
             ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
             ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos}
-    _FUNCS = {"sqrt": math.sqrt, "abs": abs, "round": round, "min": min, "max": max,
-              "floor": math.floor, "ceil": math.ceil, "int": int, "float": float, "pow": pow}
+    # Extended function set. Ornith's traces show heavy use of factorial (n!),
+    # binomial (C(n,k) / binomial), gcd/lcm, trig with arcsin-style names, and
+    # trailing 'mod'. Before this extension the model burned many steps on
+    # `1!+2!` / `C(6,3)` / `arcsin(...)` / `lcm(...)` / `200 mod 7` retries.
+    _FUNCS = {
+        # base
+        "sqrt": math.sqrt, "abs": abs, "round": round, "min": min, "max": max,
+        "floor": math.floor, "ceil": math.ceil, "int": int, "float": float, "pow": pow,
+        # combinatorics
+        "factorial": math.factorial,
+        # 'C' and 'P' are aliased in both cases since _resolve_words lowercases.
+        "binomial": math.comb, "comb": math.comb, "C": math.comb, "c": math.comb,
+        "permutations": math.perm, "perm": math.perm, "P": math.perm, "p": math.perm,
+        "gcd": math.gcd, "lcm": math.lcm,
+        # trig (radians) + inverse (allow arc* aliases as ornith uses those)
+        "sin": math.sin, "cos": math.cos, "tan": math.tan,
+        "asin": math.asin, "acos": math.acos, "atan": math.atan, "atan2": math.atan2,
+        "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+        # hyperbolic
+        "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+        # exp/log
+        "exp": math.exp, "log": math.log, "ln": math.log,
+        "log2": math.log2, "log10": math.log10,
+        # angle conversion
+        "degrees": math.degrees, "radians": math.radians,
+        "deg2rad": math.radians, "rad2deg": math.degrees,
+    }
+    # Constants ornith cites verbatim (pi, e, tau). Parsed as ast.Name nodes.
+    _CONSTS = {"pi": math.pi, "PI": math.pi, "e": math.e, "E": math.e,
+               "tau": math.tau, "inf": math.inf}
     _WORDNUM = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                 "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
                 "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
@@ -131,6 +159,31 @@ class SyscallTable:
             e = re.sub(rf"(\d+(?:\.\d+)?)\s+{u}\b", lambda mo, mm=m: f"({mo.group(1)}*{mm})", e)
             e = re.sub(rf"\b{u}\b", str(m), e)
         e = re.sub(r"\bhalf\b", "0.5", e)
+        # Ornith notation: `5!` (factorial postfix), `(5+3)!`, `n mod m`,
+        # `^` (used casually as exponent in prose).
+        # Digit factorials first: `5!` -> `factorial(5)`.
+        e = re.sub(r"(\d+(?:\.\d+)?)!", r"factorial(\1)", e)
+        # Paren factorials: `(...)! ` -> `factorial((...))`. Walk backward from
+        # each `)!` to the matching `(`, then wrap. Handles arbitrary nesting.
+        while ")!" in e:
+            idx = e.rindex(")!")
+            depth, i = 1, idx - 1
+            while i >= 0 and depth > 0:
+                if e[i] == ")":
+                    depth += 1
+                elif e[i] == "(":
+                    depth -= 1
+                i -= 1
+            if depth != 0:
+                break   # unmatched parens; leave alone so the AST gives a clean error
+            start = i + 1
+            e = e[:start] + "factorial(" + e[start:idx + 1] + ")" + e[idx + 2:]
+        # 'n mod m' -> 'n % m'  (word form ornith uses in prose)
+        e = re.sub(r"\bmod\b", "%", e)
+        # '^' as exponent -> '**'  (ornith drops LaTeX/plain-text sometimes)
+        e = re.sub(r"\^", "**", e)
+        # 'π' unicode -> 'pi'
+        e = e.replace("π", "pi").replace("×", "*").replace("÷", "/")
         return e
 
     def _eval_node(self, node):
@@ -138,13 +191,21 @@ class SyscallTable:
             return self._eval_node(node.body)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return node.value
+        # Named constants: pi, e, tau, inf. Ornith writes `pi * r**2` verbatim.
+        if isinstance(node, ast.Name) and node.id in self._CONSTS:
+            return self._CONSTS[node.id]
         if isinstance(node, ast.BinOp) and type(node.op) in self._OPS:
             return self._OPS[type(node.op)](self._eval_node(node.left), self._eval_node(node.right))
         if isinstance(node, ast.UnaryOp) and type(node.op) in self._OPS:
             return self._OPS[type(node.op)](self._eval_node(node.operand))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self._FUNCS:
             return self._FUNCS[node.func.id](*[self._eval_node(a) for a in node.args])
-        raise ValueError("only numbers, + - * / // % **, and sqrt/abs/round/min/max are allowed")
+        # Helpful error names the supported surface so the model can adapt.
+        raise ValueError(
+            "only numbers, + - * / // % ** (^ works too), pi/e/tau, and functions "
+            + ", ".join(sorted(self._FUNCS.keys()))
+            + " are allowed"
+        )
 
     def _calc(self, pcb, args) -> dict:
         raw = str(args.get("expr", "")).strip()

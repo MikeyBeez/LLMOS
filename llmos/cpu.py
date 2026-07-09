@@ -304,11 +304,17 @@ class OllamaCPU:
             '  {"op":"EVICT","args":{"key":"..."}}   (drop a paged-in key from your window once done)\n'
             '  {"op":"RETURN","args":{"result":<any>}}\n\n'
             "Available syscalls for CALL: clock.now (current UTC time); "
-            "calc (evaluate arithmetic EXACTLY; it understands quantity words like "
-            "dozen, half a dozen, score, and sqrt/abs/round/min/max).\n"
-            "Do ALL arithmetic by CALLing calc, and pass quantities AS WRITTEN, e.g.:\n"
-            '  {"op":"CALL","args":{"name":"calc","args":{"expr":"half a dozen * 6000"}}}\n'
-            "Do NOT convert quantity words to numbers yourself; let calc do it.\n"
+            "calc (evaluate arithmetic EXACTLY). calc understands:\n"
+            "  - basic ops: + - * / // % **, and ^ works too\n"
+            "  - factorials: 5!, (3+2)!\n"
+            "  - combinatorics: C(n,k), P(n,k), binomial(n,k), factorial(n), gcd/lcm\n"
+            "  - trig (radians): sin, cos, tan, arcsin/asin, arccos/acos, arctan/atan, sinh, cosh, tanh\n"
+            "  - exp/log: exp, log, ln, log2, log10\n"
+            "  - constants: pi, e, tau; use `n mod m` or `n % m` for modulo\n"
+            "  - misc: sqrt, abs, round, floor, ceil, min, max, degrees, radians\n"
+            "  - quantity words: dozen, half a dozen, score, gross\n"
+            'Example: {"op":"CALL","args":{"name":"calc","args":{"expr":"C(6,3) * C(5,2)"}}}\n'
+            "Do NOT convert quantity words or notation to numbers yourself; let calc do it.\n"
             "Use earlier step results; do not repeat a completed step; RETURN when the goal is met.\n\n"
             f"GOAL: {pcb.goal}\n"
             f"STEPS SO FAR:\n{history}\n\n"
