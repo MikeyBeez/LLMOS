@@ -1,0 +1,29 @@
+# GBNF grammar for LLMOS ISA — built on llama.cpp's json.gbnf conventions.
+# Allows ornith's thinking-mode reasoning before the closing Instruction JSON.
+# RETURN's args.result is FORCED to be present and non-null at the token layer.
+
+root         ::= "{" ws instruction "}" ws
+
+instruction  ::= plan-body | call-body | write-body | read-body | evict-body | return-body
+
+plan-body    ::= "\"op\"" ws ":" ws "\"PLAN\""      ws "," ws "\"args\"" ws ":" ws "{" ws "\"text\"" ws ":" ws string ws "}"
+call-body    ::= "\"op\"" ws ":" ws "\"CALL\""      ws "," ws "\"args\"" ws ":" ws "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws value ws "}"
+write-body   ::= "\"op\"" ws ":" ws "\"WRITE_MEM\"" ws "," ws "\"args\"" ws ":" ws "{" ws "\"key\""  ws ":" ws string ws "," ws "\"value\"" ws ":" ws value ws "}"
+read-body    ::= "\"op\"" ws ":" ws "\"READ_MEM\""  ws "," ws "\"args\"" ws ":" ws "{" ws "\"key\""  ws ":" ws string ws "}"
+evict-body   ::= "\"op\"" ws ":" ws "\"EVICT\""     ws "," ws "\"args\"" ws ":" ws "{" ws "\"key\""  ws ":" ws string ws "}"
+# RETURN's result MUST be non-null. This is the key win: the grammar forbids
+# the "{"op":"RETURN","args":{}}" and "..."result":null" patterns that were
+# causing our empty-answer failure mode.
+return-body  ::= "\"op\"" ws ":" ws "\"RETURN\""    ws "," ws "\"args\"" ws ":" ws "{" ws "\"result\"" ws ":" ws non-null-value ws "}"
+
+# JSON value subset (adapted from json.gbnf).
+value          ::= object | array | string | number | ("true" | "false" | "null")
+non-null-value ::= object | array | string | number | ("true" | "false")
+
+object ::= "{" ws ( string ws ":" ws value (ws "," ws string ws ":" ws value)* )? ws "}"
+array  ::= "[" ws ( value (ws "," ws value)* )? ws "]"
+
+string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) )* "\""
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})?
+
+ws     ::= [ \t\n]*
