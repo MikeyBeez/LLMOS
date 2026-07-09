@@ -3,23 +3,69 @@
 Purpose: give the model tools that mirror what a human developer does when
 handed an unfamiliar Python project — read the docs, inspect the config,
 pick a Python version, provision a venv, and VERIFY the env works before
-touching anything else. Reusable outside SWE-bench: any time we need to
-set up an arbitrary Python project.
+touching anything else.
 
-Design principle (from Mikey): 'we should verify the env before trying to
-move on'. The bootstrap agent doesn't get to declare success. The gate
-requires both an import-sanity check AND a smoke test that runs at least
-one test on the unmodified code. If either fails, the agent must diagnose
-(read errors, read docs, web-search) and retry.
-
-The tool schema is OpenAI-compatible (routes through ornith's qwen3_xml
-tool-call parser via ollama /api/chat). Each tool_call maps to an LLMOS
-syscall; the kernel dispatches and returns structured results.
+Design principle (from Mikey):
+  (1) 'Verify the env before moving on.' declare_env_ready is rejected
+      until both run_sanity and run_smoke_test have returned ok=true.
+  (2) 'Tools are a sort of hardened protocol; they should also be able to
+      call the model.' Each tool has a FIXED interface (input schema,
+      output shape) but is FREE inside — it can use regex, subprocess,
+      AND the LLM to produce its answer. Tools that reason about messy
+      inputs (docs, config, search results, error logs) are much more
+      valuable when they can ask the LLM to synthesize an actionable
+      recommendation, not just return raw bytes.
 """
 import glob, json, os, re, subprocess, urllib.parse, urllib.request
 
 
 UV = os.path.expanduser("~/.local/bin/uv")
+
+
+# ---------- LLM helper: tools can call the model ------------------------
+# A tool is a hardened protocol at the interface layer; internally it may
+# do whatever helps produce a good answer, including asking the LLM.
+def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
+             model="ornith:35b", host="http://127.0.0.1:11434",
+             temperature=0.3, max_tokens=800, timeout=180):
+    """Synchronous chat with the same ornith model the top-level agent uses.
+    Lower temperature than the agent's T=1.0: this is subordinate reasoning,
+    not exploration. Returns just the text content.
+    """
+    body = json.dumps({
+        "model": model, "stream": False, "keep_alive": "24h",
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user",   "content": prompt}],
+        "options": {"temperature": temperature, "top_p": 0.95, "top_k": 20,
+                    "num_predict": max_tokens},
+    }).encode()
+    try:
+        req = urllib.request.Request(host + "/api/chat", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read())
+        m = resp.get("message", {}) or {}
+        return m.get("content", "") or m.get("thinking", "")
+    except Exception as e:
+        return f"[llm_call error: {e}]"
+
+
+def _extract_json(text):
+    """Loose JSON extraction — the LLM often wraps JSON in prose. Grab the
+    first balanced {...} that parses."""
+    if not text: return None
+    depth, start = 0, None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0: start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                cand = text[start:i+1]
+                try: return json.loads(cand)
+                except Exception: pass
+    return None
 
 
 # ---------- OpenAI-format tool schemas ---------------------------------
@@ -149,24 +195,53 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
                               text=True, timeout=timeout, env=venv_env)
 
     def h_read_docs(pcb, args):
+        """Read the docs AND ask the model to extract the specific install
+        recommendation. The tool's job is to produce an actionable answer,
+        not to dump raw README bytes into the caller's context."""
         max_c = int(args.get("max_chars_per_file", 8000))
         patterns = ["README*", "INSTALL*", "CONTRIBUTING*", "docs/**/install*",
                     "docs/**/README*", "docs/**/quickstart*"]
-        out = []
+        raw = []
         for pat in patterns:
             for p in glob.glob(os.path.join(repo_dir, pat), recursive=True):
                 try:
                     with open(p, encoding="utf-8", errors="ignore") as f:
-                        txt = f.read()[:max_c]
-                    out.append({"path": os.path.relpath(p, repo_dir), "content": txt})
+                        raw.append({"path": os.path.relpath(p, repo_dir),
+                                    "content": f.read()[:max_c]})
                 except OSError:
                     pass
-        return {"files": out, "count": len(out)}
+        # Ask the LLM to extract the install-relevant parts. Cheaper than
+        # returning ~24KB of README for the caller to re-read.
+        blob = "\n\n---\n\n".join(f"### {d['path']}\n{d['content']}" for d in raw[:4])
+        recommendation = ""
+        if blob:
+            recommendation = llm_call(
+                system=("You extract Python-project install info. "
+                        "Answer JSON only."),
+                prompt=("From the following project docs, extract:\n"
+                        "- supported Python versions (as a list)\n"
+                        "- exact install command(s) recommended\n"
+                        "- any system prerequisites (apt/brew packages)\n"
+                        "- any environment variables required to run tests\n"
+                        "- extras (e.g. `.[test]`, `.[dev]`) mentioned\n\n"
+                        f"Docs:\n{blob[:16000]}\n\n"
+                        'Return JSON: {"python_versions":[], "install_cmds":[], '
+                        '"system_prereqs":[], "test_env_vars":{}, '
+                        '"extras":[], "notes":""}'))
+        parsed = _extract_json(recommendation) or {}
+        return {"files": [{"path": d["path"], "size": len(d["content"])} for d in raw],
+                "count": len(raw),
+                "recommendation": parsed,
+                "recommendation_raw": recommendation[:2000]}
 
     def h_inspect_config(pcb, args):
+        """Read the config files AND ask the LLM to synthesize a concrete
+        install recommendation. The regex parser gets the shape; the LLM
+        makes the call."""
         cfg = {"declared_python_versions": [], "install_deps": [],
                "test_extras_names": [], "dev_extras_names": [],
                "build_system": None, "has_editable_install": False}
+        config_texts = []
         for name in ("setup.py", "setup.cfg", "pyproject.toml"):
             p = os.path.join(repo_dir, name)
             if not os.path.isfile(p):
@@ -175,6 +250,7 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
                 text = open(p, encoding="utf-8", errors="ignore").read()
             except OSError:
                 continue
+            config_texts.append((name, text))
             # declared Python versions
             for m in re.finditer(r"Python\s*::\s*3\.(\d+)\b", text):
                 v = f"3.{m.group(1)}"
@@ -213,6 +289,26 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
                     cfg["declared_python_versions"].insert(0, v)
             except OSError:
                 pass
+        # LLM synthesis: given the config texts, what should we do?
+        blob = "\n\n---\n\n".join(f"### {n}\n{t[:6000]}" for n, t in config_texts)
+        recommendation = ""
+        if blob:
+            recommendation = llm_call(
+                system=("You configure Python builds. Choose a specific Python "
+                        "version and install command. Answer JSON only."),
+                prompt=("Given these config files, give a concrete install plan "
+                        "that will produce a working test environment.\n\n"
+                        f"{blob[:12000]}\n\n"
+                        'Return JSON: {"python_version":"3.X", '
+                        '"install_cmd":"uv pip install -e \\".[test]\\"", '
+                        '"extras_name":"test", "extra_packages":["hypothesis"], '
+                        '"env_vars":{"KEY":"VALUE"}, '
+                        '"expected_import":"import astropy", '
+                        '"smoke_test":"path::test_name", '
+                        '"reasoning":""}'))
+        parsed = _extract_json(recommendation) or {}
+        cfg["recommendation"] = parsed
+        cfg["recommendation_raw"] = recommendation[:2000]
         return cfg
 
     def h_web_search(pcb, args):
@@ -241,7 +337,20 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
                              "url": url_hit[:300]})
                 if len(hits) >= n:
                     break
-            return {"query": q, "hits": hits}
+            # Ask the LLM to synthesize the answer from the hits. This is
+            # the whole point — search dumps snippets; the tool returns
+            # actionable knowledge.
+            synthesis = ""
+            if hits:
+                hits_blob = "\n".join(f"- {h['title']}: {h['snippet']}"
+                                       for h in hits)
+                synthesis = llm_call(
+                    system=("You synthesize search results for a Python-setup "
+                            "question. Answer concisely."),
+                    prompt=(f"Question: {q}\n\nSearch results:\n{hits_blob}\n\n"
+                            "Extract the specific actionable answer to the "
+                            "question in 1-3 sentences."))
+            return {"query": q, "hits": hits, "answer": synthesis}
         except Exception as e:
             return {"query": q, "hits": [], "error": str(e)}
 
@@ -271,11 +380,23 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
         # any new provision invalidates prior verification
         state["sanity_ok"] = False
         state["smoke_ok"] = False
+        # If install failed, ask the LLM to name what's likely wrong. Cheaper
+        # for the outer agent than parsing pip's error stream itself.
+        diagnosis = ""
+        if r2.returncode != 0:
+            err_tail = (r2.stderr or "")[-3000:]
+            diagnosis = llm_call(
+                system="You diagnose Python pip-install failures. Be specific.",
+                prompt=("A `uv pip install -e .[extras]` command failed. Given "
+                        "the error tail below, name the ONE most likely cause "
+                        f"and the ONE next thing to try.\n\nError:\n{err_tail}\n\n"
+                        "Answer in 2-3 sentences."))
         return {
             "python": pyv, "extras": extras,
             "venv_exit": r1.returncode,
             "install_exit": r2.returncode,
             "install_stderr_tail": (r2.stderr or "")[-1500:],
+            "install_diagnosis": diagnosis,
             "extra_pkgs_exit": r3.returncode if r3 else None,
             "env_vars": dict(state["env_vars"]),
         }
@@ -287,9 +408,18 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
             timeout=120)
         ok = r.returncode == 0
         state["sanity_ok"] = ok
-        return {"ok": ok, "exit": r.returncode,
-                "stdout": (r.stdout or "")[-1500:],
-                "stderr": (r.stderr or "")[-1500:]}
+        result = {"ok": ok, "exit": r.returncode,
+                  "stdout": (r.stdout or "")[-1500:],
+                  "stderr": (r.stderr or "")[-1500:]}
+        if not ok:
+            result["diagnosis"] = llm_call(
+                system="You diagnose Python import failures. Be specific.",
+                prompt=(f"An import (`{stmt}`) failed inside a freshly-provisioned "
+                        f"venv. Given the error, name the ONE most likely cause "
+                        f"(missing system lib, wrong Python, missing extra) and "
+                        f"the ONE next thing to try.\n\n"
+                        f"Error:\n{result['stderr']}\n\nAnswer in 2 sentences."))
+        return result
 
     def h_run_smoke(pcb, args):
         test_id = str(args.get("test_id", ""))
@@ -302,13 +432,25 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
             timeout=300)
         ok = r_test.returncode == 0 and "passed" in (r_test.stdout or "")
         state["smoke_ok"] = ok
-        return {
+        result = {
             "ok": ok,
             "collect_exit": r_collect.returncode,
             "collect_tail": (r_collect.stdout or "")[-1500:] + (r_collect.stderr or "")[-500:],
             "test_exit": r_test.returncode,
             "test_tail": (r_test.stdout or "")[-1500:] + (r_test.stderr or "")[-500:],
         }
+        if not ok:
+            result["diagnosis"] = llm_call(
+                system="You diagnose pytest failures. Be specific.",
+                prompt=(f"pytest smoke check failed on `{test_id}`. Given the "
+                        f"output, name the ONE most likely cause (missing env "
+                        f"var like DJANGO_SETTINGS_MODULE, missing test dep, "
+                        f"wrong extras, test doesn't exist, etc.) and the ONE "
+                        f"next thing to try.\n\n"
+                        f"Collect output:\n{result['collect_tail']}\n\n"
+                        f"Test output:\n{result['test_tail']}\n\n"
+                        f"Answer in 2-3 sentences."))
+        return result
 
     handlers = {
         "repo.read_docs":       h_read_docs,
