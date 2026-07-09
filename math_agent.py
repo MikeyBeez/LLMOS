@@ -12,11 +12,11 @@ import json, os, re, sys, time
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from llmos.store import Store
 from llmos.kernel import Kernel
-from llamacpp_cpu import LlamaCppCPU
+from llmos.cpu import OllamaCPU as _CPU
 
-HOST   = "http://127.0.0.1:8080"        # llama-server (run_llamacpp_moe.sh)
+HOST   = "http://127.0.0.1:11434"       # ollama /api/generate + chatml template
 MODEL  = "ornith:35b"
-NUMCTX = 131072                          # 128K
+NUMCTX = 65536
 BUDGET = 20                             # multi-step: model uses calc + RETURN
 INST   = os.path.expanduser("~/math/instances.json")
 OUT    = os.path.expanduser("~/math/results.json")
@@ -99,7 +99,7 @@ def main():
         instances = instances[: int(sys.argv[1])]
 
     store = Store(STORE)
-    cpu = LlamaCppCPU(model=MODEL, host=HOST, num_predict=4096, num_ctx=NUMCTX, keep_alive="24h")
+    cpu = _CPU(model=MODEL, host=HOST, num_predict=2048, num_ctx=NUMCTX, keep_alive="24h")
     kernel = Kernel(store, cpu, project="math")
     kernel.boot()
 

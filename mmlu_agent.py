@@ -11,11 +11,14 @@ import json, os, re, sys, time
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from llmos.store import Store
 from llmos.kernel import Kernel
-from llamacpp_cpu import LlamaCppCPU
+from llmos.cpu import OllamaCPU as _CPU
 
-HOST   = "http://127.0.0.1:8080"        # llama-server (started by run_llamacpp_moe.sh)
+HOST   = "http://127.0.0.1:11434"       # ollama /api/generate (applies chatml
+                                        # template, which our earlier probes
+                                        # showed is essential for ornith to
+                                        # close reasoning cleanly)
 MODEL  = "ornith:35b"
-NUMCTX = 131072                          # 128K — MoE offload leaves room
+NUMCTX = 65536                          # ollama at 128K needs its own tuning; 64K matches v3
 BUDGET = 6                              # generous: model may PLAN once then RETURN
 INST   = os.path.expanduser("~/mmlu/instances.json")
 OUT    = os.path.expanduser("~/mmlu/results.json")
@@ -72,7 +75,7 @@ def main():
         instances = instances[: int(sys.argv[1])]
 
     store = Store(STORE)
-    cpu = LlamaCppCPU(model=MODEL, host=HOST, num_predict=4096, num_ctx=NUMCTX, keep_alive="24h")
+    cpu = _CPU(model=MODEL, host=HOST, num_predict=1024, num_ctx=NUMCTX, keep_alive="24h")
     kernel = Kernel(store, cpu, project="mmlu")
     kernel.boot()
 
