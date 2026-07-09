@@ -22,8 +22,8 @@ from llmos.cpu import OllamaCPU
 from llmos.isa import Instruction, Op
 import envcheck   # version checker: pick + uv-provision the right Python per repo
 
-HOST = "http://127.0.0.1:11434"      # ollama /api/chat — TODO: port to llama-server /v1/chat/completions
-MODEL = "ornith:9b"   # Ornith-1.0-9B dense, Q4_K_M, fits 100% on the 16GB GPU (no CPU offload)
+HOST = "http://127.0.0.1:11434"      # ollama /api/chat with qwen3_xml tool-call parser
+MODEL = "ornith:35b"  # Ornith-1.0-35B MoE; the SWE-bench Verified 75.6 was measured on this variant
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces")   # persisted execution traces (observability; never fed back)
 BUDGET = 40
@@ -100,11 +100,15 @@ class CodingCPU(OllamaCPU):
         # it at 64K costs ~50s and was stalling the run when ollama evicted it between steps.
         # num_predict 8192: ornith is a thinking model; at 2048 it was being truncated mid-thought
         # before emitting its tool call (92% of no-tool-call steps hit the 2048 cap).
-        # num_ctx 131072 (128K): with 128K available, CTX_HIGH watermark grows to
-        # 100K so we compact less often and pay the reprefill tax less. The
-        # 9B fits comfortably at 128K on 16GB; the 35B would need the MoE offload
-        # server (llama-server on 8080) instead of ollama.
-        super().__init__(model=MODEL, host=HOST, num_predict=8192, num_ctx=131072, keep_alive="24h", **kw)
+        # num_ctx 131072 (128K); num_predict was 8192 which at temp=1.0 makes
+        # ornith reason ~3 min per turn WITHOUT emitting a tool_call, then get
+        # another turn — burns the whole 40-step budget just thinking. At 44
+        # tok/s on the 5070 Ti with 40% CPU offload, we can't afford that.
+        # 2048 caps each turn at ~45s and forces earlier tool_call emission;
+        # the model can still take multiple turns to reason, just in smaller
+        # chunks. Published Verified 75.6 used tp=8 on A100s with a 4-hour
+        # per-instance timeout; different regime.
+        super().__init__(model=MODEL, host=HOST, num_predict=2048, num_ctx=131072, keep_alive="24h", **kw)
         # the agent receives ONLY the repo path and the issue text -- never the
         # grading tests, gold patch, or any per-instance hint. keep it that way.
         self.repo, self.problem = repo, problem
@@ -297,7 +301,11 @@ class CodingCPU(OllamaCPU):
         body = json.dumps({
             "model": self.model, "stream": False, "keep_alive": self.keep_alive,
             "messages": messages, "tools": tools,
-            "options": {"temperature": 0, "seed": self.seed,
+            # Ornith model card measures SWE-bench Verified at T=1.0 top_p=0.95
+            # (OpenHands harness). Match those knobs so we're evaluating the same
+            # regime the published 75.6% was measured in.
+            "options": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                        "seed": self.seed,
                         "num_ctx": self.num_ctx, "num_predict": self.num_predict},
         }).encode()
         req = urllib.request.Request(self.host + "/api/chat", data=body,
@@ -328,8 +336,27 @@ def setup(inst):
     sh("git config user.email a@b.c; git config user.name a", cwd=repo)
     # version checker: read the repo's declared Python, provision it with uv, install deps.
     # setuptools<81 restores distutils for the middle-aged repos on newer interpreters.
-    venv_py, ver = envcheck.build_venv(repo, 'mpmath pytest "setuptools<81"')
+    venv_py, ver = envcheck.build_venv(repo, 'mpmath pytest "setuptools<81" wheel')
     print("   env: Python %s (uv)" % ver, flush=True)
+    # Install the repo itself + its declared test extras via uv. Every SWE-bench
+    # repo declares its test deps in setup.py / setup.cfg / pyproject.toml; the
+    # extra name varies by project (test / testing / dev / tests). Try each in
+    # order; the first that succeeds gets the deps installed. If all fail (rare),
+    # fall back to a bare editable install so at least the repo's own imports work.
+    UV = os.path.expanduser("~/.local/bin/uv")
+    for extra in ("test", "testing", "tests", "dev"):
+        r = sh(f'{UV} pip install --python .venv/bin/python -q -e ".[{extra}]"',
+               cwd=repo, timeout=600)
+        if r.returncode == 0:
+            print(f"   installed .[{extra}]", flush=True)
+            break
+    else:
+        print("   no test extras; installing repo bare (.)", flush=True)
+        sh(f'{UV} pip install --python .venv/bin/python -q -e .', cwd=repo, timeout=600)
+    # Common test deps that appear in conftest.py across many repos and aren't
+    # always in the .[test] extra. `hypothesis` shows up in astropy/numpy/etc.
+    sh(f'{UV} pip install --python .venv/bin/python -q hypothesis pytest-xdist',
+       cwd=repo, timeout=300)
     return repo
 
 
