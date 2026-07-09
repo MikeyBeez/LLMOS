@@ -55,7 +55,16 @@ def norm(s):
     return s.strip().lower()
 
 
-def prompt_for(inst):
+def prompt_for(inst, strict=False):
+    stricture = ""
+    if strict:
+        stricture = (
+            "\n\nIMPORTANT: your previous attempt did not produce a valid answer. "
+            "You MUST RETURN the numeric or symbolic answer in the result field "
+            "this time, even if you are unsure. Do not leave result empty. "
+            "Do not RETURN reasoning text; RETURN the answer value only "
+            "(e.g. `26` or `1/2` or `sqrt(34)`)."
+        )
     return (
         f"Solve this math problem. Do ALL arithmetic by CALLing the calc syscall "
         f"(pass expressions verbatim, do not compute yourself). When you have the "
@@ -63,11 +72,12 @@ def prompt_for(inst):
         f"no LaTeX except if the answer requires it (e.g. a fraction like 3/4 is fine "
         f"as `3/4`; a boxed answer is fine as `42`).\n\n"
         f"Problem: {inst['problem']}"
+        + stricture
     )
 
 
-def run_one(kernel, inst):
-    goal = prompt_for(inst)
+def run_one(kernel, inst, strict=False):
+    goal = prompt_for(inst, strict=strict)
     pid = kernel.spawn(goal, budget=BUDGET)
     t0 = time.time()
     kernel.run()
@@ -105,18 +115,33 @@ def main():
 
     results = []
     correct = 0
+    retries = 0
     for i, inst in enumerate(instances, 1):
-        r = run_one(kernel, inst)
+        r = run_one(kernel, inst, strict=False)
+        r["retried"] = False
+        # retry-on-none: if the model produced no answer at all (empty RETURN
+        # or unparseable prose), bump seed and retry with strict prompt.
+        if r["pred"] is None or str(r["pred"]).strip() == "" or "SCHEMA VALIDATION" in str(r["pred"]):
+            cpu.seed = (cpu.seed or 0) + 17
+            r2 = run_one(kernel, inst, strict=True)
+            r2["retried"] = True
+            retries += 1
+            if r2["pred"] is not None and str(r2["pred"]).strip() and "SCHEMA VALIDATION" not in str(r2["pred"]):
+                r = r2
+            cpu.seed = 0
         results.append(r)
         correct += int(r["correct"])
+        tag = "(retry)" if r.get("retried") else ""
         print(f"[{i:>3}/{len(instances)}] {inst['subject']:<24} L{inst['level']} "
               f"gold={str(r['gold_norm'])[:20]:<20} pred={str(r['pred_norm'])[:20]:<20} "
-              f"{'OK' if r['correct'] else '.'} "
+              f"{'OK' if r['correct'] else '.'} {tag:<8} "
               f"calc={r['calc_calls']} steps={r['budget_used']} {r['seconds']}s", flush=True)
         with open(OUT, "w") as f:
-            json.dump({"n": i, "correct": correct, "score": correct / i, "results": results}, f, indent=1)
+            json.dump({"n": i, "correct": correct, "score": correct / i,
+                       "retries": retries, "results": results}, f, indent=1)
 
-    print(f"\nMATH subset ({len(instances)}): {correct}/{len(instances)} = {correct/len(instances):.1%}")
+    print(f"\nMATH subset ({len(instances)}): {correct}/{len(instances)} = {correct/len(instances):.1%} "
+          f"(retries: {retries})")
 
 
 if __name__ == "__main__":

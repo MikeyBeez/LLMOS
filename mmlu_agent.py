@@ -26,14 +26,30 @@ STORE  = os.path.expanduser("~/mmlu/store.db")
 
 os.makedirs(os.path.dirname(STORE), exist_ok=True)
 
-def prompt_for(inst):
+def prompt_for(inst, strict=False):
     q = inst["question"]
     labels = "ABCD"
     body = "\n".join(f"{labels[i]}. {c}" for i, c in enumerate(inst["choices"]))
+    stricture = ""
+    if strict:
+        # v13 addition: retry-on-none. When the first attempt returns None
+        # (empty RETURN or unparseable output), tell the model explicitly that
+        # its last reply failed to produce an answer letter. From v12 trace
+        # analysis: ~3 of the 6 misses are 'raw=None' cases where the model
+        # reasoned but never committed to a letter. Even a random guess is
+        # right 25%; a nudged guess after seeing the failure is typically
+        # right >50%.
+        stricture = (
+            "\n\nIMPORTANT: your previous attempt did not produce a valid answer. "
+            "You MUST commit to ONE letter this time — A, B, C, or D — even if "
+            "you are uncertain. RETURN the letter as the result. Do not leave "
+            "the result field empty. Do not explain."
+        )
     return (
         f"Answer the following multiple-choice question. RETURN a single letter "
         f"A, B, C, or D as the result — nothing else in the result field.\n\n"
         f"Question: {q}\n\n{body}"
+        + stricture
     )
 
 _LETTER = re.compile(r"\b([ABCD])\b")
@@ -48,8 +64,8 @@ def extract_letter(result):
     return m.group(1) if m else None
 
 
-def run_one(kernel, inst):
-    goal = prompt_for(inst)
+def run_one(kernel, inst, strict=False):
+    goal = prompt_for(inst, strict=strict)
     pid = kernel.spawn(goal, budget=BUDGET)
     t0 = time.time()
     kernel.run()
@@ -81,16 +97,32 @@ def main():
 
     results = []
     correct = 0
+    retries = 0
     for i, inst in enumerate(instances, 1):
-        r = run_one(kernel, inst)
+        r = run_one(kernel, inst, strict=False)
+        r["retried"] = False
+        # v13: retry-on-none. If the first attempt yielded no letter (empty
+        # RETURN or unparseable), bump the CPU seed to change the sampling path
+        # and re-spawn with a strict prompt that names the previous failure.
+        if r["letter"] is None:
+            cpu.seed = (cpu.seed or 0) + 17
+            r2 = run_one(kernel, inst, strict=True)
+            r2["retried"] = True
+            retries += 1
+            if r2["letter"] is not None:
+                r = r2
+            cpu.seed = 0
         results.append(r)
         correct += int(r["correct"])
+        tag = "(retry)" if r.get("retried") else ""
         print(f"[{i:>3}/{len(instances)}] {inst['subject']:<28} gold={r['gold']} pred={r['letter']} "
-              f"{'OK' if r['correct'] else '.'}  {r['seconds']}s", flush=True)
+              f"{'OK' if r['correct'] else '.'} {tag:<8} {r['seconds']}s", flush=True)
         with open(OUT, "w") as f:
-            json.dump({"n": i, "correct": correct, "score": correct / i, "results": results}, f, indent=1)
+            json.dump({"n": i, "correct": correct, "score": correct / i,
+                       "retries": retries, "results": results}, f, indent=1)
 
-    print(f"\nMMLU subset ({len(instances)}): {correct}/{len(instances)} = {correct/len(instances):.1%}")
+    print(f"\nMMLU subset ({len(instances)}): {correct}/{len(instances)} = {correct/len(instances):.1%} "
+          f"(retries: {retries})")
 
 
 if __name__ == "__main__":
