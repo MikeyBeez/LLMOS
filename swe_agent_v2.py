@@ -336,7 +336,8 @@ def run_one(inst):
     repo = clone(inst)
     # -------- Phase 1: bootstrap --------
     b_handlers, b_state = make_bootstrap_handlers(
-        repo, fail_to_pass=inst["FAIL_TO_PASS"])
+        repo, fail_to_pass=inst["FAIL_TO_PASS"],
+        pass_to_pass=inst.get("PASS_TO_PASS"), repo=inst["repo"])
     cpu = ToolCallCPU(tools=BOOTSTRAP_TOOLS, tool2sys=BOOTSTRAP_TOOL2SYS,
                      system_prompt=BOOTSTRAP_SYSTEM_PROMPT, model=MODEL, host=HOST,
                      temperature=1.0, num_predict=2048, num_ctx=NUMCTX,
