@@ -131,7 +131,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                          "tool_calls": [{"id": f"t{turn}", "type": "function",
                                           "function": {"name": tool, "arguments": args}}]})
         messages.append({"role": "tool", "tool_call_id": f"t{turn}",
-                         "content": json.dumps(result, default=str)[:1800]})
+                         "content": json.dumps(result, default=str)[:4800]})
     return "budget", messages, meta_log
 
 

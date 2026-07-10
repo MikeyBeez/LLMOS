@@ -230,6 +230,19 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                 "goal_stack": _stack_snapshot(state),
                 "depth": len(state["goal_stack"])}
 
+    def h_set_env_var(pcb, args):
+        name  = str(args.get("name", "")).strip()
+        value = str(args.get("value", ""))
+        if not name:
+            return {"error": "name is required",
+                    "goal_stack": _stack_snapshot(state)}
+        state["env_vars"][name] = value
+        return {"ok": True, "set": {name: value},
+                "env_vars": dict(state["env_vars"]),
+                "note": ("applies to all subsequent installs, sanity checks, "
+                         "smoke tests, and final test scoring"),
+                "goal_stack": _stack_snapshot(state)}
+
     def h_current_goal(pcb, args):
         return {"active_env_kind": state["active_env_kind"],
                 "python_version":  state["python_version"],
@@ -245,6 +258,7 @@ def make_install_handlers(repo_dir, base_env_vars=None):
         "install.push_subgoal":           h_push_subgoal,
         "install.pop_subgoal":            h_pop_subgoal,
         "install.current_goal":           h_current_goal,
+        "install.set_env_var":            h_set_env_var,
     }
     return handlers, state
 
@@ -321,6 +335,20 @@ INSTALL_TOOLS = [
             "to the outer goal. Call this after the last install_package in a sub-tree."),
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "set_env_var",
+        "description": (
+            "Set an environment variable that applies to ALL subsequent builds, "
+            "installs, sanity checks and test runs. Use when a build fails on "
+            "COMPILER errors rather than missing packages — e.g. a C extension "
+            "failing with 'nested declaration', implicit-function, or other "
+            "C-standard errors needs set_env_var('CFLAGS', '-std=c99') (or "
+            "'-std=gnu99') and then install_repo_editable again. Also useful: "
+            "LDFLAGS, CC, and package-specific vars."),
+        "parameters": {"type": "object", "properties": {
+            "name":  {"type": "string", "description": "e.g. 'CFLAGS'"},
+            "value": {"type": "string", "description": "e.g. '-std=c99'"},
+        }, "required": ["name", "value"]}}},
+    {"type": "function", "function": {
         "name": "current_goal",
         "description": (
             "Show the current active env, python version, goal stack, and last 10 "
@@ -336,4 +364,5 @@ INSTALL_TOOL2SYS = {
     "push_subgoal":           "install.push_subgoal",
     "pop_subgoal":            "install.pop_subgoal",
     "current_goal":           "install.current_goal",
+    "set_env_var":            "install.set_env_var",
 }
