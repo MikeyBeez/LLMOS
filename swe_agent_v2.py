@@ -270,8 +270,11 @@ def run_one(inst):
     print(f" -- phase 1 OK: {b_state.get('active_env_kind')}/{b_state.get('python_version')}, "
           f"{len(b_state.get('installed', []))} installs", flush=True)
     # -------- Phase 2: fix --------
+    # STRICT setting: problem statement only — no FAIL_TO_PASS ids (those
+    # tests mostly do not exist until the scoring test_patch is applied,
+    # and leaking them is oracle information anyway).
     f_handlers, f_state = make_fix_handlers(
-        repo, fail_to_pass=inst["FAIL_TO_PASS"], env_vars=b_state["env_vars"],
+        repo, env_vars=b_state["env_vars"],
         env_kind=b_state.get("active_env_kind", "uv"))
     # New CPU instance for phase 2 — separate context, fresh system prompt.
     cpu2 = ToolCallCPU(tools=FIX_TOOLS, tool2sys=FIX_TOOL2SYS,
@@ -280,7 +283,8 @@ def run_one(inst):
                        keep_alive="24h")
     print(" -- phase 2: fix --", flush=True)
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
-                f"You must make these tests pass: {inst['FAIL_TO_PASS']}.")
+                "Reproduce this bug with a failing script, fix the source, "
+                "then verify your reproduction passes.")
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
