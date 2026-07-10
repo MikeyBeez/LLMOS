@@ -148,11 +148,17 @@ BOOTSTRAP_TOOL2SYS.update(INSTALL_TOOL2SYS)
 
 # ---------- Handlers ----------------------------------------------------
 
-def make_bootstrap_handlers(repo_dir, base_env_vars=None):
+def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
     """Compose install handlers + recon/verify handlers into one dispatch
     table. All share state so goal_stack, active_env_kind, sanity_ok,
-    smoke_ok are visible to every tool."""
+    smoke_ok are visible to every tool.
+
+    fail_to_pass: the instance's FAIL_TO_PASS test ids. These are the BUG —
+    they are expected to fail until phase 2 fixes the code, so run_smoke_test
+    refuses them as environment-health checks (v8 postmortem: the model spent
+    20+ turns trying to smoke-test the very test the issue breaks)."""
     install_handlers, state = make_install_handlers(repo_dir, base_env_vars)
+    state["fail_to_pass"] = list(fail_to_pass or [])
 
     # ---- read_repo_docs -----------------------------------------------
     def h_read_docs(pcb, args):
@@ -380,6 +386,21 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None):
                     "goal_stack": _stack_snapshot(state)}
         test_id = str(args.get("test_id", ""))
         extra_args = str(args.get("extra_pytest_args", ""))
+        # Guard: the instance's failing tests ARE the bug — they cannot
+        # validate the environment. Match on test function name or file.
+        for ftp in state.get("fail_to_pass", []):
+            fname = ftp.rsplit("::", 1)[-1]
+            ffile = ftp.split("::", 1)[0]
+            if (fname and fname in test_id) or (ffile and ffile in test_id):
+                return {"ok": False, "error": (
+                    f"'{test_id}' matches a FAIL_TO_PASS test ({ftp}). That "
+                    "test is the BUG this task is about — it is EXPECTED to "
+                    "fail until the fix phase, so it cannot prove the "
+                    "environment works. Pick a stable existing test from a "
+                    "module UNRELATED to the problem statement (e.g. a basic "
+                    "utils/ or io/ test), not a test you wrote yourself."),
+                    "fail_to_pass": state["fail_to_pass"],
+                    "goal_stack": _stack_snapshot(state)}
         bin_ = ".condaenv/bin" if active == "conda" else ".venv/bin"
         r_collect = _run(
             f'{bin_}/python -m pytest --collect-only -q {extra_args}',
@@ -462,7 +483,10 @@ BOOTSTRAP_SYSTEM_PROMPT = (
     "  8. If you get lost, call current_goal to see the stack.\n\n"
     "VERIFY (must both pass since the last install_repo_editable):\n"
     "  9. run_sanity — verify the package imports.\n"
-    "  10. run_smoke_test — verify pytest collects and one specific test passes.\n"
+    "  10. run_smoke_test — verify pytest collects and ONE existing test passes. "
+    "CRITICAL: the tests you were asked to make pass are the BUG — they are "
+    "expected to FAIL until the fix phase and prove nothing about the env. "
+    "Choose a stable test from a module UNRELATED to the problem statement.\n"
     " 11. declare_env_ready. The harness rejects this until 9 and 10 both "
     "succeeded since the last install.\n\n"
     "Backend rules:\n"
