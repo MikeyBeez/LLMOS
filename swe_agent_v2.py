@@ -369,14 +369,21 @@ def main():
     # checkouts during the batch, delete them ALL at the end. Mirrors make
     # recreation cheap. KEEP_WORK=1 skips (post-batch debugging/rescoring).
     if not os.environ.get("KEEP_WORK"):
-        freed = 0
+        # Delete only RESOLVED instances' checkouts. Failures stay on disk —
+        # we are probably going to do more work on those (Mikey).
+        resolved_ids = {r["id"] for r in results if r.get("resolved")}
+        freed, kept = 0, 0
         for inst in insts:
             d = os.path.join(WORK, inst["instance_id"])
-            if os.path.isdir(d):
-                freed += 1
+            if not os.path.isdir(d):
+                continue
+            if inst["instance_id"] in resolved_ids:
                 shutil.rmtree(d, ignore_errors=True)
-        print(f"[cleanup] removed {freed} work checkouts (mirrors retained)",
-              flush=True)
+                freed += 1
+            else:
+                kept += 1
+        print(f"[cleanup] removed {freed} resolved checkouts, kept {kept} "
+              f"failed ones for further work (mirrors retained)", flush=True)
     resolved = sum(int(r.get("resolved")) for r in results)
     env_ok = sum(int(r.get("env_ok", False)) for r in results)
     print(f"\n=== LLMOS v2 on SWE-bench Lite: {resolved}/{len(results)} resolved, "
