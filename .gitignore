@@ -18,3 +18,7 @@ patch_*.py
 diag*.py
 probe*.py
 *.db
+._*
+llmos/._*
+*.stale
+*.pre-symlink
