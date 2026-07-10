@@ -80,7 +80,7 @@ def clone(inst):
 
 
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
-              budget, gate=None, log=print):
+              budget, gate=None, log=print, checkpoint=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -107,6 +107,15 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         meta_log.append({"turn": turn,
                           "prompt_tokens": meta.get("prompt_tokens"),
                           "eval_tokens":   meta.get("eval_tokens")})
+        if checkpoint:
+            try:
+                tmp = checkpoint + ".tmp"
+                json.dump({"phase1": messages, "phase1_meta": meta_log,
+                           "partial": True},
+                          open(tmp, "w"), default=str)
+                os.replace(tmp, checkpoint)
+            except Exception:
+                pass
         tcs = msg.get("tool_calls") or []
         if not tcs:
             content = (msg.get("content") or msg.get("thinking") or "")[:400]
@@ -257,10 +266,12 @@ def run_one(inst):
         goal += "\n\n" + format_remedy_context(rems)
         print(f" -- injected {len(rems)} known remedies for {inst['repo']}", flush=True)
     print(" -- phase 1: bootstrap --", flush=True)
+    ckpt = os.path.join(TRACES, inst["instance_id"] + ".partial.json")
     b_reason, b_msgs, b_meta = phase_run(cpu, BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
                                           goal, BOOTSTRAP_BUDGET,
-                                          gate=lambda: env_ready(b_state))
+                                          gate=lambda: env_ready(b_state),
+                                          checkpoint=ckpt)
     env_ok = env_ready(b_state)
     if not env_ok:
         # Save trace & bail out on this instance without spending fix budget.
@@ -294,7 +305,8 @@ def run_one(inst):
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
-                                          gate=lambda: f_state["fix_verified"])
+                                          gate=lambda: f_state["fix_verified"],
+                                          checkpoint=ckpt)
     # Score with the exact SWE-bench recipe.
     resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],
                                         env_kind=b_state.get("active_env_kind", "uv"))
@@ -319,6 +331,11 @@ def run_one(inst):
 
 def _save_trace(inst, blob):
     os.makedirs(TRACES, exist_ok=True)
+    # Clean completion supersedes the crash checkpoint.
+    try:
+        os.remove(os.path.join(TRACES, inst["instance_id"] + ".partial.json"))
+    except OSError:
+        pass
     p = os.path.join(TRACES, inst["instance_id"] + ".trace.json")
     with open(p, "w") as f:
         json.dump(blob, f, indent=1, default=str)

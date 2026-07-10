@@ -324,6 +324,36 @@ def export_training(messages, inst, tag, resolved):
     return path
 
 
+# ---------- partial-trace harvesting ----------------------------------------
+
+def harvest_partials(traces_dir=os.path.expanduser("~/swe/traces_v2"),
+                     instances_path=os.path.expanduser("~/swe/instances.json")):
+    """Mine interrupted runs' checkpoints (*.partial.json) into the remedy
+    store, then archive them as .harvested. Run this BEFORE every rerun —
+    the killed instance's trace is usually the one that shows why we
+    stopped."""
+    try:
+        insts = {i["instance_id"]: i for i in json.load(open(instances_path))}
+    except Exception:
+        insts = {}
+    report = []
+    import glob as _glob
+    for pp in _glob.glob(os.path.join(traces_dir, "*.partial.json")):
+        iid = os.path.basename(pp).replace(".partial.json", "")
+        repo = insts.get(iid, {}).get("repo") or iid.split("__")[0]
+        try:
+            blob = json.load(open(pp))
+            msgs = blob.get("phase1") or []
+            rems = extract_remedies(msgs, repo, iid + " (interrupted)")
+            added = merge_remedies(rems)
+            report.append({"instance": iid, "turns": len(
+                events_from_messages(msgs)), "remedies_new": added})
+            os.replace(pp, pp + ".harvested")
+        except Exception as e:
+            report.append({"instance": iid, "error": str(e)})
+    return report
+
+
 # ---------- orchestration ---------------------------------------------------
 
 def harvest_trace(inst, blob):
