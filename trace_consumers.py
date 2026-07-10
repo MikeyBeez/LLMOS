@@ -234,6 +234,67 @@ def format_remedy_context(remedies, limit=8):
     return "\n".join(lines)
 
 
+# ---------- per-repo build playbooks (remedies graduate to protocols) ------
+
+PLAYBOOKS = os.path.expanduser("~/swe/playbooks.json")
+
+
+def _load_playbooks():
+    try:
+        return json.load(open(PLAYBOOKS))
+    except Exception:
+        return {}
+
+
+def playbook_for(repo):
+    return _load_playbooks().get(repo)
+
+
+def synthesize_playbook(repo, bootstrap_events, instance_id):
+    """After a successful bootstrap, distill remedies + the winning event
+    sequence into ONE procedure. Validated by construction: the sequence
+    it summarizes just passed the env gate."""
+    from repo_bootstrap_tools import llm_call
+    ok_steps = [f"{e['tool']}({json.dumps(e.get('args'), default=str)[:140]})"
+                for e in bootstrap_events if e.get("ok")]
+    rems = "\n".join(f"- {r['error_signature']}: {r['remedy'][:200]}"
+                     for r in remedies_for(repo)[:10])
+    raw = llm_call(
+        system=("You write concise, exact build playbooks for repositories. "
+                "JSON only."),
+        prompt=(f"An agent just SUCCESSFULLY set up {repo} for testing. "
+                f"Winning tool sequence:\n" + "\n".join(ok_steps[-25:]) +
+                f"\n\nKnown remedies for this repo:\n{rems}\n\n"
+                "Write the definitive playbook as JSON:\n"
+                '  python_version, backend, build_deps (ordered, with pins), '
+                'install (the editable-install call), env_vars, '
+                'smoke_test (exact working run_smoke_test args), '
+                'gotchas (list of one-line warnings)'),
+        max_tokens=1600, format_json=True)
+    from repo_bootstrap_tools import _extract_json
+    pb = _extract_json(raw) or {}
+    if not pb:
+        return None
+    books = _load_playbooks()
+    prev = books.get(repo) or {}
+    pb_rec = {"playbook": pb,
+              "validated_runs": int(prev.get("validated_runs", 0)) + 1,
+              "source_instance": instance_id,
+              "updated": time.strftime("%Y-%m-%d")}
+    books[repo] = pb_rec
+    tmp = PLAYBOOKS + ".tmp"
+    json.dump(books, open(tmp, "w"), indent=1)
+    os.replace(tmp, PLAYBOOKS)
+    return pb_rec
+
+
+def format_playbook_context(rec):
+    return ("VALIDATED BUILD PLAYBOOK for this repository (succeeded "
+            f"{rec['validated_runs']}x, updated {rec['updated']}) — follow "
+            "it directly instead of rediscovering:\n"
+            + json.dumps(rec["playbook"], indent=1, default=str)[:2200])
+
+
 # ---------- consumer 3: training export ------------------------------------
 
 def export_training(messages, inst, tag, resolved):
@@ -282,6 +343,13 @@ def harvest_trace(inst, blob):
     # consumer 3: training export (successes only — don't train on flailing)
     out = blob.get("outcome", {})
     if out.get("env_ok"):
+        try:
+            pb = synthesize_playbook(inst["repo"],
+                                     blob.get("phase1_events") or [],
+                                     inst["instance_id"])
+            summary["playbook"] = bool(pb)
+        except Exception:
+            summary["playbook"] = "failed"
         export_training(blob["phase1"], inst, "bootstrap",
                         resolved=out.get("resolved"))
         summary["training"] = ["bootstrap"]
