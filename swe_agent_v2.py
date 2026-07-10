@@ -365,6 +365,18 @@ def main():
         results.append(r)
         json.dump(results, open(os.path.expanduser("~/swe/results_v2.json"), "w"),
                   indent=2)
+    # Batch-end hygiene (Mikey): clone once per repo (the mirror), reuse
+    # checkouts during the batch, delete them ALL at the end. Mirrors make
+    # recreation cheap. KEEP_WORK=1 skips (post-batch debugging/rescoring).
+    if not os.environ.get("KEEP_WORK"):
+        freed = 0
+        for inst in insts:
+            d = os.path.join(WORK, inst["instance_id"])
+            if os.path.isdir(d):
+                freed += 1
+                shutil.rmtree(d, ignore_errors=True)
+        print(f"[cleanup] removed {freed} work checkouts (mirrors retained)",
+              flush=True)
     resolved = sum(int(r.get("resolved")) for r in results)
     env_ok = sum(int(r.get("env_ok", False)) for r in results)
     print(f"\n=== LLMOS v2 on SWE-bench Lite: {resolved}/{len(results)} resolved, "
