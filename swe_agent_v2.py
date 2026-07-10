@@ -46,16 +46,32 @@ def sh(cmd, cwd=None, timeout=300):
                           text=True, timeout=timeout)
 
 
+MIRRORS = os.path.expanduser("~/swe/mirrors")
+
+
 def clone(inst):
+    """Working checkout via a local --mirror cache. The network is touched
+    only when the mirror is missing or lacks base_commit; checkouts are
+    created from the mirror (fast, local). Existing checkouts are RESET and
+    REUSED, never re-downloaded — and never deleted on failure."""
     repo = os.path.join(WORK, inst["instance_id"])
-    shutil.rmtree(repo, ignore_errors=True)
-    os.makedirs(repo)
-    sh("git init -q", cwd=repo)
-    sh(f"git remote add origin https://github.com/{inst['repo']}.git", cwd=repo)
-    # SWE-bench evaluations use a full clone so setuptools_scm can read tags;
-    # our earlier shallow --depth 1 broke astropy's version detection.
-    sh(f"git fetch -q origin {inst['base_commit']} --tags", cwd=repo, timeout=600)
-    sh("git checkout -q FETCH_HEAD", cwd=repo)
+    mirror = os.path.join(MIRRORS, inst["repo"].replace("/", "__") + ".git")
+    os.makedirs(MIRRORS, exist_ok=True)
+    # 1. Ensure the mirror holds base_commit (full history + tags: SWE-bench
+    #    scoring and setuptools_scm both need tags; shallow clones broke this).
+    if not os.path.isdir(mirror):
+        sh(f"git clone -q --mirror https://github.com/{inst['repo']}.git {mirror}",
+           timeout=1800)
+    if sh(f"git -C {mirror} cat-file -e {inst['base_commit']}").returncode != 0:
+        sh(f"git -C {mirror} fetch -q --tags origin", timeout=1800)
+    # 2. (Re)use the working checkout — reset + clean, no network.
+    if os.path.isdir(os.path.join(repo, ".git")):
+        sh("git reset -q --hard && git clean -qfdx", cwd=repo, timeout=600)
+        sh(f"git checkout -q {inst['base_commit']}", cwd=repo, timeout=300)
+    else:
+        shutil.rmtree(repo, ignore_errors=True)
+        sh(f"git clone -q --shared {mirror} {repo}", timeout=600)
+        sh(f"git checkout -q {inst['base_commit']}", cwd=repo, timeout=300)
     sh("git config user.email a@b.c; git config user.name a", cwd=repo)
     return repo
 
@@ -234,7 +250,6 @@ def run_one(inst):
     _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta, "state": b_state,
                         "phase2": f_msgs, "phase2_meta": f_meta,
                         "fix_state": f_state, "outcome": outcome})
-    shutil.rmtree(repo, ignore_errors=True)
     return outcome
 
 
