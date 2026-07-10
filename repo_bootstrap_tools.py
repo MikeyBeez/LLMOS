@@ -283,10 +283,88 @@ def research_docs(repo_dir, max_read=6, chars_per_file=7000):
                 '  gotchas: notable warnings from the docs'),
         max_tokens=3200, format_json=True)
     parsed = _extract_json(syn_raw) or {}
+    web_used = False
+    if not parsed.get("procedure") or not parsed.get("smoke_test_hint"):
+        # Local docs came up thin — go to the web, like a developer would.
+        name = os.path.basename(repo_dir).split("__")[0]
+        hits = (_ddg_search(f"{name} install from source build dependencies", 5)
+                + _ddg_search(f"{name} run test suite single test", 5))
+        if hits:
+            web_used = True
+            hits_blob = "\n".join(f"- {h['title']}: {h['snippet']}"
+                                   for h in hits)
+            syn_raw2 = llm_call(
+                system=("You turn project documentation into an exact "
+                        "install-and-test procedure. JSON only."),
+                prompt=(f"Local docs for {name} were incomplete. Combine them "
+                        f"with these web search results.\n\nLOCAL DOCS:\n"
+                        f"{blob[:18000]}\n\nWEB RESULTS:\n{hits_blob[:6000]}\n\n"
+                        "Return the SAME JSON schema: python_versions, "
+                        "backend_hint, system_prereqs, build_deps, procedure, "
+                        "test_env_vars, smoke_test_hint, gotchas."),
+                max_tokens=3200, format_json=True)
+            parsed2 = _extract_json(syn_raw2) or {}
+            if parsed2.get("procedure") or parsed2.get("smoke_test_hint"):
+                parsed = parsed2
+                syn_raw = syn_raw2
     return {"files_indexed": len(index),
             "files_read": [r["path"] for r in read],
+            "web_search_used": web_used,
             "recommendation": parsed,
             "recommendation_raw": syn_raw[:2000]}
+
+
+
+
+def _ddg_search(q, n=5):
+    """DuckDuckGo search (instant-answer API + HTML fallback). Module-level
+    so both the web_search tool and research_docs can use it."""
+    hits = []
+    try:
+        api = ("https://api.duckduckgo.com/?format=json&no_html=1&q="
+               + urllib.parse.quote(q))
+        with urllib.request.urlopen(api, timeout=15) as r:
+            d = json.loads(r.read())
+        if d.get("AbstractText"):
+            hits.append({"title": d.get("Heading", ""),
+                         "snippet": d["AbstractText"][:400],
+                         "url": d.get("AbstractURL", "")})
+        for rel in (d.get("RelatedTopics") or [])[:n]:
+            if isinstance(rel, dict) and rel.get("Text"):
+                hits.append({"title": rel.get("Text", "")[:200],
+                             "snippet": rel.get("Text", "")[:400],
+                             "url": rel.get("FirstURL", "")})
+    except Exception:
+        pass
+    try:
+        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q)
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/"
+                            "537.36 (KHTML, like Gecko) Chrome/120.0 "
+                            "Safari/537.36")})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+        for pat in [
+            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
+            r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+            r'<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>.*?'
+            r'result__snippet"[^>]*>(.*?)</',
+            r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>.*?'
+            r'<div[^>]*>(.*?)</div>',
+        ]:
+            for m in re.finditer(pat, html, re.DOTALL):
+                title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+                snippet = re.sub(r"<[^>]+>", "", m.group(3)).strip()
+                url_hit = m.group(1)
+                if title and snippet:
+                    hits.append({"title": title[:200],
+                                 "snippet": snippet[:400],
+                                 "url": url_hit[:300]})
+                if len(hits) >= n: break
+            if len(hits) >= n: break
+    except Exception:
+        pass
+    return hits
 
 
 # ---------- Handlers ----------------------------------------------------
@@ -396,51 +474,7 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
     def h_web_search(pcb, args):
         q = str(args.get("query", ""))
         n = int(args.get("n", 5))
-        hits = []
-        try:
-            api = ("https://api.duckduckgo.com/?format=json&no_html=1&q="
-                   + urllib.parse.quote(q))
-            with urllib.request.urlopen(api, timeout=15) as r:
-                d = json.loads(r.read())
-            if d.get("AbstractText"):
-                hits.append({"title": d.get("Heading", ""),
-                             "snippet": d["AbstractText"][:400],
-                             "url": d.get("AbstractURL", "")})
-            for rel in (d.get("RelatedTopics") or [])[:n]:
-                if isinstance(rel, dict) and rel.get("Text"):
-                    hits.append({"title": rel.get("Text", "")[:200],
-                                 "snippet": rel.get("Text", "")[:400],
-                                 "url": rel.get("FirstURL", "")})
-        except Exception:
-            pass
-        try:
-            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q)
-            req = urllib.request.Request(url, headers={
-                "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/"
-                                "537.36 (KHTML, like Gecko) Chrome/120.0 "
-                                "Safari/537.36")})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                html = r.read().decode("utf-8", errors="ignore")
-            for pat in [
-                r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
-                r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
-                r'<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>.*?'
-                r'result__snippet"[^>]*>(.*?)</',
-                r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>.*?'
-                r'<div[^>]*>(.*?)</div>',
-            ]:
-                for m in re.finditer(pat, html, re.DOTALL):
-                    title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                    snippet = re.sub(r"<[^>]+>", "", m.group(3)).strip()
-                    url_hit = m.group(1)
-                    if title and snippet:
-                        hits.append({"title": title[:200],
-                                     "snippet": snippet[:400],
-                                     "url": url_hit[:300]})
-                    if len(hits) >= n: break
-                if len(hits) >= n: break
-        except Exception:
-            pass
+        hits = _ddg_search(q, n)
         synthesis = ""
         if hits:
             hits_blob = "\n".join(f"- {h['title']}: {h['snippet']}"
