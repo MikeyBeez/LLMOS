@@ -20,7 +20,7 @@ Scoring:
 Reads ~/swe/instances.json (from swe_lite_select.py), writes
 ~/swe/results_v2.json and a trace per instance.
 """
-import json, os, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from tool_call_cpu import ToolCallCPU
@@ -204,6 +204,88 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     return "budget", messages, meta_log
 
 
+
+# import-name -> pip package name, for the missing-module reflex
+_PKG_ALIASES = {
+    "cv2": "opencv-python", "yaml": "pyyaml", "PIL": "pillow",
+    "sklearn": "scikit-learn", "bs4": "beautifulsoup4", "OpenSSL": "pyopenssl",
+    "dateutil": "python-dateutil", "attr": "attrs", "jinja2": "jinja2",
+}
+_MISSING_RE = re.compile(r"No module named ['\"]([\w.]+)['\"]")
+
+
+def _web_lookup_pkg(mod):
+    """When the pip name isn't obvious, do what a developer does: search
+    'how do I install <module>' and read the pip package name off the
+    results. Returns a package name or None."""
+    try:
+        from repo_bootstrap_tools import _ddg_search, llm_call, _extract_json
+    except Exception:
+        return None
+    hits = _ddg_search(f"python how do I install module {mod} pip", 5)
+    if not hits:
+        return None
+    blob = "\n".join(f"- {h['title']}: {h['snippet']}" for h in hits)
+    raw = llm_call(
+        system="You map a Python import name to its pip package. JSON only.",
+        prompt=(f"A Python import 'import {mod}' fails with ModuleNotFoundError. "
+                f"From these search results, what is the exact pip install "
+                f"name?\n\n{blob}\n\n"
+                'Return JSON: {"pip_name": "..."} (just the package, or null '
+                "if the results do not say)"),
+        max_tokens=400, format_json=True)
+    pkg = (_extract_json(raw) or {}).get("pip_name")
+    return pkg if pkg and pkg not in ("null", "None") else None
+
+
+def _try_pip(pkg, repo, env, env_dir):
+    r = subprocess.run(f'{env_dir}/bin/python -m pip install "{pkg}"',
+                       shell=True, cwd=repo, capture_output=True, text=True,
+                       timeout=300, env=env)
+    if r.returncode != 0 and "No module named pip" in (r.stderr or ""):
+        subprocess.run(f'{env_dir}/bin/python -m ensurepip --default-pip',
+                       shell=True, cwd=repo, capture_output=True, text=True,
+                       timeout=120, env=env)
+        r = subprocess.run(f'{env_dir}/bin/python -m pip install "{pkg}"',
+                           shell=True, cwd=repo, capture_output=True, text=True,
+                           timeout=300, env=env)
+    return r.returncode == 0
+
+
+def _pip_install(mod, repo, env, env_dir):
+    """Install a missing module. Try the alias/bare name first; if that
+    fails, web-search 'how do I install <module>' for the real pip name."""
+    pkg = _PKG_ALIASES.get(mod, mod.split(".")[0])
+    if _try_pip(pkg, repo, env, env_dir):
+        return True, pkg
+    looked = _web_lookup_pkg(mod)
+    if looked and looked != pkg and _try_pip(looked, repo, env, env_dir):
+        return True, looked
+    return False, pkg
+
+
+def _run_with_missing_module_reflex(cmd, repo, env, env_dir, max_installs=4):
+    """Run cmd; while it fails with 'No module named X', install X and retry.
+    Guard: each module installed at most once, so a genuine build failure
+    (module truly unavailable) surfaces instead of looping."""
+    tried = set()
+    for _ in range(max_installs + 1):
+        r = subprocess.run(cmd, shell=True, cwd=repo, capture_output=True,
+                           text=True, timeout=600, env=env)
+        out = (r.stdout or "") + (r.stderr or "")
+        m = _MISSING_RE.search(out)
+        if not m:
+            return r
+        mod = m.group(1)
+        if mod in tried:
+            return r   # already installed it once — real failure, surface it
+        tried.add(mod)
+        ok, pkg = _pip_install(mod, repo, env, env_dir)
+        if not ok:
+            return r
+    return r
+
+
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
@@ -228,11 +310,23 @@ def score(inst, repo, env_vars, env_kind="uv"):
         env["CONDA_PREFIX"] = os.path.join(repo, env_dir)
     else:
         env["VIRTUAL_ENV"] = os.path.join(repo, env_dir)
-    r = subprocess.run(
-        f'{env_dir}/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header',
-        shell=True, cwd=repo, capture_output=True, text=True, timeout=600, env=env)
-    ok = r.returncode == 0 and "passed" in r.stdout
-    tail = (r.stdout[-200:] or r.stderr[-200:]).replace("\n", " ")
+    # Django's suite runs on unittest via runtests.py, not pytest — match the
+    # real SWE-bench harness. Everything else: pytest, with pytest itself
+    # ensured present (the test extra doesn't always pull it).
+    if inst["repo"] == "django/django" and os.path.isfile(
+            os.path.join(repo, "tests/runtests.py")):
+        labels = " ".join(t.split("::")[0].replace("/", ".").removesuffix(".py")
+                          if "/" in t else t for t in inst["FAIL_TO_PASS"])
+        cmd = f'{env_dir}/bin/python tests/runtests.py {labels} -v 0'
+    else:
+        _pip_install("pytest", repo, env, env_dir)  # guarantee the driver
+        cmd = (f'{env_dir}/bin/python -m pytest {target} -k "{names}" '
+               f'-p no:cacheprovider -q --no-header')
+    r = _run_with_missing_module_reflex(cmd, repo, env, env_dir)
+    passed = ("passed" in (r.stdout or "")) or (
+        "OK" in (r.stdout or "") + (r.stderr or "") and inst["repo"] == "django/django")
+    ok = r.returncode == 0 and passed
+    tail = ((r.stdout or "")[-300:] or (r.stderr or "")[-300:]).replace("\n", " ")
     return ok, len(diff), tail
 
 
