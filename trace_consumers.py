@@ -103,6 +103,44 @@ def _events_digest(events, max_chars=6000):
     return "\n".join(lines)[-max_chars:]
 
 
+# ---------- mid-run critic: review the trace, search the error -------------
+
+def critic_review(messages, last_n=12):
+    """Detached review of the last N turns. Returns one-paragraph advice
+    (or "" if all is well). Uses the model OUTSIDE the agent's context —
+    the reviewer sees the digest, not the agent's rationalizations — and
+    web-searches the most recent error signature for outside knowledge."""
+    from repo_bootstrap_tools import llm_call, _ddg_search
+    events = events_from_messages(messages)
+    if not events:
+        return ""
+    recent = events[-last_n:]
+    digest = _events_digest(recent, max_chars=4000)
+    last_err = next((e["error"] for e in reversed(recent) if e.get("error")),
+                    None)
+    web_blob = ""
+    if last_err:
+        hits = _ddg_search(last_err[:120], 3)
+        if hits:
+            web_blob = "\nWeb results for the latest error:\n" + "\n".join(
+                f"- {h['title']}: {h['snippet'][:200]}" for h in hits)
+    advice = llm_call(
+        system=("You are a detached reviewer watching an agent set up a "
+                "repository. Be blunt and concrete. If the agent is doing "
+                "fine, reply exactly OK."),
+        prompt=(f"Recent turns (tool ok=True/False, err=signature):\n{digest}\n"
+                f"{web_blob}\n\n"
+                "Is the agent looping, repeating a failed action, destroying "
+                "its own progress, or chasing the wrong cause? Reply with ONE "
+                "short paragraph of corrective advice naming the exact next "
+                "action, or exactly OK if progress is sound."),
+        max_tokens=600)
+    advice = (advice or "").strip()
+    if advice.upper().startswith("OK") and len(advice) < 8:
+        return ""
+    return advice[:700]
+
+
 # ---------- consumer 2: remedy store ---------------------------------------
 
 _EXTRACT_SYS = (

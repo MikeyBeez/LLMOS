@@ -30,7 +30,9 @@ from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
                             make_fix_handlers)
 import envcheck
-from trace_consumers import remedies_for, format_remedy_context, harvest_trace
+from trace_consumers import (remedies_for, format_remedy_context,
+                             harvest_trace, critic_review, error_signature)
+from repo_bootstrap_tools import _ddg_search
 
 HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
 MODEL = "ornith:35b"
@@ -89,6 +91,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         {"role": "user",   "content": user_goal},
     ]
     meta_log = []
+    searched_sigs = {}   # error signature -> turn first searched
     for turn in range(budget):
         msg = None
         for attempt in range(3):
@@ -149,11 +152,45 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
             except Exception as e:
                 result = {"error": f"handler crashed: {type(e).__name__}: {e}"}
         log(str(result)[:120])
+        # Human reflex: see an error -> search the web for it -> THEN act.
+        failed = isinstance(result, dict) and (
+            result.get("ok") is False or "error" in result)
+        if failed:
+            sig = error_signature(str(result.get("error")
+                                      or result.get("stderr") or ""))
+            if sig and len(sig) > 12:
+                if sig in searched_sigs:
+                    result["error_web_search"] = (
+                        f"(already searched at turn {searched_sigs[sig]} — "
+                        "same error again means your last change did not "
+                        "address it; re-read those results, try a DIFFERENT "
+                        "action)")
+                else:
+                    searched_sigs[sig] = turn
+                    try:
+                        hits = _ddg_search(sig[:120], 3)
+                    except Exception:
+                        hits = []
+                    if hits:
+                        result["error_web_search"] = [
+                            {"title": h["title"][:120],
+                             "snippet": h["snippet"][:240]} for h in hits]
         messages.append({"role": "assistant", "content": "",
                          "tool_calls": [{"id": f"t{turn}", "type": "function",
                                           "function": {"name": tool, "arguments": args}}]})
         messages.append({"role": "tool", "tool_call_id": f"t{turn}",
                          "content": json.dumps(result, default=str)[:4800]})
+        # Mid-run critic: every 8 turns a detached reviewer scans the recent
+        # trace (and web-searches the latest error) for loops/drift/self-harm.
+        if turn % 8 == 7:
+            try:
+                advice = critic_review(messages)
+            except Exception:
+                advice = ""
+            if advice:
+                log(f"  [critic] {advice[:100]}")
+                messages.append({"role": "user",
+                                 "content": f"[HARNESS CRITIC] {advice}"})
     return "budget", messages, meta_log
 
 
