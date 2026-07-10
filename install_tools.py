@@ -113,8 +113,12 @@ def make_install_handlers(repo_dir, base_env_vars=None):
         shutil.rmtree(os.path.join(repo_dir, ".venv"),     ignore_errors=True)
         shutil.rmtree(os.path.join(repo_dir, ".condaenv"), ignore_errors=True)
         if backend == "uv":
-            r = _run(f"{UV} venv --python {pyv} .venv", repo_dir, timeout=180,
-                     active_env_kind=None)
+            # only-managed: uv downloads python-build-standalone, which SHIPS
+            # dev headers (Python.h). System pythons on this box lack -dev
+            # packages for anything but 3.12, which silently killed every
+            # C-extension build in uv envs (v6 postmortem).
+            r = _run(f"UV_PYTHON_PREFERENCE=only-managed {UV} venv --python {pyv} .venv",
+                     repo_dir, timeout=300, active_env_kind=None)
         else:
             # micromamba: single command creates the env, installs python,
             # activates conda-forge as the primary channel.
