@@ -22,8 +22,8 @@ from install_tools import (INSTALL_TOOLS, INSTALL_TOOL2SYS,
 # ---------- LLM helper: tools can call the model ------------------------
 def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
              model="ornith:35b", host="http://127.0.0.1:11434",
-             temperature=0.3, max_tokens=1600, timeout=180,
-             format_json=False):
+             temperature=0.3, max_tokens=1600, timeout=300,
+             format_json=False, num_ctx=131072):
     """Synchronous chat with the same ornith model the top-level agent uses.
     max_tokens defaulted UP to 1600 because thinking-mode's preamble was
     eating the whole budget before JSON emission. Pass format_json=True to
@@ -33,8 +33,9 @@ def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
         "model": model, "stream": False, "keep_alive": "24h",
         "messages": [{"role": "system", "content": system},
                      {"role": "user",   "content": prompt}],
-        "options": {"temperature": temperature, "top_p": 0.95, "top_k": 20,
+        "options": dict({"temperature": temperature, "top_p": 0.95, "top_k": 20,
                     "num_predict": max_tokens},
+                    **({"num_ctx": num_ctx} if num_ctx else {})),
     }
     if format_json:
         body["format"] = "json"
@@ -146,6 +147,146 @@ BOOTSTRAP_TOOL2SYS = {
 BOOTSTRAP_TOOL2SYS.update(INSTALL_TOOL2SYS)
 
 
+
+
+# ---------- doc research: read the docs like a careful developer ----------
+# The old read_repo_docs skimmed 4 globbed files at 2000 chars and guessed.
+# This pipeline does what a developer does: find the installation guide,
+# READ it, follow its links (install docs usually point at the testing
+# guide), read those too, then produce a concrete procedure. The tool
+# interface stays hardened; the intelligence is llm_call inside.
+
+_DOC_NAME_RE = re.compile(
+    r"(install|setup|quickstart|contribut|develop|test|building|compil)",
+    re.IGNORECASE)
+
+
+def _doc_index(repo_dir):
+    """All candidate doc files: top-level README/INSTALL/etc plus docs/**
+    whose path suggests install/test/dev content."""
+    idx = []
+    for pat in ("README*", "INSTALL*", "CONTRIBUTING*", "TESTING*"):
+        idx.extend(p for p in glob.glob(os.path.join(repo_dir, pat))
+                   if os.path.isfile(p))
+    docs_root = os.path.join(repo_dir, "docs")
+    for root, dirs, files in os.walk(docs_root):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_"))]
+        for fn in files:
+            full = os.path.join(root, fn)
+            if fn.endswith((".rst", ".md", ".txt")) and _DOC_NAME_RE.search(
+                    os.path.relpath(full, docs_root)):
+                idx.append(full)
+    out, seen = [], set()
+    for p in idx:
+        rp = os.path.relpath(p, repo_dir)
+        if rp in seen:
+            continue
+        seen.add(rp)
+        try:
+            out.append({"path": rp, "size": os.path.getsize(p)})
+        except OSError:
+            pass
+    return out
+
+
+_LINK_RES = [
+    re.compile(r":doc:`[^`<]*<([^>`]+)>`"),
+    re.compile(r":doc:`([^`<>]+)`"),
+    re.compile(r"\.\. include::\s*(\S+)"),
+    re.compile(r"\]\(([^)#\s]+\.(?:rst|md))\)"),
+    re.compile(r"^\s{3,}([\w][\w/.-]{3,})\s*$", re.MULTILINE),  # toctree
+]
+
+
+def _resolve_links(content, index_paths):
+    """References to other LOCAL doc files, resolved against the index by
+    stem suffix-match (e.g. 'development/testguide' ->
+    'docs/development/testguide.rst'). Noise dies here: a toctree word
+    that matches no indexed file resolves to nothing."""
+    cands = set()
+    for rx in _LINK_RES:
+        for m in rx.finditer(content):
+            cands.add(m.group(1).strip())
+    hits = []
+    for c in cands:
+        stem = re.sub(r"\.(rst|md|txt)$", "", c).strip("/")
+        if len(stem) < 4:
+            continue
+        for ip in index_paths:
+            if re.sub(r"\.(rst|md|txt)$", "", ip).endswith(stem) and ip not in hits:
+                hits.append(ip)
+    return hits
+
+
+def research_docs(repo_dir, max_read=6, chars_per_file=7000):
+    """Find the install guide, read it, follow links one hop, synthesize
+    a procedure. Returns recommendation with `procedure` (ordered steps)
+    and `smoke_test_hint` (the docs' own recommended small test run)."""
+    index = _doc_index(repo_dir)
+    index_paths = [d["path"] for d in index]
+    listing = "\n".join(f"- {d['path']} ({d['size']}B)" for d in index[:80])
+    sel_raw = llm_call(
+        system=("You plan documentation reading before installing a Python "
+                "project from source. JSON only, no thinking preamble."),
+        prompt=("A developer must install this repository from source and run "
+                "its tests. Which files should be READ, in priority order? "
+                "The INSTALLATION guide first, then testing/contributing docs.\n\n"
+                f"{listing}\n\n"
+                'Return JSON: {"read": ["path", ...]} (max 4 paths, exactly '
+                "as listed above)"),
+        max_tokens=800, format_json=True)
+    sel = (_extract_json(sel_raw) or {}).get("read", []) or []
+    to_read = [p for p in sel if p in index_paths][:4] or index_paths[:3]
+    if not any("test" in t.lower() for t in to_read):
+        tdocs = sorted((d for d in index if "test" in d["path"].lower()),
+                       key=lambda d: -d["size"])
+        if tdocs:
+            to_read.append(tdocs[0]["path"])
+    read, queue = [], list(to_read)
+    while queue and len(read) < max_read:
+        rp = queue.pop(0)
+        if any(r["path"] == rp for r in read):
+            continue
+        try:
+            content = open(os.path.join(repo_dir, rp), encoding="utf-8",
+                           errors="ignore").read()[:chars_per_file]
+        except OSError:
+            continue
+        read.append({"path": rp, "content": content})
+        for linked in _resolve_links(content, index_paths):
+            if linked not in queue and not any(r["path"] == linked
+                                               for r in read):
+                queue.append(linked)
+    blob = "\n\n".join(f"=== FILE: {r['path']} ===\n{r['content']}"
+                        for r in read)
+    syn_raw = llm_call(
+        system=("You turn project documentation into an exact install-and-"
+                "test procedure. JSON only, no thinking preamble."),
+        prompt=("Documentation that was actually read (install guide plus the "
+                "pages it links to):\n\n"
+                f"{blob[:26000]}\n\n"
+                "Return JSON with keys:\n"
+                '  python_versions: supported Python versions\n'
+                '  backend_hint: "conda" if docs recommend conda/miniforge/'
+                'mamba, else "uv" or "pip"\n'
+                '  system_prereqs: OS packages the docs require\n'
+                '  build_deps: python packages (with any version pins) the '
+                "docs say are needed before/while building\n"
+                '  procedure: ordered list of concrete steps to install from '
+                "source with test extras, per the docs\n"
+                '  test_env_vars: env vars the docs say tests need\n'
+                '  smoke_test_hint: the docs-recommended way to run a SMALL '
+                "test subset (single file or subpackage), verbatim from the "
+                "docs\n"
+                '  gotchas: notable warnings from the docs'),
+        max_tokens=3200, format_json=True)
+    parsed = _extract_json(syn_raw) or {}
+    return {"files_indexed": len(index),
+            "files_read": [r["path"] for r in read],
+            "recommendation": parsed,
+            "recommendation_raw": syn_raw[:2000]}
+
+
 # ---------- Handlers ----------------------------------------------------
 
 def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
@@ -162,49 +303,9 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
 
     # ---- read_repo_docs -----------------------------------------------
     def h_read_docs(pcb, args):
-        max_c = int(args.get("max_chars_per_file", 8000))
-        patterns = ["README*", "INSTALL*", "CONTRIBUTING*",
-                    "docs/**/install*", "docs/**/README*",
-                    "docs/**/quickstart*"]
-        raw = []
-        for pat in patterns:
-            for p in glob.glob(os.path.join(repo_dir, pat), recursive=True):
-                try:
-                    with open(p, encoding="utf-8", errors="ignore") as f:
-                        raw.append({"path": os.path.relpath(p, repo_dir),
-                                    "content": f.read()[:max_c]})
-                except OSError:
-                    pass
-        blob = "\n\n---\n\n".join(f"### {d['path']}\n{d['content']}"
-                                    for d in raw[:4])
-        parsed = {}
-        recommendation_raw = ""
-        if blob:
-            # format=json + higher token budget: prior version failed because
-            # thinking-mode preamble consumed the 800-token budget before any
-            # JSON was emitted, so recommendation was always {}.
-            recommendation_raw = llm_call(
-                system=("Extract Python-project install info. Return JSON only, "
-                        "no thinking preamble."),
-                prompt=(f"From these project docs, extract install info.\n\n"
-                        f"Docs:\n{blob[:16000]}\n\n"
-                        "Return JSON with these keys:\n"
-                        '  python_versions: list of supported Python versions\n'
-                        '  install_cmds: list of exact install commands recommended\n'
-                        '  system_prereqs: list of apt/brew packages needed\n'
-                        '  test_env_vars: dict of env vars needed to run tests\n'
-                        '  extras: list of extras like "test", "dev"\n'
-                        '  backend_hint: "conda" if docs recommend miniforge/'
-                        'conda/mamba, else "uv" or "pip"\n'
-                        '  notes: short prose summary of anything notable'),
-                max_tokens=1600, format_json=True)
-            parsed = _extract_json(recommendation_raw) or {}
-        return {"files": [{"path": d["path"], "size": len(d["content"])}
-                          for d in raw],
-                "count": len(raw),
-                "recommendation": parsed,
-                "recommendation_raw": recommendation_raw[:2000],
-                "goal_stack": _stack_snapshot(state)}
+        out = research_docs(repo_dir)
+        out["goal_stack"] = _stack_snapshot(state)
+        return out
 
     # ---- inspect_repo_config ------------------------------------------
     def h_inspect_config(pcb, args):
@@ -452,9 +553,12 @@ BOOTSTRAP_SYSTEM_PROMPT = (
     "You are setting up an unfamiliar Python repository. Work like a careful "
     "developer.\n\n"
     "RECON (do this first):\n"
-    "  1. read_repo_docs — the docs may recommend a specific package manager "
-    "(miniforge/conda-forge is common for scientific Python). Check "
-    "recommendation.backend_hint.\n"
+    "  1. read_repo_docs — this READS the installation guide and the pages "
+    "it links to (testing guide etc.) and returns recommendation.procedure "
+    "(ordered install steps from the docs), recommendation.build_deps, "
+    "recommendation.backend_hint, and recommendation.smoke_test_hint (the "
+    "docs' own way to run a small test). FOLLOW the procedure; use "
+    "smoke_test_hint for run_smoke_test later.\n"
     "  2. inspect_repo_config — declared Python versions, extras, and build "
     "system. Check recommendation.backend and recommendation.build_deps.\n"
     "  3. web_search when config is thin or an error message is unfamiliar.\n\n"

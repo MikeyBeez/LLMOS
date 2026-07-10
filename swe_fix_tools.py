@@ -121,6 +121,8 @@ def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None, env_kind="uv"):
                 "delta_bytes": len(new) - len(old)}
 
     def h_run_failing_test(pcb, args):
+        import shutil as _sh
+        _sh.rmtree(os.path.join(repo_dir, '.hypothesis'), ignore_errors=True)
         """Run the specific FAIL_TO_PASS test(s) we're supposed to make pass.
         The model can also pass an override test_id (useful during
         iteration), but the harness will always require the real

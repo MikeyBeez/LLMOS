@@ -90,10 +90,16 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     ]
     meta_log = []
     for turn in range(budget):
-        try:
-            msg, meta = cpu._chat(messages)
-        except Exception as e:
-            return "cpu_error", messages, meta_log + [{"error": str(e)}]
+        msg = None
+        for attempt in range(3):
+            try:
+                msg, meta = cpu._chat(messages)
+                break
+            except Exception as e:
+                err = str(e)
+                time.sleep(20 * (attempt + 1))
+        if msg is None:
+            return "cpu_error", messages, meta_log + [{"error": err}]
         meta_log.append({"turn": turn,
                           "prompt_tokens": meta.get("prompt_tokens"),
                           "eval_tokens":   meta.get("eval_tokens")})
@@ -153,6 +159,10 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
 
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
+    # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
+    # collection ERROR (astropy makes warnings fatal) and produced a false
+    # resolved=False on astropy-14995 (manual rescore: FTP + 6 P2P all pass).
+    shutil.rmtree(os.path.join(repo, ".hypothesis"), ignore_errors=True)
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
@@ -193,6 +203,12 @@ def run_one(inst):
     goal = (f"Set up the repository at ./ for testing. It is: {inst['repo']}. "
             f"The problem it addresses (for context, do not fix yet):\n\n"
             f"{inst['problem_statement'][:2000]}")
+    # Known-green tests from the instance metadata — the principled smoke
+    # choice (oracle-ish assist; disable for leaderboard-pure runs).
+    p2p = (inst.get("PASS_TO_PASS") or [])[:3]
+    if p2p:
+        goal += ("\n\nKnown-stable tests that should already pass in a "
+                 f"healthy environment (good run_smoke_test choices): {p2p}")
     rems = remedies_for(inst["repo"])
     if rems:
         goal += "\n\n" + format_remedy_context(rems)
