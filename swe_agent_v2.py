@@ -30,11 +30,12 @@ from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
                             make_fix_handlers)
 import envcheck
+from trace_consumers import remedies_for, format_remedy_context, harvest_trace
 
 HOST = "http://127.0.0.1:11434"
 MODEL = "ornith:35b"
 NUMCTX = 131072
-BOOTSTRAP_BUDGET = 25
+BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package is 1 turn)
 FIX_BUDGET      = 40
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces_v2")
@@ -134,7 +135,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     return "budget", messages, meta_log
 
 
-def score(inst, repo, env_vars):
+def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
@@ -147,11 +148,15 @@ def score(inst, repo, env_vars):
     target = " ".join(files) if files else "."
     names = " or ".join(inst["FAIL_TO_PASS"])
     env = os.environ.copy(); env.update(env_vars or {})
-    venv_bin = os.path.join(repo, ".venv", "bin")
+    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
+    venv_bin = os.path.join(repo, env_dir, "bin")
     env["PATH"] = venv_bin + ":" + env.get("PATH", "")
-    env["VIRTUAL_ENV"] = os.path.join(repo, ".venv")
+    if env_kind == "conda":
+        env["CONDA_PREFIX"] = os.path.join(repo, env_dir)
+    else:
+        env["VIRTUAL_ENV"] = os.path.join(repo, env_dir)
     r = subprocess.run(
-        f'.venv/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header',
+        f'{env_dir}/bin/python -m pytest {target} -k "{names}" -p no:cacheprovider -q --no-header',
         shell=True, cwd=repo, capture_output=True, text=True, timeout=600, env=env)
     ok = r.returncode == 0 and "passed" in r.stdout
     tail = (r.stdout[-200:] or r.stderr[-200:]).replace("\n", " ")
@@ -171,6 +176,10 @@ def run_one(inst):
     goal = (f"Set up the repository at ./ for testing. It is: {inst['repo']}. "
             f"The problem it addresses (for context, do not fix yet):\n\n"
             f"{inst['problem_statement'][:2000]}")
+    rems = remedies_for(inst["repo"])
+    if rems:
+        goal += "\n\n" + format_remedy_context(rems)
+        print(f" -- injected {len(rems)} known remedies for {inst['repo']}", flush=True)
     print(" -- phase 1: bootstrap --", flush=True)
     b_reason, b_msgs, b_meta = phase_run(cpu, BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
@@ -188,10 +197,12 @@ def run_one(inst):
         _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta,
                             "state": b_state, "outcome": outcome})
         return outcome
-    print(f" -- phase 1 OK: {b_state['last_python']} extras={b_state['last_extras']}", flush=True)
+    print(f" -- phase 1 OK: {b_state.get('active_env_kind')}/{b_state.get('python_version')}, "
+          f"{len(b_state.get('installed', []))} installs", flush=True)
     # -------- Phase 2: fix --------
     f_handlers, f_state = make_fix_handlers(
-        repo, fail_to_pass=inst["FAIL_TO_PASS"], env_vars=b_state["env_vars"])
+        repo, fail_to_pass=inst["FAIL_TO_PASS"], env_vars=b_state["env_vars"],
+        env_kind=b_state.get("active_env_kind", "uv"))
     # New CPU instance for phase 2 — separate context, fresh system prompt.
     cpu2 = ToolCallCPU(tools=FIX_TOOLS, tool2sys=FIX_TOOL2SYS,
                        system_prompt=FIX_SYSTEM_PROMPT, model=MODEL, host=HOST,
@@ -205,12 +216,15 @@ def run_one(inst):
                                           fix_goal, FIX_BUDGET,
                                           gate=lambda: f_state["fix_verified"])
     # Score with the exact SWE-bench recipe.
-    resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"])
+    resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],
+                                        env_kind=b_state.get("active_env_kind", "uv"))
     dt = time.time() - t0
     outcome = {"id": inst["instance_id"], "resolved": bool(resolved),
                 "phase1_reason": b_reason, "phase2_reason": f_reason,
-                "env_ok": True, "python": b_state["last_python"],
-                "extras": b_state["last_extras"],
+                "env_ok": True,
+                "env_kind": b_state.get("active_env_kind"),
+                "python":   b_state.get("python_version"),
+                "installs": b_state.get("installed", []),
                 "env_vars": b_state["env_vars"],
                 "patch_bytes": patch_bytes, "secs": round(dt),
                 "fix_verified_by_model": f_state["fix_verified"],
@@ -229,6 +243,15 @@ def _save_trace(inst, blob):
     p = os.path.join(TRACES, inst["instance_id"] + ".trace.json")
     with open(p, "w") as f:
         json.dump(blob, f, indent=1, default=str)
+    # Run trace consumers (events, remedy store, training export). Never
+    # let a consumer failure damage the run or the already-saved trace.
+    try:
+        summary = harvest_trace(inst, blob)
+        with open(p, "w") as f:
+            json.dump(blob, f, indent=1, default=str)
+        print(f" -- trace harvest: {summary}", flush=True)
+    except Exception as e:
+        print(f" -- trace harvest failed (trace still saved): {type(e).__name__}: {e}", flush=True)
 
 
 def main():

@@ -14,27 +14,32 @@ import os, re, shlex, subprocess
 from repo_bootstrap_tools import llm_call, _extract_json
 
 
-def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
+def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None, env_kind="uv"):
     """Return handlers bound to this repo checkout + the FAIL_TO_PASS test
     id(s) we're supposed to make pass. env_vars carries anything the
-    bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE)."""
+    bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
+    which env directory to use (.venv for uv/pip, .condaenv for conda)."""
     env_vars = dict(env_vars or {})
+    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
     state = {"submitted": False, "fix_verified": False,
              "fail_to_pass": list(fail_to_pass)}
 
     def _run(cmd, timeout=300):
         env = os.environ.copy()
         env.update(env_vars)
-        venv_bin = os.path.join(repo_dir, ".venv", "bin")
+        venv_bin = os.path.join(repo_dir, env_dir, "bin")
         env["PATH"] = venv_bin + ":" + env.get("PATH", "")
-        env["VIRTUAL_ENV"] = os.path.join(repo_dir, ".venv")
+        if env_kind == "conda":
+            env["CONDA_PREFIX"] = os.path.join(repo_dir, env_dir)
+        else:
+            env["VIRTUAL_ENV"] = os.path.join(repo_dir, env_dir)
         return subprocess.run(cmd, shell=True, cwd=repo_dir, capture_output=True,
                               text=True, timeout=timeout, env=env)
 
     def h_reproduce(pcb, args):
         """Run a small Python script inside the venv to observe the bug."""
         script = str(args.get("python_script", ""))
-        r = _run(f'.venv/bin/python -c {shlex.quote(script)}', timeout=180)
+        r = _run(f'{env_dir}/bin/python -c {shlex.quote(script)}', timeout=180)
         return {"exit": r.returncode,
                 "stdout": (r.stdout or "")[-2000:],
                 "stderr": (r.stderr or "")[-2000:]}
@@ -122,7 +127,7 @@ def make_fix_handlers(repo_dir, fail_to_pass, env_vars=None):
         FAIL_TO_PASS set to pass at submit time."""
         override = args.get("test_id")
         ids = [override] if override else state["fail_to_pass"]
-        cmd = ('.venv/bin/python -m pytest -q -p no:cacheprovider ' +
+        cmd = (f'{env_dir}/bin/python -m pytest -q -p no:cacheprovider ' +
                " ".join(f'"{tid}"' for tid in ids))
         r = _run(cmd, timeout=600)
         ok = r.returncode == 0 and "passed" in (r.stdout or "")
