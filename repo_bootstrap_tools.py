@@ -124,6 +124,14 @@ VERIFY_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "test_id":            {"type": "string"},
             "extra_pytest_args":  {"type": "string", "default": ""},
+            "runner_script":      {"type": "string",
+                "description": "OPTIONAL repo-specific test runner script "
+                               "(relative path, e.g. tests/runtests.py for "
+                               "django). Used INSTEAD of pytest; gate is "
+                               "exit code 0."},
+            "runner_args":        {"type": "string",
+                "description": "arguments for runner_script, e.g. "
+                               "migrations.test_writer -v 0"},
         }, "required": ["test_id"]}}},
     {"type": "function", "function": {
         "name": "declare_env_ready",
@@ -523,6 +531,8 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
                     "goal_stack": _stack_snapshot(state)}
         test_id = str(args.get("test_id", ""))
         extra_args = str(args.get("extra_pytest_args", ""))
+        runner_script = str(args.get("runner_script", "") or "")
+        runner_args = str(args.get("runner_args", "") or "")
         # Guard: the instance's failing tests ARE the bug — they cannot
         # validate the environment. Match on test function name or file.
         for ftp in state.get("fail_to_pass", []):
@@ -539,6 +549,26 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None):
                     "fail_to_pass": state["fail_to_pass"],
                     "goal_stack": _stack_snapshot(state)}
         bin_ = ".condaenv/bin" if active == "conda" else ".venv/bin"
+        # Repo-specific runner (django tests/runtests.py etc): execute a
+        # python script that EXISTS IN THE REPO, inside the env. Gate: exit 0.
+        if runner_script:
+            sp = os.path.normpath(runner_script)
+            if sp.startswith("..") or os.path.isabs(sp):
+                return {"ok": False, "error": "runner_script must be a relative "
+                        "path inside the repo", "goal_stack": _stack_snapshot(state)}
+            if not os.path.isfile(os.path.join(repo_dir, sp)):
+                return {"ok": False, "error": f"runner_script not found: {sp}",
+                        "goal_stack": _stack_snapshot(state)}
+            r_t = _run(f"{bin_}/python {sp} {runner_args}", repo_dir,
+                       env_vars=state["env_vars"], timeout=600,
+                       active_env_kind=active)
+            ok = r_t.returncode == 0
+            state["smoke_ok"] = ok
+            return {"ok": ok, "runner": f"{sp} {runner_args}".strip(),
+                    "exit": r_t.returncode,
+                    "stdout": (r_t.stdout or "")[-1500:],
+                    "stderr": (r_t.stderr or "")[-1500:],
+                    "goal_stack": _stack_snapshot(state)}
         r_collect = _run(
             f'{bin_}/python -m pytest --collect-only -q {extra_args}',
             repo_dir, env_vars=state["env_vars"], timeout=180,
