@@ -31,7 +31,7 @@ class ToolCallCPU(OllamaCPU):
     """
 
     def __init__(self, tools, tool2sys, system_prompt="",
-                 model="ornith:35b", host="http://127.0.0.1:11434",
+                 model="ornith:35b", host="http://127.0.0.1:8080",
                  temperature=0.6, num_predict=2048, num_ctx=65536,
                  seed=0, keep_alive="24h", log=None,
                  request_timeout=600):
@@ -121,24 +121,43 @@ class ToolCallCPU(OllamaCPU):
         # fallback: the model's tool name might already match
         return sysname.replace(".", "_")
 
-    # --- transport -------------------------------------------------------
+    # --- transport: llama-server /v1/chat/completions (no ollama) --------
+    @staticmethod
+    def _normalize(messages):
+        """OpenAI form: assistant tool_call arguments must be JSON strings."""
+        out = []
+        for m in messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                m = dict(m)
+                tcs = []
+                for tc in m["tool_calls"]:
+                    tc = json.loads(json.dumps(tc))  # deep copy
+                    fn = tc.get("function", {})
+                    if isinstance(fn.get("arguments"), (dict, list)):
+                        fn["arguments"] = json.dumps(fn["arguments"])
+                    tcs.append(tc)
+                m["tool_calls"] = tcs
+            out.append(m)
+        return out
+
     def _chat(self, messages):
         body = json.dumps({
-            "model": self.model, "stream": False, "keep_alive": self.keep_alive,
-            "messages": messages, "tools": self.tools,
-            "options": {"temperature": self.temperature, "seed": self.seed,
-                        "top_p": 0.95, "top_k": 20,
-                        "num_ctx": self.num_ctx, "num_predict": self.num_predict},
+            "model": self.model, "stream": False,
+            "messages": self._normalize(messages), "tools": self.tools,
+            "temperature": self.temperature, "top_p": 0.95, "top_k": 20,
+            "seed": self.seed, "max_tokens": self.num_predict,
         }).encode()
         req = urllib.request.Request(
-            self.host + "/api/chat", data=body,
+            self.host + "/v1/chat/completions", data=body,
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
             resp = json.loads(r.read())
-        m = resp.get("message", {}) or {}
-        meta = {"prompt_tokens": resp.get("prompt_eval_count"),
-                "eval_tokens":   resp.get("eval_count"),
-                "eval_ms": (resp.get("eval_duration") or 0) / 1e6,
-                "load_ms": (resp.get("load_duration") or 0) / 1e6,
+        m = (resp.get("choices") or [{}])[0].get("message", {}) or {}
+        usage = resp.get("usage") or {}
+        timings = resp.get("timings") or {}
+        meta = {"prompt_tokens": usage.get("prompt_tokens"),
+                "eval_tokens":   usage.get("completion_tokens"),
+                "eval_ms": timings.get("predicted_ms", 0),
+                "load_ms": 0,
                 "retries": 0}
         return m, meta

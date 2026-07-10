@@ -21,7 +21,7 @@ from install_tools import (INSTALL_TOOLS, INSTALL_TOOL2SYS,
 
 # ---------- LLM helper: tools can call the model ------------------------
 def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
-             model="ornith:35b", host="http://127.0.0.1:11434",
+             model="ornith:35b", host="http://127.0.0.1:8080",
              temperature=0.3, max_tokens=1600, timeout=300,
              format_json=False, num_ctx=131072):
     """Synchronous chat with the same ornith model the top-level agent uses.
@@ -29,24 +29,26 @@ def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
     eating the whole budget before JSON emission. Pass format_json=True to
     request structured output.
     """
+    # llama-server /v1/chat/completions (ollama retired 2026-07-10).
+    # num_ctx is a no-op: the server's context is fixed at startup, so
+    # context-size reload thrash is structurally impossible now.
     body = {
-        "model": model, "stream": False, "keep_alive": "24h",
+        "model": model, "stream": False,
         "messages": [{"role": "system", "content": system},
                      {"role": "user",   "content": prompt}],
-        "options": dict({"temperature": temperature, "top_p": 0.95, "top_k": 20,
-                    "num_predict": max_tokens},
-                    **({"num_ctx": num_ctx} if num_ctx else {})),
+        "temperature": temperature, "top_p": 0.95, "top_k": 20,
+        "max_tokens": max_tokens,
     }
     if format_json:
-        body["format"] = "json"
+        body["response_format"] = {"type": "json_object"}
     data = json.dumps(body).encode()
     try:
-        req = urllib.request.Request(host + "/api/chat", data=data,
+        req = urllib.request.Request(host + "/v1/chat/completions", data=data,
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             resp = json.loads(r.read())
-        m = resp.get("message", {}) or {}
-        return m.get("content", "") or m.get("thinking", "")
+        m = (resp.get("choices") or [{}])[0].get("message", {}) or {}
+        return m.get("content", "") or m.get("reasoning_content", "")
     except Exception as e:
         return f"[llm_call error: {e}]"
 

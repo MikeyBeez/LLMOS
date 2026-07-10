@@ -85,6 +85,7 @@ setsid nohup env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" "$BIN" \
     --cache-reuse 256 \
     --batch-size 512 --ubatch-size 512 \
     --no-webui \
+    --jinja \
     --log-verbosity 1 \
     > "$LOG" 2>&1 &
 

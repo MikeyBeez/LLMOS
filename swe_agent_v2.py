@@ -32,7 +32,7 @@ from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
 import envcheck
 from trace_consumers import remedies_for, format_remedy_context, harvest_trace
 
-HOST = "http://127.0.0.1:11434"
+HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
 MODEL = "ornith:35b"
 NUMCTX = 131072
 BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package is 1 turn)
