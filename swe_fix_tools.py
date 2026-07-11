@@ -203,9 +203,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {"error": "test_id required"}
         import test_runner as _tr
         res = _tr.run_tests(repo_dir, env_kind, [tid], env_vars=env_vars,
-                            repo=repo, timeout=600)
-        return {"ok": res["ok"], "exit": res["exit"],
-                "stdout": res["stdout"], "installed": res.get("installed", [])}
+                            repo=repo, timeout=600, diagnose=True)
+        out = {"ok": res["ok"], "exit": res["exit"],
+               "stdout": res["stdout"], "installed": res.get("installed", [])}
+        if res.get("diagnosis"):
+            out["diagnosis"] = res["diagnosis"]
+        return out
 
     def h_submit(pcb, args):
         """Terminal call. Gate: RED seen, same reproduction now GREEN, and a

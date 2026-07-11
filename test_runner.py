@@ -24,6 +24,51 @@ _PKG_ALIASES = {
 _MISSING_RE = re.compile(r"No module named ['\"]([\w.]+)['\"]")
 
 
+
+
+def _llm_web_available():
+    try:
+        from repo_bootstrap_tools import llm_call, _ddg_search, _extract_json  # noqa
+        return True
+    except Exception:
+        return False
+
+
+def _web_pip_name(mod):
+    """Escalate an unresolved import name to a pip package via web search +
+    the model — what a developer does. Returns a name or None."""
+    try:
+        from repo_bootstrap_tools import _ddg_search, llm_call, _extract_json
+    except Exception:
+        return None
+    hits = _ddg_search(f"python ModuleNotFoundError {mod} how to pip install", 5)
+    if not hits:
+        return None
+    blob = "\n".join(f"- {h['title']}: {h['snippet']}" for h in hits)
+    raw = llm_call(
+        system="Map a Python import name to its pip package. JSON only.",
+        prompt=(f"'import {mod}' fails. From these results give the exact pip "
+                f"install name.\n\n{blob}\n\n"
+                'JSON: {"pip_name": "..."} or null.'),
+        max_tokens=300, format_json=True)
+    pkg = (_extract_json(raw) or {}).get("pip_name")
+    return pkg if pkg and pkg not in ("null", "None", "") else None
+
+
+def _diagnose(node_ids, output):
+    """Optional LLM diagnosis of a test failure (advisory; not the verdict)."""
+    try:
+        from repo_bootstrap_tools import llm_call
+    except Exception:
+        return None
+    return llm_call(
+        system="Explain a pytest/unittest failure for a fix agent. 2-3 sentences.",
+        prompt=(f"Tests: {node_ids}\n\nOutput:\n{output[-2000:]}\n\n"
+                "What failed, the likely faulty code, and what the fix "
+                "should change?"),
+        max_tokens=400)
+
+
 def _bin(repo_dir, kind):
     return os.path.join(repo_dir, ".condaenv" if kind == "conda" else ".venv",
                         "bin")
@@ -86,7 +131,7 @@ def _bin_rel(kind):
 
 
 def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
-              timeout=600, max_installs=4):
+              timeout=600, max_installs=4, diagnose=False):
     """Run the given test node ids and report pass/fail. THE single test
     execution path. Returns dict: ok, exit, passed, tail, installed."""
     env = _env(repo_dir, kind, env_vars)
@@ -121,6 +166,16 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
             f'{py} -m pip install "{pkg}"', shell=True, cwd=repo_dir,
             capture_output=True, text=True, timeout=300, env=env).returncode == 0
         if not ok_i:
+            # Escalate: web-search the real pip name and try that.
+            looked = _web_pip_name(mod)
+            if looked and looked != pkg:
+                ok_i = subprocess.run(
+                    f'{py} -m pip install "{looked}"', shell=True, cwd=repo_dir,
+                    capture_output=True, text=True, timeout=300,
+                    env=env).returncode == 0
+                if ok_i:
+                    pkg = looked
+        if not ok_i:
             break
         installed.append(pkg)
 
@@ -129,9 +184,14 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
                                    and "FAILED" not in out and r.returncode == 0)
     ok = r.returncode == 0 and passed
     tail = out.strip().splitlines()[-1][:160] if out.strip() else "(no output)"
-    return {"ok": ok, "exit": r.returncode, "passed": passed,
-            "tail": tail, "stdout": (r.stdout or "")[-1500:],
-            "installed": installed}
+    result = {"ok": ok, "exit": r.returncode, "passed": passed,
+              "tail": tail, "stdout": (r.stdout or "")[-1500:],
+              "installed": installed}
+    if not ok and diagnose:
+        d = _diagnose(ids, out)
+        if d:
+            result["diagnosis"] = d
+    return result
 
 
 def _django_label(node_id):
