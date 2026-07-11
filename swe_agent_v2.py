@@ -24,7 +24,7 @@ import json, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from tool_call_cpu import ToolCallCPU
-from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
+from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS, auto_verify_env,
                                    BOOTSTRAP_SYSTEM_PROMPT,
                                    make_bootstrap_handlers, env_ready)
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
@@ -338,10 +338,20 @@ def run_one(inst):
         print(f" -- injected {len(rems)} known remedies for {inst['repo']}", flush=True)
     print(" -- phase 1: bootstrap --", flush=True)
     ckpt = os.path.join(TRACES, inst["instance_id"] + ".partial.json")
+    def _boot_gate():
+        # On declare: if the package imports but smoke hasn't run, the harness
+        # verifies the env itself (auto_verify_env) so the model never burns
+        # turns guessing a smoke test.
+        if b_state.get("sanity_ok") and not b_state.get("smoke_ok"):
+            try:
+                auto_verify_env(b_state, repo)
+            except Exception:
+                pass
+        return env_ready(b_state)
     b_reason, b_msgs, b_meta = phase_run(cpu, BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
                                           goal, BOOTSTRAP_BUDGET,
-                                          gate=lambda: env_ready(b_state),
+                                          gate=_boot_gate,
                                           checkpoint=ckpt)
     env_ok = env_ready(b_state)
     if not env_ok:

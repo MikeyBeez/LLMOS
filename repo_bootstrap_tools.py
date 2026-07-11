@@ -537,92 +537,8 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
         runner_script = str(args.get("runner_script", "") or "")
         runner_args = str(args.get("runner_args", "") or "")
         auto = False
-        # No test named -> the harness picks a real, currently-present test and
-        # runs it as the standard env check. The model must not guess. P2P/F2P
-        # names can't be trusted to exist yet (computed post-test_patch), so we
-        # COLLECT from the live tree.
         if not test_id and not runner_script:
-            auto = True
-            bin_pre = ".condaenv/bin" if active == "conda" else ".venv/bin"
-            ftp_names = {f.rsplit("::", 1)[-1] for f in state.get("fail_to_pass", [])}
-            ftp_files = {f.split("::", 1)[0] for f in state.get("fail_to_pass", [])}
-            if state.get("repo_name") == "django/django" and os.path.isfile(
-                    os.path.join(repo_dir, "tests/runtests.py")):
-                # django: a stable, always-present app unrelated to most bugs.
-                runner_script = "tests/runtests.py"
-                runner_args = "absolute_url_overrides -v 0"
-            else:
-                rc = _run(f'{bin_pre}/python -m pytest --collect-only -q '
-                          f'-p no:cacheprovider', repo_dir,
-                          env_vars=state["env_vars"], timeout=180,
-                          active_env_kind=active)
-                cands = []
-                for line in (rc.stdout or "").splitlines():
-                    line = line.strip()
-                    if "::" not in line or line.startswith(("<", "=", "_", " ")):
-                        continue
-                    nid = line.split(" ")[0]
-                    fn = nid.rsplit("::", 1)[-1]
-                    ff = nid.split("::", 1)[0]
-                    if fn in ftp_names or ff in ftp_files:
-                        continue
-                    cands.append(nid)
-                if not cands:
-                    return {"ok": False,
-                            "error": "could not collect any runnable test; "
-                            "the test suite may not import — check the install",
-                            "collect_tail": (rc.stdout or rc.stderr or "")[-1200:],
-                            "goal_stack": _stack_snapshot(state)}
-                # Prefer spread across files, then run each until one PASSES;
-                # a single broken test file must not fail the gate.
-                seen_files, spread = set(), []
-                for nid in cands:
-                    f = nid.split("::", 1)[0]
-                    if f not in seen_files:
-                        seen_files.add(f)
-                        spread.append(nid)
-                spread = (spread + cands)[:10]
-                last = None
-                for nid in spread:
-                    rt = _run(f'{bin_pre}/python -m pytest -q -p no:cacheprovider '
-                              f'"{nid}"', repo_dir, env_vars=state["env_vars"],
-                              timeout=300, active_env_kind=active)
-                    last = rt
-                    if rt.returncode == 0 and "passed" in (rt.stdout or ""):
-                        state["smoke_ok"] = True
-                        return {"ok": True, "auto_test": nid,
-                                "stdout": (rt.stdout or "")[-800:],
-                                "goal_stack": _stack_snapshot(state)}
-                # No test passed. Decide WHY: an external ModuleNotFoundError
-                # means the env is genuinely broken; a NameError/local error
-                # (often from a conftest that the test_patch will complete)
-                # means the env is fine and the test tree is pre-patch-broken.
-                blob = ""
-                for nid in spread:
-                    rt = _run(f'{bin_pre}/python -m pytest --collect-only -q '
-                              f'-p no:cacheprovider "{nid.split("::")[0]}"',
-                              repo_dir, env_vars=state["env_vars"], timeout=120,
-                              active_env_kind=active)
-                    blob += (rt.stdout or "") + (rt.stderr or "")
-                miss = re.search(r"No module named ['\"]([\w.]+)['\"]", blob)
-                repo_top = os.path.basename(repo_dir).split("__")[0]
-                if miss and miss.group(1).split(".")[0] not in (repo_top,):
-                    return {"ok": False, "auto": True,
-                            "error": f"env missing test dependency: "
-                                     f"{miss.group(1)} — install it and retry",
-                            "missing_module": miss.group(1),
-                            "goal_stack": _stack_snapshot(state)}
-                # Not a missing external module: package imports + pytest runs +
-                # collection reaches test files. Env is ready; the test tree is
-                # completed by the scoring test_patch.
-                state["smoke_ok"] = True
-                return {"ok": True, "auto": True,
-                        "note": "package imports and pytest runs; the test tree "
-                        "has pre-patch collection errors that the scoring "
-                        "test_patch resolves (this is expected for some "
-                        "instances) — environment accepted",
-                        "collect_tail": blob[-600:],
-                        "goal_stack": _stack_snapshot(state)}
+            return auto_verify_env(state, repo_dir)
         # Guard: the instance's failing tests ARE the bug — they cannot
         # validate the environment. Match on test function name or file.
         # (Skipped for auto PASS_TO_PASS runs, which are known-safe.)
@@ -701,6 +617,69 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
 
 
 # ---------- Env-ready gate ---------------------------------------------
+def auto_verify_env(state, repo_dir):
+    """Harness-driven env check via the shared deterministic runner. Collects
+    REAL present tests (excluding the bug's), runs candidates across files
+    until one passes -> smoke_ok. If none pass, distinguish a broken env
+    (external ModuleNotFoundError) from a pre-patch-broken test tree (e.g.
+    a conftest the test_patch completes) — the latter is accepted."""
+    import test_runner as tr
+    kind = state.get("active_env_kind")
+    if not kind:
+        return {"ok": False, "error": "no venv yet",
+                "goal_stack": _stack_snapshot(state)}
+    repo = state.get("repo_name")
+    env_vars = state.get("env_vars")
+    ftp = state.get("fail_to_pass", [])
+    excl = [f.rsplit("::", 1)[-1] for f in ftp] + [f.split("::", 1)[0] for f in ftp]
+    # django: a stable, always-present app unrelated to the usual bugs.
+    if repo == "django/django" and os.path.isfile(
+            os.path.join(repo_dir, "tests/runtests.py")):
+        res = tr.run_tests(repo_dir, kind, ["absolute_url_overrides"],
+                           env_vars=env_vars, repo=repo, timeout=300)
+        state["smoke_ok"] = res["ok"]
+        return {"ok": res["ok"], "auto": True,
+                "runner": "tests/runtests.py absolute_url_overrides",
+                "tail": res["tail"], "goal_stack": _stack_snapshot(state)}
+    ids = tr.collect_ids(repo_dir, kind, env_vars=env_vars, exclude=excl)
+    seen, spread = set(), []
+    for nid in ids:
+        f = nid.split("::", 1)[0]
+        if f not in seen:
+            seen.add(f)
+            spread.append(nid)
+    spread = (spread + ids)[:10]
+    outputs = ""
+    for nid in spread:
+        res = tr.run_tests(repo_dir, kind, [nid], env_vars=env_vars,
+                           repo=repo, timeout=300)
+        outputs += res.get("stdout", "")
+        if res["ok"]:
+            state["smoke_ok"] = True
+            return {"ok": True, "auto": True, "auto_test": nid,
+                    "tail": res["tail"], "goal_stack": _stack_snapshot(state)}
+    # None passed. Broken env vs pre-patch-broken test tree.
+    miss = re.search(r"No module named ['\"]([\w.]+)['\"]", outputs)
+    repo_top = os.path.basename(repo_dir).split("__")[0]
+    if miss and miss.group(1).split(".")[0] != repo_top:
+        return {"ok": False, "auto": True,
+                "error": f"env missing test dependency: {miss.group(1)}",
+                "missing_module": miss.group(1),
+                "goal_stack": _stack_snapshot(state)}
+    if not ids:
+        return {"ok": False, "auto": True,
+                "error": "no tests could be collected — the suite may not "
+                         "import; check the install",
+                "goal_stack": _stack_snapshot(state)}
+    # Tests exist but error pre-patch (e.g. conftest completed by test_patch).
+    state["smoke_ok"] = True
+    return {"ok": True, "auto": True,
+            "note": "package imports and pytest runs; test tree has pre-patch "
+            "collection/setup errors the scoring test_patch resolves — "
+            "environment accepted",
+            "goal_stack": _stack_snapshot(state)}
+
+
 def env_ready(state):
     return state["sanity_ok"] and state["smoke_ok"]
 
