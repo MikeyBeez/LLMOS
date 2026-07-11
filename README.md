@@ -90,3 +90,7 @@ To run the kernel as a real background service at login, see [launchd/README.md]
 ## Next
 
 Teach a local model the full ISA so a real LLM can drive multi-step goals reliably; `attach` to an in-flight process and turn corrections into durable protocols (the spectator and teacher roles); add a `web` device (untrusted by default) and `sandbox-exec` profiles for web-content agents; and let `kerneld` schedule many submitted jobs concurrently rather than one at a time.
+
+## Design principles
+
+See [PRINCIPLES.md](PRINCIPLES.md) — match the shape of the problem; never pay twice.
