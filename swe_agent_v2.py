@@ -298,36 +298,12 @@ def score(inst, repo, env_vars, env_kind="uv"):
     ap = sh("git apply _t.patch", cwd=repo)
     if ap.returncode != 0:
         return False, len(diff), "test patch did not apply (agent touched a test file?)"
-    files = [l[6:].strip() for l in inst["test_patch"].splitlines()
-             if l.startswith("+++ b/") and l.strip().endswith(".py")]
-    target = " ".join(files) if files else "."
-    names = " or ".join(inst["FAIL_TO_PASS"])
-    env = os.environ.copy(); env.update(env_vars or {})
-    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
-    venv_bin = os.path.join(repo, env_dir, "bin")
-    env["PATH"] = venv_bin + ":" + env.get("PATH", "")
-    if env_kind == "conda":
-        env["CONDA_PREFIX"] = os.path.join(repo, env_dir)
-    else:
-        env["VIRTUAL_ENV"] = os.path.join(repo, env_dir)
-    # Django's suite runs on unittest via runtests.py, not pytest — match the
-    # real SWE-bench harness. Everything else: pytest, with pytest itself
-    # ensured present (the test extra doesn't always pull it).
-    if inst["repo"] == "django/django" and os.path.isfile(
-            os.path.join(repo, "tests/runtests.py")):
-        labels = " ".join(t.split("::")[0].replace("/", ".").removesuffix(".py")
-                          if "/" in t else t for t in inst["FAIL_TO_PASS"])
-        cmd = f'{env_dir}/bin/python tests/runtests.py {labels} -v 0'
-    else:
-        _pip_install("pytest", repo, env, env_dir)  # guarantee the driver
-        cmd = (f'{env_dir}/bin/python -m pytest {target} -k "{names}" '
-               f'-p no:cacheprovider -q --no-header')
-    r = _run_with_missing_module_reflex(cmd, repo, env, env_dir)
-    passed = ("passed" in (r.stdout or "")) or (
-        "OK" in (r.stdout or "") + (r.stderr or "") and inst["repo"] == "django/django")
-    ok = r.returncode == 0 and passed
-    tail = ((r.stdout or "")[-300:] or (r.stderr or "")[-300:]).replace("\n", " ")
-    return ok, len(diff), tail
+    # One deterministic test path for everything (env kind, django runner,
+    # positional node ids, ensure-pytest, missing-module reflex).
+    import test_runner as _tr
+    res = _tr.run_tests(repo, env_kind, inst["FAIL_TO_PASS"],
+                        env_vars=env_vars, repo=inst["repo"], timeout=600)
+    return res["ok"], len(diff), res["tail"]
 
 
 def run_one(inst):
@@ -387,7 +363,7 @@ def run_one(inst):
     # and leaking them is oracle information anyway).
     f_handlers, f_state = make_fix_handlers(
         repo, env_vars=b_state["env_vars"],
-        env_kind=b_state.get("active_env_kind", "uv"))
+        env_kind=b_state.get("active_env_kind", "uv"), repo=inst["repo"])
     # New CPU instance for phase 2 — separate context, fresh system prompt.
     cpu2 = ToolCallCPU(tools=FIX_TOOLS, tool2sys=FIX_TOOL2SYS,
                        system_prompt=FIX_SYSTEM_PROMPT, model=MODEL, host=HOST,

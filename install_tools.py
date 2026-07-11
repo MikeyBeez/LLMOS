@@ -73,6 +73,26 @@ def _run(cmd, cwd, env_vars=None, timeout=900, active_env_kind="uv"):
                           text=True, timeout=timeout, env=env)
 
 
+
+def ensure_pytest(repo_dir, kind):
+    """Canonical, always-works pytest install: ensurepip (bootstraps pip
+    into uv venvs, idempotent on conda) then `python -m pip install pytest`
+    from inside the env. Returns True if pytest imports afterwards."""
+    bin_dir = _venv_bin(repo_dir, kind)
+    py = os.path.join(bin_dir, "python")
+    if not os.path.isfile(py):
+        return False
+    if subprocess.run([py, "-c", "import pytest"],
+                      capture_output=True).returncode == 0:
+        return True
+    subprocess.run([py, "-m", "ensurepip", "--upgrade"],
+                   cwd=repo_dir, capture_output=True, timeout=180)
+    subprocess.run([py, "-m", "pip", "install", "pytest", "-q"],
+                   cwd=repo_dir, capture_output=True, timeout=300)
+    return subprocess.run([py, "-c", "import pytest"],
+                          capture_output=True).returncode == 0
+
+
 # ---- goal stack -------------------------------------------------------
 
 def _stack_snapshot(state):
@@ -126,6 +146,7 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                      f'"python={pyv}" pip setuptools wheel', repo_dir, timeout=600,
                      active_env_kind=None)
         ok = r.returncode == 0
+        pytest_ready = False
         if ok:
             state["active_env_kind"] = backend
             state["python_version"]  = pyv
@@ -133,7 +154,10 @@ def make_install_handlers(repo_dir, base_env_vars=None):
             state["sanity_ok"]       = False
             state["smoke_ok"]        = False
             state["repo_installed"]  = False
+            # Guarantee pytest in every env, the one way that always works.
+            pytest_ready = ensure_pytest(repo_dir, backend)
         return {"ok": ok, "backend": backend, "python_version": pyv,
+                "pytest_ready": pytest_ready,
                 "exit": r.returncode,
                 "stderr": (r.stderr or "")[-1500:],
                 "goal_stack": _stack_snapshot(state)}

@@ -29,7 +29,7 @@ import os, re, shlex, shutil, subprocess
 from repo_bootstrap_tools import llm_call, _extract_json
 
 
-def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv"):
+def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
     .venv (uv/pip) or .condaenv (conda)."""
@@ -196,17 +196,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv"):
         return result
 
     def h_run_tests(pcb, args):
-        """Run existing suite test(s) as a regression check (NOT the gate)."""
-        shutil.rmtree(os.path.join(repo_dir, ".hypothesis"), ignore_errors=True)
+        """Run existing suite test(s) as a regression check (NOT the gate).
+        Delegates to the single deterministic test_runner."""
         tid = str(args.get("test_id", ""))
         if not tid:
             return {"error": "test_id required"}
-        r = _run(f'{env_dir}/bin/python -m pytest -q -p no:cacheprovider '
-                 f'"{tid}"', timeout=600)
-        ok = r.returncode == 0 and "passed" in (r.stdout or "")
-        return {"ok": ok, "exit": r.returncode,
-                "stdout": (r.stdout or "")[-2500:],
-                "stderr": (r.stderr or "")[-1000:]}
+        import test_runner as _tr
+        res = _tr.run_tests(repo_dir, env_kind, [tid], env_vars=env_vars,
+                            repo=repo, timeout=600)
+        return {"ok": res["ok"], "exit": res["exit"],
+                "stdout": res["stdout"], "installed": res.get("installed", [])}
 
     def h_submit(pcb, args):
         """Terminal call. Gate: RED seen, same reproduction now GREEN, and a
