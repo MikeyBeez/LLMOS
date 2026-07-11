@@ -36,6 +36,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     env_vars = dict(env_vars or {})
     env_dir = ".condaenv" if env_kind == "conda" else ".venv"
     state = {"submitted": False, "fix_verified": False,
+             "baseline_pass": None,   # neighbor tests passing pre-patch
+             "regressions": [],
              "repro_script": None,      # the registered failing script
              "seen_red": False,         # a reproduction has failed (bug shown)
              "repro_green": False}      # registered script now exits 0
@@ -61,6 +63,53 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                  and _diff_nonempty())
         return state["fix_verified"]
 
+    def _capture_baseline():
+        """Sample neighbor tests that PASS in the pre-patch tree (cheap: a
+        spread of a few files, short timeouts). Called once, before any
+        patch, so a later failure is a real regression."""
+        try:
+            import test_runner as _tr
+            ids = _tr.collect_ids(repo_dir, env_kind, env_vars=env_vars)
+        except Exception:
+            ids = []
+        seen, spread = set(), []
+        for nid in ids:
+            f = nid.split("::", 1)[0]
+            if f not in seen:
+                seen.add(f)
+                spread.append(nid)
+            if len(spread) >= 6:
+                break
+        passing = []
+        import test_runner as _tr
+        for nid in spread:
+            try:
+                r = _tr.run_tests(repo_dir, env_kind, [nid], env_vars=env_vars,
+                                  repo=repo, timeout=120)
+                if r["ok"]:
+                    passing.append(nid)
+            except Exception:
+                pass
+        state["baseline_pass"] = passing
+
+    def _check_regressions():
+        """Rerun baseline-passing tests; any now failing = regression."""
+        base = state.get("baseline_pass") or []
+        if not base:
+            return []
+        import test_runner as _tr
+        regressed = []
+        for nid in base:
+            try:
+                r = _tr.run_tests(repo_dir, env_kind, [nid], env_vars=env_vars,
+                                  repo=repo, timeout=120)
+                if not r["ok"]:
+                    regressed.append(nid)
+            except Exception:
+                pass
+        state["regressions"] = regressed
+        return regressed
+
     def h_reproduce(pcb, args):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
@@ -72,6 +121,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["seen_red"] = True
             state["repro_green"] = False
             registered = True
+            if state["baseline_pass"] is None:   # pre-patch: valid baseline
+                _capture_baseline()
         result = {"exit": r.returncode,
                   "stdout": (r.stdout or "")[-2000:],
                   "stderr": (r.stderr or "")[-2000:],
@@ -175,14 +226,22 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                  f'{shlex.quote(state["repro_script"])}', timeout=300)
         green = r.returncode == 0
         state["repro_green"] = green
+        regressed = _check_regressions() if green else []
         gate_ok = _gate()
         result = {"ok": green, "exit": r.returncode,
                   "stdout": (r.stdout or "")[-2000:],
                   "stderr": (r.stderr or "")[-1500:],
+                  "regressions": regressed,
                   "gate": {"seen_red": state["seen_red"],
                            "repro_green": state["repro_green"],
                            "diff_nonempty": _diff_nonempty(),
+                           "no_regressions": not regressed,
                            "fix_verified": gate_ok}}
+        if regressed:
+            result["warning"] = (f"your patch broke {len(regressed)} test(s) "
+                                 f"that passed before: {regressed[:3]} — a "
+                                 "correct fix should not break working tests. "
+                                 "Investigate before submitting.")
         if not green:
             result["diagnosis"] = llm_call(
                 system=("You explain a failing reproduction for a bug-fix "
