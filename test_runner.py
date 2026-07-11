@@ -12,6 +12,9 @@ Guarantees on every run:
   * .hypothesis purged (its warnings become collection errors)
   * node ids passed POSITIONALLY (never -k, which deselects path::node ids)
   * django/django uses tests/runtests.py (unittest), not pytest
+  * bare SWE-bench ids resolved to runnable ids (sympy bare fn
+    names -> path::name via grep; django docstring ids -> dotted
+    label via docstring lookup)
   * missing external module -> install once and retry (name via alias map)
 """
 import os, re, subprocess
@@ -143,9 +146,10 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
 
     if repo == "django/django" and os.path.isfile(
             os.path.join(repo_dir, "tests/runtests.py")):
-        labels = " ".join(_django_label(t) for t in ids)
+        labels = " ".join(f'"{_django_label(t, repo_dir)}"' for t in ids)
         cmd = f'{py} tests/runtests.py {labels} -v 0'
     else:
+        ids = _resolve_bare_ids(repo_dir, ids)
         nodes = " ".join(f'"{t}"' for t in ids)   # POSITIONAL, never -k
         cmd = f'{py} -m pytest {nodes} -p no:cacheprovider -q --no-header'
 
@@ -194,14 +198,100 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
     return result
 
 
-def _django_label(node_id):
+_BARE_TEST_RE = re.compile(r"test_\w+")
+
+
+def _resolve_bare_ids(repo_dir, ids):
+    """Some SWE-bench FAIL_TO_PASS ids (notably all sympy instances) are
+    bare function names ('test_prefix_operations'); pytest cannot take
+    those positionally -> 'ERROR: file or directory not found' and a
+    guaranteed resolved=False regardless of the patch. Resolve each bare
+    name to 'path::name' by grepping test files for its def. When several
+    files define the same name, files currently modified in git (i.e. the
+    applied test patch) win, since the target test lives in the patched
+    file. Unresolvable ids pass through unchanged (fail as before).
+    Pattern-level fix: uses only the id itself, no instance data."""
+    out = []
+    for t in ids:
+        if "::" in t or "/" in t or not _BARE_TEST_RE.fullmatch(t):
+            out.append(t)
+            continue
+        r = subprocess.run(
+            "grep -rl --include='test_*.py' --include='tests.py' "
+            "-E 'def %s\\(' ." % t, shell=True, cwd=repo_dir,
+            capture_output=True, text=True, timeout=60)
+        files = [f.strip()[2:] if f.strip().startswith("./") else f.strip()
+                 for f in (r.stdout or "").splitlines() if f.strip()]
+        if not files:
+            out.append(t)
+            continue
+        if len(files) > 1:
+            g = subprocess.run("git diff --name-only HEAD", shell=True,
+                               cwd=repo_dir, capture_output=True, text=True,
+                               timeout=60)
+            changed = set((g.stdout or "").split())
+            hits = [f for f in files if f in changed]
+            if hits:
+                files = hits
+        out.extend("%s::%s" % (f, t) for f in files)
+    return out
+
+
+def _django_label(node_id, repo_dir=None):
     """django FAIL_TO_PASS -> runtests label. SWE-bench gives django ids in
     unittest verbose form 'method (dotted.path.Class.method)'; the runnable
-    label is the dotted path inside the parens. Fallback: pytest path form."""
+    label is the dotted path inside the parens. Some dataset ids are instead
+    the test's docstring first line (unittest prints the docstring when one
+    exists) -- resolve those by locating the docstring in tests/. Fallback:
+    pytest path form."""
     m = re.search(r"\(([^)]+)\)", node_id)
     if m:
         return m.group(1).strip()
-    part = node_id.split("::")
-    mod = part[0].replace("tests/", "").replace("/", ".")
-    mod = mod[:-3] if mod.endswith(".py") else mod
-    return ".".join([mod] + part[1:])
+    if "::" in node_id or "/" in node_id:
+        part = node_id.split("::")
+        mod = part[0]
+        mod = mod[6:] if mod.startswith("tests/") else mod
+        mod = mod.replace("/", ".")
+        mod = mod[:-3] if mod.endswith(".py") else mod
+        return ".".join([mod] + part[1:])
+    if repo_dir and " " in node_id:
+        lab = _django_docstring_label(repo_dir, node_id)
+        if lab:
+            return lab
+    return node_id
+
+
+def _django_docstring_label(repo_dir, text):
+    """Map a unittest docstring first-line back to module.Class.method by
+    finding the docstring text in tests/ and walking up to its enclosing
+    def and top-level class. Returns None when not found (caller falls
+    back to the raw id, which fails exactly as before)."""
+    frag = text.strip()
+    r = subprocess.run(["grep", "-rlF", frag, "tests"], cwd=repo_dir,
+                       capture_output=True, text=True, timeout=60)
+    for path in (r.stdout or "").splitlines():
+        path = path.strip()
+        if not path.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(repo_dir, path)) as fh:
+                lines = fh.read().splitlines()
+        except Exception:
+            continue
+        for n, line in enumerate(lines):
+            if frag not in line:
+                continue
+            meth = None
+            for j in range(n, -1, -1):
+                if meth is None:
+                    mm = re.match(r"\s*def (test_\w+)\(", lines[j])
+                    if mm:
+                        meth = mm.group(1)
+                    continue
+                mc = re.match(r"class (\w+)", lines[j])
+                if mc:
+                    mod = path[6:] if path.startswith("tests/") else path
+                    mod = mod.replace("/", ".")
+                    mod = mod[:-3] if mod.endswith(".py") else mod
+                    return "%s.%s.%s" % (mod, mc.group(1), meth)
+    return None
