@@ -540,12 +540,20 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
         if not test_id and not runner_script:
             return auto_verify_env(state, repo_dir)
         # Guard: the instance's failing tests ARE the bug — they cannot
-        # validate the environment. Match on test function name or file.
+        # validate the environment. Block only selections that would
+        # actually RUN a FAIL_TO_PASS test: the exact node id, a whole
+        # file/class containing one, or the same test function name.
+        # A DIFFERENT test in the same file is fine — pytest node-id
+        # selection runs only the selected test. (Previous file-substring
+        # match blocked every smoke test in single-test-file repos.)
         # (Skipped for auto PASS_TO_PASS runs, which are known-safe.)
         for ftp in ([] if auto else state.get("fail_to_pass", [])):
-            fname = ftp.rsplit("::", 1)[-1]
-            ffile = ftp.split("::", 1)[0]
-            if (fname and fname in test_id) or (ffile and ffile in test_id):
+            fname = ftp.rsplit("::", 1)[-1].split("[", 1)[0]
+            tname = test_id.rsplit("::", 1)[-1].split("[", 1)[0]
+            selects = (ftp == test_id
+                       or ftp.startswith(test_id + "::")
+                       or ftp.startswith(test_id + "["))
+            if selects or (fname and fname == tname):
                 return {"ok": False, "error": (
                     f"'{test_id}' matches a FAIL_TO_PASS test ({ftp}). That "
                     "test is the BUG this task is about — it is EXPECTED to "
