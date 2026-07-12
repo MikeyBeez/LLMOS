@@ -24,7 +24,7 @@ The gate is now red -> green on the agent's OWN reproduction:
      (seen RED), (b) the same script now passes (GREEN), and (c) the
      git diff of non-test source files is non-empty.
 """
-import os, re, shlex, shutil, subprocess
+import fnmatch, os, re, shlex, shutil, subprocess
 
 from repo_bootstrap_tools import llm_call, _extract_json
 
@@ -143,11 +143,28 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         actual site to investigate."""
         pat = str(args.get("pattern", ""))
         glob_pat = args.get("file_glob") or ""
-        cmd = f'grep -RIn --include="*.py" {shlex.quote(pat)} .'
-        if glob_pat:
+        # grep --include matches basenames only, so a path-style glob like
+        # "lib/matplotlib/axis.py" silently matches nothing. Grep by the
+        # basename component instead, then filter hits by path.
+        path_glob = "/" in glob_pat
+        if path_glob:
+            base = glob_pat.rsplit("/", 1)[-1] or "*.py"
+            cmd = f'grep -RIn --include={shlex.quote(base)} {shlex.quote(pat)} .'
+        elif glob_pat:
             cmd = f'grep -RIn --include={shlex.quote(glob_pat)} {shlex.quote(pat)} .'
+        else:
+            cmd = f'grep -RIn --include="*.py" {shlex.quote(pat)} .'
         r = _run(cmd, timeout=60)
-        lines = (r.stdout or "").splitlines()[:40]
+        lines = (r.stdout or "").splitlines()
+        if path_glob:
+            norm = glob_pat.lstrip("./")
+            def _hit_ok(ln):
+                hit_path = ln.split(":", 1)[0].lstrip("./")
+                return (fnmatch.fnmatch(hit_path, norm)
+                        or fnmatch.fnmatch(hit_path, "*/" + norm)
+                        or hit_path.endswith(norm))
+            lines = [ln for ln in lines if _hit_ok(ln)]
+        lines = lines[:40]
         result = {"matches": lines, "match_count": len(lines),
                   "truncated": len(lines) == 40}
         if len(lines) > 1:
