@@ -125,6 +125,9 @@ def make_install_handlers(repo_dir, base_env_vars=None):
     # ---- create_venv --------------------------------------------------
     def h_create_venv(pcb, args):
         pyv = str(args.get("python_version", "3.11"))
+        _pin = os.environ.get("PIN_PYTHON")
+        if _pin:
+            pyv = _pin  # SWE-bench spec-table canonical Python; pin overrides model guess
         backend = str(args.get("backend", "uv"))
         if backend not in ("uv", "conda"):
             return {"error": f"backend must be 'uv' or 'conda', got {backend!r}",

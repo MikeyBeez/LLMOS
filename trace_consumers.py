@@ -387,3 +387,38 @@ def harvest_trace(inst, blob):
             export_training(blob["phase2"], inst, "fix", resolved=True)
             summary["training"].append("fix")
     return summary
+
+
+# -------- Fix-phase engineering patterns (pattern-level, never instance-level) --------
+# ~/swe/patterns.json: a JSON list of short strings. Each is general
+# engineering knowledge (the kind an engineer carries in their head),
+# NOT a fix for any specific instance — that would be oracle leakage.
+# Injected into the phase-2 fix goal the same way playbooks enter phase 1.
+PATTERNS = os.path.expanduser("~/swe/patterns.json")
+
+
+PATTERNS_MASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "engineering-patterns.json")
+
+
+def patterns_load():
+    """Merge the git-tracked master (system-wide knowledge, syncs with the
+    repo) with ~/swe/patterns.json (runtime-local additions). The master is
+    the canonical store — anything that proves out locally should be
+    promoted there so the whole system learns it."""
+    pats = []
+    for path in (PATTERNS_MASTER, PATTERNS):
+        try:
+            loaded = json.load(open(path))
+            if isinstance(loaded, list):
+                pats += [x for x in loaded if x not in pats]
+        except Exception:
+            pass
+    return pats
+
+
+def format_patterns_context(pats):
+    lines = ["Engineering patterns from prior work (general knowledge, "
+             "not specific to this bug — apply only where they fit):"]
+    lines += [f"- {p}" for p in pats]
+    return "\n".join(lines)

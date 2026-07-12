@@ -187,12 +187,8 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
     passed = ("passed" in out) or (repo == "django/django" and "OK" in out
                                    and "FAILED" not in out and r.returncode == 0)
     ok = r.returncode == 0 and passed
-    _low = out.lower()
-    skipped_only = (not passed) and (("skipped" in _low) or ("no tests ran" in _low)) \
-        and ("failed" not in _low) and (" error" not in _low) and ("errors" not in _low)
     tail = out.strip().splitlines()[-1][:160] if out.strip() else "(no output)"
     result = {"ok": ok, "exit": r.returncode, "passed": passed,
-              "skipped_only": skipped_only,
               "tail": tail, "stdout": (r.stdout or "")[-1500:],
               "installed": installed}
     if not ok and diagnose:

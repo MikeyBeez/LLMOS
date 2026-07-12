@@ -287,37 +287,6 @@ def _run_with_missing_module_reflex(cmd, repo, env, env_dir, max_installs=4):
     return r
 
 
-def install_test_extras(repo_dir, env_kind, env_vars, repo_name=""):
-    """Env-layer fix: several SWE-bench suites gate tests behind optional deps
-    via pytest.importorskip('pandas'/'matplotlib'). When the dep is absent the
-    target test SKIPS, and the scorer counted a skip as an honest miss (all 4
-    sklearn misses in the 7/12 run). Ensure a small allowlist of common
-    test-only deps is importable so those tests RUN in BOTH the model's
-    reproduction and scoring. Uses no instance/answer data. Best-effort and
-    quiet; installs only what is missing (no package rebuild, minimal env
-    perturbation)."""
-    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
-    py = os.path.join(repo_dir, env_dir, "bin", "python")
-    if not os.path.exists(py):
-        return []
-    env = os.environ.copy()
-    env.update(env_vars or {})
-    added = []
-    for mod in ("pandas", "matplotlib"):
-        chk = subprocess.run([py, "-c", "import %s" % mod],
-                             cwd=repo_dir, capture_output=True, env=env)
-        if chk.returncode == 0:
-            continue
-        r = subprocess.run('"%s" -m pip install %s' % (py, mod), shell=True,
-                           cwd=repo_dir, capture_output=True, text=True,
-                           timeout=600, env=env)
-        if r.returncode == 0:
-            added.append(mod)
-    if added:
-        print(" -- installed test deps: %s" % added, flush=True)
-    return added
-
-
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
@@ -335,7 +304,7 @@ def score(inst, repo, env_vars, env_kind="uv"):
     import test_runner as _tr
     res = _tr.run_tests(repo, env_kind, inst["FAIL_TO_PASS"],
                         env_vars=env_vars, repo=inst["repo"], timeout=600)
-    return res["ok"], len(diff), res["tail"], res.get("skipped_only", False)
+    return res["ok"], len(diff), res["tail"]
 
 
 def run_one(inst):
@@ -399,9 +368,6 @@ def run_one(inst):
         return outcome
     print(f" -- phase 1 OK: {b_state.get('active_env_kind')}/{b_state.get('python_version')}, "
           f"{len(b_state.get('installed', []))} installs", flush=True)
-    # Fix #1: ensure common optional test deps (pandas/matplotlib) are present
-    # so importorskip-gated FAIL_TO_PASS tests actually RUN instead of skipping.
-    install_test_extras(repo, b_state.get("active_env_kind", "uv"), b_state["env_vars"], inst["repo"])
     # -------- Phase 2: fix --------
     # STRICT setting: problem statement only — no FAIL_TO_PASS ids (those
     # tests mostly do not exist until the scoring test_patch is applied,
@@ -416,11 +382,8 @@ def run_one(inst):
                        keep_alive="24h")
     print(" -- phase 2: fix --", flush=True)
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
-                "First enumerate the specific acceptance criteria implied by "
-                "the problem - the exact expected outputs, formats, and every "
-                "edge case or variant mentioned. Then reproduce the bug with a "
-                "script that asserts ALL of those criteria (not just the first "
-                "failure), fix the source, and verify your reproduction passes.")
+                "Reproduce this bug with a failing script, fix the source, "
+                "then verify your reproduction passes.")
     pats = patterns_load()
     if pats:
         fix_goal += "\n\n" + format_patterns_context(pats)
@@ -431,7 +394,7 @@ def run_one(inst):
                                           gate=lambda: f_state["fix_verified"],
                                           checkpoint=ckpt)
     # Score with the exact SWE-bench recipe.
-    resolved, patch_bytes, tail, f2p_skipped = score(inst, repo, b_state["env_vars"],
+    resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],
                                         env_kind=b_state.get("active_env_kind", "uv"))
     dt = time.time() - t0
     outcome = {"id": inst["instance_id"], "resolved": bool(resolved),
@@ -443,7 +406,6 @@ def run_one(inst):
                 "env_vars": b_state["env_vars"],
                 "patch_bytes": patch_bytes, "secs": round(dt),
                 "fix_verified_by_model": f_state["fix_verified"],
-                "f2p_all_skipped": f2p_skipped,
                 "score_tail": tail[:400]}
     print(f" -> resolved={resolved}  patch_bytes={patch_bytes}  {dt:.0f}s | {tail[:120]}",
           flush=True)
