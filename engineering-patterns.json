@@ -1,0 +1,8 @@
+[
+  "np.array(list_of_tuples) silently builds a 2-D array, not a 1-D object array of tuples; iterating it yields row-arrays and dict/DataFrame lookups then fail with KeyError. Fix the wrapping (keep a plain list, or fill an explicit object array) rather than the labels.",
+  "pandas MultiIndex columns mean column labels are TUPLES. Code that assumes scalar labels (string keys, str() calls, np.array wrapping) breaks on them. Handle tuple labels as first-class, preserve them.",
+  "Never fix a lookup error (KeyError/IndexError) by changing the IDENTITY of the data \u2014 stringifying tuples, joining keys, renaming labels. That cures the symptom by amputation and violates the library contract. Fix the code path that mishandles the identity instead.",
+  "Before submitting, re-read your diff and ask: does this patch change the TYPE or identity of anything public (attribute, return value, label)? If yes, the fix is probably wrong even though your reproduction passes.",
+  "Prefer the smallest patch that makes the failing case pass: a fix that deletes or bypasses the problematic wrapper is usually more correct than one that transforms the data to survive the wrapper.",
+  "A module imported two different ways can exist as two DISTINCT objects (sys.modules[name] is mod -> False), so state an initializer sets on one copy is invisible to code holding the other -- surfacing as 'type object X has no attribute Y' even though the init ran. CPython's normal import checks sys.modules FIRST and reuses the cached module; any by-path / importlib import-mode loader must do the same: look up sys.modules for an already- imported module before importing it again."
+]
