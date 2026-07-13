@@ -334,6 +334,17 @@ def install_spec_extras(repo_dir, env_kind, env_vars, iid):
     return extras
 
 
+def _load_repo_knowledge(repo):
+    """Load the per-package knowledge base (knowledge/<repo>.md) if present."""
+    fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "knowledge", repo.replace("/", "__") + ".md")
+    try:
+        txt = open(fp, encoding="utf-8").read()
+    except OSError:
+        return ""
+    return "PACKAGE KNOWLEDGE BASE for %s (accumulated, general; consult before guessing):\n%s" % (repo, txt[:2600])
+
+
 def _archive_success(inst):
     """Before a re-run overwrites this instance's trace, preserve the prior one
     (tagged with its outcome + a timestamp) so a resolved run is never lost."""
@@ -389,6 +400,10 @@ def run_one(inst):
     if rems:
         goal += "\n\n" + format_remedy_context(rems)
         print(f" -- injected {len(rems)} known remedies for {inst['repo']}", flush=True)
+    _kb = _load_repo_knowledge(inst["repo"])
+    if _kb:
+        goal += "\n\n" + _kb
+        print(f" -- injected package knowledge base for {inst['repo']}", flush=True)
     print(" -- phase 1: bootstrap --", flush=True)
     ckpt = os.path.join(TRACES, inst["instance_id"] + ".partial.json")
     def _boot_gate():
@@ -443,6 +458,8 @@ def run_one(inst):
     if pats:
         fix_goal += "\n\n" + format_patterns_context(pats)
         print(f" -- injected {len(pats)} engineering patterns", flush=True)
+    if _kb:
+        fix_goal += "\n\n" + _kb
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
