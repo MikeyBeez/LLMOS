@@ -148,7 +148,7 @@ def make_install_handlers(repo_dir, base_env_vars=None):
         else:
             # micromamba: single command creates the env, installs python,
             # activates conda-forge as the primary channel.
-            r = _run(f'{MAMBA} create -y -p .condaenv -c conda-forge '
+            r = _run(f'{MAMBA} create -y -p ./.condaenv -c conda-forge '
                      f'"python={pyv}" pip setuptools wheel', repo_dir, timeout=600,
                      active_env_kind=None)
         ok = r.returncode == 0
