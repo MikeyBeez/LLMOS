@@ -334,7 +334,7 @@ def install_spec_extras(repo_dir, env_kind, env_vars, iid):
     return extras
 
 
-def _archive_prior_trace(inst):
+def _archive_success(inst):
     """Before a re-run overwrites this instance's trace, preserve the prior one
     (tagged with its outcome + a timestamp) so a resolved run is never lost."""
     import shutil, json as _json, time as _time
@@ -362,7 +362,6 @@ def _archive_prior_trace(inst):
 def run_one(inst):
     print(f"\n=== {inst['instance_id']} ({inst['repo']}) ===", flush=True)
     t0 = time.time()
-    _archive_prior_trace(inst)
     repo = clone(inst)
     # -------- Phase 1: bootstrap --------
     b_handlers, b_state = make_bootstrap_handlers(
@@ -468,6 +467,8 @@ def run_one(inst):
     _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta, "state": b_state,
                         "phase2": f_msgs, "phase2_meta": f_meta,
                         "fix_state": f_state, "outcome": outcome})
+    if outcome.get("resolved"):
+        _archive_success(inst)
     return outcome
 
 
