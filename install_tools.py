@@ -129,6 +129,9 @@ def make_install_handlers(repo_dir, base_env_vars=None):
         if _pin:
             pyv = _pin  # SWE-bench spec-table canonical Python; pin overrides model guess
         backend = str(args.get("backend", "uv"))
+        _pinb = os.environ.get("PIN_BACKEND")
+        if _pinb:
+            backend = _pinb  # force backend (conda for 3.6/3.7 which uv cannot build)
         if backend not in ("uv", "conda"):
             return {"error": f"backend must be 'uv' or 'conda', got {backend!r}",
                     "goal_stack": _stack_snapshot(state)}

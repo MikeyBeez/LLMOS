@@ -307,6 +307,33 @@ def score(inst, repo, env_vars, env_kind="uv"):
     return res["ok"], len(diff), res["tail"]
 
 
+def install_spec_extras(repo_dir, env_kind, env_vars, iid):
+    """Install the instance's spec-declared optional TEST deps (pandas,
+    matplotlib, ...) that a plain repo install does NOT pull, so importorskip-
+    gated tests actually run. Sourced from ~/swe/spec_extras.json (SWE-bench
+    spec packages), version-matched. Env-layer; never touches the answer."""
+    import json as _json
+    try:
+        extras = _json.load(open(os.path.expanduser("~/swe/spec_extras.json"))).get(iid, [])
+    except Exception:
+        extras = []
+    extras = [e for e in extras
+              if not e.lower().endswith((".txt", ".yml", ".yaml", ".cfg", ".toml"))]
+    if not extras:
+        return []
+    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
+    py = os.path.join(repo_dir, env_dir, "bin", "python")
+    if not os.path.exists(py):
+        return []
+    env = os.environ.copy(); env.update(env_vars or {})
+    quoted = " ".join('"%s"' % e for e in extras)
+    r = subprocess.run('"%s" -m pip install --prefer-binary %s' % (py, quoted),
+                       shell=True, cwd=repo_dir, capture_output=True, text=True,
+                       timeout=1800, env=env)
+    print(" -- spec extras (%s): %s" % ("ok" if r.returncode == 0 else "FAIL", extras), flush=True)
+    return extras
+
+
 def run_one(inst):
     print(f"\n=== {inst['instance_id']} ({inst['repo']}) ===", flush=True)
     t0 = time.time()
@@ -368,6 +395,9 @@ def run_one(inst):
         return outcome
     print(f" -- phase 1 OK: {b_state.get('active_env_kind')}/{b_state.get('python_version')}, "
           f"{len(b_state.get('installed', []))} installs", flush=True)
+    # Corrections: install spec-declared optional test deps (pandas/matplotlib),
+    # version-matched, so importorskip-gated tests run instead of silently skipping.
+    install_spec_extras(repo, b_state.get("active_env_kind", "uv"), b_state["env_vars"], inst["instance_id"])
     # -------- Phase 2: fix --------
     # STRICT setting: problem statement only — no FAIL_TO_PASS ids (those
     # tests mostly do not exist until the scoring test_patch is applied,
