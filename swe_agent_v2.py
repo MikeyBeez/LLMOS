@@ -336,6 +336,8 @@ def install_spec_extras(repo_dir, env_kind, env_vars, iid):
 
 def _load_repo_knowledge(repo):
     """Load the per-package knowledge base (knowledge/<repo>.md) if present."""
+    if os.environ.get("DISABLE_KB"):
+        return ""
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "knowledge", repo.replace("/", "__") + ".md")
     try:
