@@ -334,9 +334,35 @@ def install_spec_extras(repo_dir, env_kind, env_vars, iid):
     return extras
 
 
+def _archive_prior_trace(inst):
+    """Before a re-run overwrites this instance's trace, preserve the prior one
+    (tagged with its outcome + a timestamp) so a resolved run is never lost."""
+    import shutil, json as _json, time as _time
+    iid = inst["instance_id"]
+    base = os.path.join(TRACES, iid + ".trace.json")
+    if not os.path.isfile(base):
+        return
+    tag = "unknown"
+    try:
+        tag = "resolved" if _json.load(open(base)).get("outcome", {}).get("resolved") else "miss"
+    except Exception:
+        pass
+    adir = os.path.join(TRACES, "archive"); os.makedirs(adir, exist_ok=True)
+    stem = "%s__%s__%s" % (iid, _time.strftime("%Y%m%d_%H%M%S"), tag)
+    try:
+        shutil.copy2(base, os.path.join(adir, stem + ".trace.json"))
+        pp = os.path.join(TRACES, iid + ".patch")
+        if os.path.isfile(pp):
+            shutil.copy2(pp, os.path.join(adir, stem + ".patch"))
+        print(" -- archived prior trace (%s)" % tag, flush=True)
+    except Exception as e:
+        print(" -- trace archive failed:", e, flush=True)
+
+
 def run_one(inst):
     print(f"\n=== {inst['instance_id']} ({inst['repo']}) ===", flush=True)
     t0 = time.time()
+    _archive_prior_trace(inst)
     repo = clone(inst)
     # -------- Phase 1: bootstrap --------
     b_handlers, b_state = make_bootstrap_handlers(
