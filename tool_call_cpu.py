@@ -15,7 +15,7 @@ receives ordinary LLMOS Instructions.
 Modeled directly on swe_agent.py's CodingCPU, generalized so MMLU / MATH /
 other benchmark runners can plug in their own tool schemas.
 """
-import json, urllib.request
+import json, os, time, urllib.request, urllib.error
 
 from llmos.cpu import OllamaCPU
 from llmos.isa import Instruction, Op
@@ -140,19 +140,60 @@ class ToolCallCPU(OllamaCPU):
             out.append(m)
         return out
 
+    def _recover_tool_call(self, content):
+        """Recover a tool call from reasoning models that emit bare JSON
+        {"name":..,"arguments":..} after </think> instead of the <tool_call> XML
+        the server parser expects (e.g. VibeThinker and other non-agentic models)."""
+        import re as _re
+        txt = content.rsplit("</think>", 1)[-1]
+        for h in reversed(list(_re.finditer(r'\{\s*"name"\s*:', txt))):
+            start = h.start(); depth = 0
+            for i in range(start, len(txt)):
+                if txt[i] == "{": depth += 1
+                elif txt[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try: obj = json.loads(txt[start:i+1])
+                        except Exception: obj = None
+                        if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+                            args = obj["arguments"]
+                            if not isinstance(args, str): args = json.dumps(args)
+                            return [{"id": "call_0", "type": "function",
+                                     "function": {"name": obj["name"], "arguments": args}}]
+                        break
+        return None
+
     def _chat(self, messages):
-        body = json.dumps({
+        _gemini = "googleapis" in self.host
+        _payload = {
             "model": self.model, "stream": False,
             "messages": self._normalize(messages), "tools": self.tools,
-            "temperature": self.temperature, "top_p": 0.95, "top_k": 20,
-            "seed": self.seed, "max_tokens": self.num_predict,
-        }).encode()
-        req = urllib.request.Request(
-            self.host + "/v1/chat/completions", data=body,
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
-            resp = json.loads(r.read())
+            "temperature": self.temperature, "max_tokens": self.num_predict,
+        }
+        if not _gemini:
+            _payload.update({"top_p": 0.95, "top_k": 20, "seed": self.seed})
+        body = json.dumps(_payload).encode()
+        _headers = {"Content-Type": "application/json"}
+        if _gemini:
+            _url = self.host + "/chat/completions"
+            _headers["Authorization"] = "Bearer " + os.environ.get("GEMINI_API_KEY", "")
+        else:
+            _url = self.host + "/v1/chat/completions"
+        resp = None
+        for _attempt in range(6):
+            try:
+                req = urllib.request.Request(_url, data=body, headers=_headers)
+                with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
+                    resp = json.loads(r.read())
+                break
+            except urllib.error.HTTPError as _e:
+                if _e.code == 429 and _attempt < 5:
+                    time.sleep(min(90, 10 * (_attempt + 1))); continue
+                raise
         m = (resp.get("choices") or [{}])[0].get("message", {}) or {}
+        if not m.get("tool_calls") and m.get("content"):
+            _rec = self._recover_tool_call(m["content"])
+            if _rec: m["tool_calls"] = _rec
         usage = resp.get("usage") or {}
         timings = resp.get("timings") or {}
         meta = {"prompt_tokens": usage.get("prompt_tokens"),

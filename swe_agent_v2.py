@@ -39,6 +39,7 @@ from repo_bootstrap_tools import _ddg_search
 HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
 MODEL = "ornith:35b"
 NUMCTX = 131072
+NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "2048"))
 BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package is 1 turn)
 FIX_BUDGET      = 80
 WORK = os.path.expanduser("~/swe/work")
@@ -382,7 +383,7 @@ def run_one(inst):
         pass_to_pass=inst.get("PASS_TO_PASS"), repo=inst["repo"])
     cpu = ToolCallCPU(tools=BOOTSTRAP_TOOLS, tool2sys=BOOTSTRAP_TOOL2SYS,
                      system_prompt=BOOTSTRAP_SYSTEM_PROMPT, model=MODEL, host=HOST,
-                     temperature=1.0, num_predict=2048, num_ctx=NUMCTX,
+                     temperature=1.0, num_predict=NUM_PREDICT, num_ctx=NUMCTX,
                      keep_alive="24h")
     goal = (f"Set up the repository at ./ for testing. It is: {inst['repo']}. "
             f"The problem it addresses (for context, do not fix yet):\n\n"
@@ -450,7 +451,7 @@ def run_one(inst):
     # New CPU instance for phase 2 — separate context, fresh system prompt.
     cpu2 = ToolCallCPU(tools=FIX_TOOLS, tool2sys=FIX_TOOL2SYS,
                        system_prompt=FIX_SYSTEM_PROMPT, model=MODEL, host=HOST,
-                       temperature=1.0, num_predict=2048, num_ctx=NUMCTX,
+                       temperature=1.0, num_predict=NUM_PREDICT, num_ctx=NUMCTX,
                        keep_alive="24h")
     print(" -- phase 2: fix --", flush=True)
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
