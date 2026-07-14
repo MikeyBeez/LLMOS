@@ -29,6 +29,56 @@ import fnmatch, os, re, shlex, shutil, subprocess
 from repo_bootstrap_tools import llm_call, _extract_json
 
 
+def _apply_edit(text, old, new):
+    """Apply old->new. Exact unique match first; fall back to whitespace-
+    insensitive line matching so a snippet off only by indentation/trailing
+    space still lands. Returns (new_text, how) or (None, error_message)."""
+    cnt = text.count(old)
+    if cnt == 1:
+        return text.replace(old, new, 1), "exact"
+    if cnt > 1:
+        return None, ("old_snippet matches %d places exactly - add surrounding "
+                      "context to disambiguate" % cnt)
+    tlines = text.split("\n")
+    olines = old.split("\n")
+    while olines and olines[0].strip() == "": olines.pop(0)
+    while olines and olines[-1].strip() == "": olines.pop()
+    if not olines:
+        return None, "old_snippet is empty"
+    want = [l.strip() for l in olines]
+    hits = [i for i in range(len(tlines) - len(want) + 1)
+            if [tlines[j].strip() for j in range(i, i + len(want))] == want]
+    if len(hits) == 1:
+        i = hits[0]
+        tlines[i:i + len(want)] = new.split("\n")
+        return "\n".join(tlines), "whitespace-tolerant"
+    if len(hits) > 1:
+        return None, ("old_snippet matches %d places (whitespace-insensitive) - "
+                      "add more surrounding context" % len(hits))
+    return None, ("old_snippet not found. Copy it verbatim from read_range output, "
+                  "or include a few unique surrounding lines.")
+
+
+def _repo_frames(stderr, repo_dir):
+    """In-repo traceback frames (relpath:line (fn)) from stderr, skipping venv/
+    stdlib, so the agent jumps to the fault site instead of grep-hunting."""
+    import re as _re
+    out = []
+    for m in _re.finditer(r'File "([^"]+)", line (\d+), in (\S+)', stderr or ""):
+        path, line, fn = m.group(1), m.group(2), m.group(3)
+        low = path.replace("\\", "/")
+        if "/.venv/" in low or "site-packages" in low or "/lib/python" in low:
+            continue
+        try:
+            rel = os.path.relpath(path, repo_dir) if os.path.isabs(path) else path
+        except Exception:
+            rel = path
+        if rel.startswith(".."):
+            continue
+        out.append("%s:%s (%s)" % (rel, line, fn))
+    return out[-3:]
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -127,6 +177,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                   "stdout": (r.stdout or "")[-2000:],
                   "stderr": (r.stderr or "")[-2000:],
                   "registered_as_reproduction": registered}
+        _fl = _repo_frames(r.stderr or "", repo_dir)
+        if _fl:
+            result["fault_locations"] = _fl
         if registered:
             result["note"] = ("This failing script is now the registered "
                               "reproduction. After you patch, verify_fix will "
@@ -216,20 +269,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 text = f.read()
         except OSError as e:
             return {"error": str(e)}
-        if old not in text:
-            return {"error": "old_snippet not found in file (must match exactly, "
-                             "including indentation and trailing whitespace)"}
-        if text.count(old) > 1:
-            return {"error": f"old_snippet is ambiguous — matches {text.count(old)} "
-                             f"places in the file. Include more surrounding context."}
-        new_text = text.replace(old, new, 1)
+        new_text, _how = _apply_edit(text, old, new)
+        if new_text is None:
+            return {"error": _how}
         with open(full, "w", encoding="utf-8") as f:
             f.write(new_text)
         state["repro_green"] = False
         state["fix_verified"] = False
         return {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                 "delta_bytes": len(new) - len(old),
-                "note": "verification invalidated — run verify_fix"}
+                "match": _how, "note": "verification invalidated — run verify_fix"}
 
     def h_verify_fix(pcb, args):
         """Rerun the registered reproduction. GREEN when it exits 0."""
@@ -260,6 +309,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                  "correct fix should not break working tests. "
                                  "Investigate before submitting.")
         if not green:
+            _fl = _repo_frames(r.stderr or "", repo_dir)
+            if _fl:
+                result["fault_locations"] = _fl
             result["diagnosis"] = llm_call(
                 system=("You explain a failing reproduction for a bug-fix "
                         "agent. Be specific about the traceback and what to "
@@ -402,7 +454,9 @@ FIX_SYSTEM_PROMPT = (
     "exception or assert) because of the reported bug. This registers your "
     "reproduction. If your script exits 0, it does not demonstrate the bug — "
     "rewrite it.\n"
-    "  2. locate — grep for the symbol or error message. Get file:line.\n"
+    "  2. locate — reproduce and verify_fix return fault_locations (the "
+    "in-repo traceback frames); read_range those FIRST. Only grep for a "
+    "symbol/message if fault_locations is empty or insufficient.\n"
     "  3. read_range — open the exact window around the match.\n"
     "  4. patch — surgical replacement in SOURCE files, small and targeted. "
     "Test files are refused.\n"
