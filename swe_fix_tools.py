@@ -79,6 +79,51 @@ def _repo_frames(stderr, repo_dir):
     return out[-3:]
 
 
+def _fault_proximity(test_file, hint_paths):
+    """Closeness score between a test file and the fault/source hint paths
+    (repo-relative). Higher = nearer. Returns 0 when there are no hints, so
+    ranking becomes a no-op and selection stays identical to collection order."""
+    if not hint_paths:
+        return 0
+    tsegs = test_file.split("/")
+    tdir = "/".join(tsegs[:-1])
+    tbase = tsegs[-1]
+    best = 0
+    for h in hint_paths:
+        if not h:
+            continue
+        hsegs = h.split("/")
+        hdir = "/".join(hsegs[:-1])
+        hbase = hsegs[-1]
+        common = 0
+        for a, b in zip(tsegs[:-1], hsegs[:-1]):
+            if a == b:
+                common += 1
+            else:
+                break
+        score = common
+        if tdir and tdir == hdir:
+            score += 5
+        hmod = hbase[:-3] if hbase.endswith(".py") else hbase
+        if hmod and hmod in tbase:
+            score += 3
+        if score > best:
+            best = score
+    return best
+
+
+def _rank_test_files(file_nids, hint_paths, limit=6):
+    """Pick up to `limit` neighbor-test node ids (one per file), biased toward
+    the fault/source hint paths. STABLE: with no hints every score is 0, so the
+    result is the first `limit` entries in the original order -- byte-identical
+    to the pre-change 'first-N distinct files' selection. Pure/deterministic
+    (no I/O): unit-testable and it cannot touch any scoring path."""
+    ranked = sorted(
+        enumerate(file_nids),
+        key=lambda t: (-_fault_proximity(t[1][0], hint_paths), t[0]))
+    return [nid for _, (f, nid) in ranked[:limit]]
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -113,7 +158,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                  and _diff_nonempty())
         return state["fix_verified"]
 
-    def _capture_baseline():
+    def _capture_baseline(hint_paths=None):
         """Sample neighbor tests that PASS in the pre-patch tree (cheap: a
         spread of a few files, short timeouts). Called once, before any
         patch, so a later failure is a real regression."""
@@ -122,14 +167,13 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             ids = _tr.collect_ids(repo_dir, env_kind, env_vars=env_vars)
         except Exception:
             ids = []
-        seen, spread = set(), []
+        seen, per_file = set(), []
         for nid in ids:
             f = nid.split("::", 1)[0]
             if f not in seen:
                 seen.add(f)
-                spread.append(nid)
-            if len(spread) >= 6:
-                break
+                per_file.append((f, nid))
+        spread = _rank_test_files(per_file, hint_paths, limit=6)
         passing = []
         import test_runner as _tr
         for nid in spread:
@@ -172,7 +216,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["repro_green"] = False
             registered = True
             if state["baseline_pass"] is None:   # pre-patch: valid baseline
-                _capture_baseline()
+                _hint_paths = [fl.split(":", 1)[0] for fl in
+                               _repo_frames(r.stderr or "", repo_dir)]
+                _capture_baseline(_hint_paths)
         result = {"exit": r.returncode,
                   "stdout": (r.stdout or "")[-2000:],
                   "stderr": (r.stderr or "")[-2000:],
