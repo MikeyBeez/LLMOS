@@ -274,3 +274,42 @@ The running benchmark imported the buggy module once (change inert until relaunc
 **ZERO remaining pytest<6 instances in the to-do set** (all 17 pytest-dev already scored), so
 **no relaunch is warranted** — the fix protects future/fresh runs and the reclaim of 5227 is handled
 by the end-of-run manifest path.
+
+## 15. Sphinx <5 test collection dies on a too-new support ecosystem (env FN + solve-blinding)
+
+**Signature in results:** a `sphinx-doc/sphinx` instance with `env_ok:true` but
+`score_tail` = `"N warnings, 1 error in 0.Xs"` (a *collection* error, not `N passed/failed`),
+usually with `phase2_reason: budget` (a few `declared`).
+
+**Root cause (env, general — same family as the matplotlib/pyparsing NO_COLLECTORS bug):**
+a fresh Sphinx <5 env pulls the LATEST support ecosystem, which hard-requires a newer Sphinx and
+aborts collection when Sphinx loads its default extensions at app setup:
+- `sphinxcontrib-applehelp/devhelp/htmlhelp/qthelp/serializinghtml` 2.x **and even 1.0.8** call
+  `require_sphinx("5.0")` -> `VersionRequirementError: 5.0`.
+- `alabaster` 0.7.16 requires Sphinx >=3.4 -> `VersionRequirementError: 3.4` on Sphinx 3.1/3.3.
+- `roman` (imported by `sphinx.builders.latex`) is simply MISSING ->
+  `ExtensionError: Could not import extension sphinx.builders.latex (No module named roman)`.
+This breaks the authoritative scorer (F2P cannot collect -> auto-miss) AND blinds the model in
+phase 1/2 (it can never get a green sphinx test) -> the DEEPER cause behind the sec.12
+sphinx bootstrap-budget deaths (steering alone could not fix an env the model cannot make green).
+
+**Fix (data-only, no harness code change):** `~/swe/spec_extras.json` entries for the 13 Sphinx <5
+instances (7686, 7738, 7975, 8273, 8282, 8435, 8474, 8506, 8595, 8627, 8713, 8721, 8801):
+`roman`, `alabaster==0.7.12`, `sphinxcontrib-applehelp==1.0.2`, `sphinxcontrib-devhelp==1.0.2`,
+`sphinxcontrib-htmlhelp==1.0.3`, `sphinxcontrib-jsmath==1.0.1`, `sphinxcontrib-qthelp==1.0.3`,
+`sphinxcontrib-serializinghtml==1.1.5`. `install_spec_extras` re-reads this file live per instance
+and runs pre-phase-1, so future/fresh runs get a working env for both the model and the scorer.
+Sphinx >=5 (10325, 10451, 11445) is CORRECT with the 2.x line and is deliberately NOT pinned.
+
+**Verification (this cycle):** end-to-end through the shipped `install_spec_extras` on untouched
+`sphinx-8627` (Sphinx 3.5): before = `ModuleNotFoundError: roman`; after = `import-ok`
+(`sphinx.builders.latex` + `roman` + `Sphinx` all import). Collection restored on all 5
+collection-error instances (7686/8273/8435/8506/8595); once collecting they RUN and FAIL their F2P
+-> **all REAL misses, no false-negative reclaim** (the models solved blind and produced wrong
+patches). Already-resolved 7738/8713 stay `1 passed` with the pins -> no regression.
+
+**No relaunch / no reclaim this cycle:** the full-300 run is resumable and skips-done, and all 16
+sphinx instances are already scored, so this fix yields nothing for the current run. Realize the
+gain via a **targeted re-run of the 13 Sphinx <5 instances** (fresh env, so the model can actually
+verify) or on the next fresh full run. General lesson promoted to engineering-patterns.json
+(collection/version errors = env, not code) and to knowledge/sphinx-doc__sphinx.md (the pin recipe).
