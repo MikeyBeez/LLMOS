@@ -182,3 +182,34 @@ FALSE NEGATIVE (env/collection, not a wrong patch): "found no collectors",
 "collected 0 items". Confirm via Docker (docker_eval_guard.sh) before flipping in
 swe_false_negatives.json. A wrong-patch real miss instead shows the target test
 "FAILED"/"X failed" after a clean collection.
+
+## 12. Sphinx (and any turn-capped repo) phase-1 bootstrap-budget deaths — surface the gate's reason
+
+Symptom in results_full300.json: `env_ok:false, env_kind:null, python:null, installs:[],
+phase1_reason:"budget"`. The trace tells the real story: venv created,
+`install_repo_editable` OK, `run_sanity` OK — then 20-36 `run_smoke_test` calls returning
+ok=false and the 50-turn phase-1 cap hit WITHOUT a successful `declare_env_ready`. Seen on
+the whole current sphinx env-fail cluster (8721/8474/8282/7975; 8801 has a stale successful
+trace from an earlier Jul-13 run, so its results env-fail is an older-run artifact).
+
+Root cause (scaffold, not env): the env-ready gate (`_boot_gate`) auto-runs
+`auto_verify_env` on declare, but `phase_run` discarded its specific result and returned
+only a generic "verification gate not passed; run_sanity and run_smoke_test must both
+return ok=true first". With no signal about what the harness check actually found, the
+model re-declares or keeps guessing smoke tests (often re-picking FAIL_TO_PASS tests, which
+are correctly refused) until the budget dies — on environments that are frequently fine.
+
+Fix (commit ad5f1a4): `_boot_gate` captures `auto_verify_env`'s result via new
+module-level `_auto_verify_reject_detail()` and stashes a short actionable hint on
+`_boot_gate.reject_detail`; `phase_run` surfaces it as `payload["harness_check"]` on gate
+rejection (missing test dep -> install it; uncollectable suite / no green test -> call
+`run_smoke_test` WITH NO ARGUMENTS to let the harness auto-pick a stable test). STEERING
+ONLY: the phase-2 fix gate is a plain lambda without that attribute, so its rejection
+payload is byte-identical to pre-patch — no scoring path changes (unit-verified). No answer
+leakage (auto_verify_env excludes the instance's FAIL_TO_PASS tests; only env diagnostics
+surface). Inert for the already-running runner (module imported once); active on relaunch /
+future runs — NOT relaunched for a steering change.
+
+General lesson (also in engineering-patterns.json): a gate that auto-runs a check must feed
+back the check's SPECIFIC diagnostic, never a generic rejection, or the agent thrashes
+blind until budget death.
