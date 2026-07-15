@@ -21,7 +21,7 @@
 # run_evaluation's images.pull returns instantly and the token tracks the real test phase.
 #
 # This wrapper makes a hang FAIL FAST and VISIBLY:
-#   * validates the predictions file (exists, non-empty JSON list)
+#   * validates the predictions file (exists, non-empty JSON list; each entry has instance_id + model_patch + model_name_or_path -- the last is required by run_evaluation and its absence KeyErrors only AFTER a multi-GB image pull)
 #   * preflights the docker image cache and warns when it is cold
 #   * EARLY-STALL WATCHDOG (new): samples a strictly-growing progress token
 #     (docker image count | running containers | bytes in the run logs); if it does not
@@ -167,7 +167,7 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert isinstance(d,list) and len(d)>0, "not a non-empty list"
 for e in d:
-    assert e.get("instance_id") and e.get("model_patch"), "entry missing instance_id/model_patch"
+    assert e.get("instance_id") and e.get("model_patch") and e.get("model_name_or_path"), "entry missing instance_id/model_patch/model_name_or_path (run_evaluation reads prediction[KEY_MODEL]=model_name_or_path and KeyErrors AFTER the image pull if absent)"
 PY
 
 [ -x "$VENV/bin/python" ] || die "venv python not found: $VENV/bin/python"
