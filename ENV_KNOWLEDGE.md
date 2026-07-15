@@ -240,3 +240,37 @@ confirmed_real_misses so future cycles skip it. Docker eval remains authoritativ
 score is flipped. Verified example: scikit-learn-25570 (3 pandas_output F2P tests: skip->3
 passed) = PENDING FN; 25500 (wrong file; y_pred DataFrame not ndarray) and 25638 (ValueError
 mix of unknown/binary targets) FAIL with pandas present = real misses.
+
+
+## 14. pytest `--no-header` breaks scoring on pytest<6 (auto-miss family; harness bug, not env)
+
+`test_runner.run_tests` (THE single test path — used by `score()`, the model's
+fix-verify tools in swe_fix_tools.py, and phase-1 sanity/smoke in
+repo_bootstrap_tools.py) appended `--no-header` starting Jul-10 (commit b4272ea).
+`--no-header` is a **pytest>=6.0** flag. On pytest 4.x/5.x it is an
+`error: unrecognized arguments: --no-header` **usage error -> exit 4, ZERO tests
+run**, so the instance is auto-scored UNRESOLVED no matter how good the patch is.
+
+**Signature in results:** `score_tail` is a bare header line
+`"  rootdir: /home/bard/swe/work/<id>"` (no `N passed`/`N failed`), and the repo
+is one pinning old pytest. In SWE-bench Lite full-300 the ONLY pytest<6
+instances are in `pytest-dev/pytest` (other repos pin pytest>=6).
+
+**Triage of all 9 completed pytest<6 misses** (home-verified by running the exact
+FAIL_TO_PASS in the retained work-dir, model+test patch applied, WITHOUT the bad flag):
+- FALSE NEGATIVE (reclaimable): `pytest-dev__pytest-5227` -> 3 passed (now ok=True via shipped path). Recorded docker_confirmed=false (PENDING) in swe_false_negatives.json.
+- REAL misses (patch genuinely wrong; do NOT re-investigate): 5103, 5221, 5413, 5495, 5692, 6116, 7168, 7220 — all still FAIL their F2P once the tests actually run.
+
+**Fix (commit 86bdca4):** version-gate the flag via cached `_pytest_major(py, repo_dir, env)`;
+`hdr = '--no-header' if _pytest_major(...) >= 6 else ''`. **Cache key = os.path.join(repo_dir, py)**
+— the relative py path `.venv/bin/python` is identical across instances, so keying on it alone
+would return a stale major in the long-running benchmark process and could RE-ADD the flag to a
+later old-pytest instance (piece-check caught exactly this: 8906 wrongly cached as major 4).
+
+**General lesson -> engineering-patterns.json:** version-gate test-runner flags to the era of the
+code under test; a flag valid for your newest instances can be fatal for the oldest.
+
+The running benchmark imported the buggy module once (change inert until relaunch), but there are
+**ZERO remaining pytest<6 instances in the to-do set** (all 17 pytest-dev already scored), so
+**no relaunch is warranted** — the fix protects future/fresh runs and the reclaim of 5227 is handled
+by the end-of-run manifest path.
