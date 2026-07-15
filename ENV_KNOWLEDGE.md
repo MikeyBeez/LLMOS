@@ -115,3 +115,18 @@ Workflow (general, answer-leakage-safe — operates only on public instance ids 
 3. At/after end-of-run, run `python3 ~/Code/LLMOS/reclaim_false_negatives.py --out <results>.corrected.json`. It flips only `docker_confirmed:true` records, writes a SEPARATE corrected file (it NEVER overwrites the live results — the runner rewrites the whole file per instance and would clobber an in-place edit), and prints before/after scores. `docker_confirmed:false` entries (e.g. home-verified only) are reported PENDING and left untouched.
 
 Current manifest: reclaim now — 23964/23987/24149; PENDING Docker confirmation — 23913; confirmed real miss — 24265. Extending to a new repo: Docker-confirm first, then add the entry (do not reclaim on home-reproduction alone).
+
+---
+
+## 9. Docker-eval is not free — guard it (cold cache + silent deadlock)
+
+The authoritative Docker eval (§8) is the ONLY thing that can confirm a false negative, but it is fragile in unattended overnight cycles:
+
+- **Cold cache.** The docker image store gets pruned to 0 between sessions (observed 2026-07-15: `docker system df` → Images 0, Build Cache 0). When cold, a single matplotlib audit must rebuild base+env+instance images from scratch (many minutes). Do NOT assume a prior audit's images survive to the next cycle.
+- **Silent deadlock.** An unguarded `run_evaluation` can hang indefinitely with NO output: all Python threads parked in `futex_do_wait`, ~1% CPU, no docker build activity, stale CLOSE-WAIT sockets to HuggingFace (dataset load). In that state it burns the entire cycle and produces nothing.
+
+Mitigation: launch audits through `~/Code/LLMOS/docker_eval_guard.sh`. It validates the predictions file, preflights the image cache (warns when cold), enforces a hard `timeout` (SIGTERM→SIGKILL), force-removes leftover `sweb.*.<run_id>` containers on timeout, and returns **exit 2** for timeout/deadlock vs **exit 1** for a genuine eval failure — so a hang fails fast and visibly. Example:
+
+    ~/Code/LLMOS/docker_eval_guard.sh --preds ~/swe/mpl_preds_23913.json --run-id mpl23913 --instances matplotlib__matplotlib-23913 --timeout 2400
+
+23913 (the §6/§8 PENDING item) still needs this guarded Docker confirmation before it can be reclaimed; its prediction patch is staged at `~/swe/mpl_preds_23913.json`.
