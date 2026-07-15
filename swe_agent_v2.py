@@ -324,7 +324,14 @@ WARN_AS_ERROR_DEP_PINS = {
     # matplotlib 3.x calls pyparsing's camelCase API (enablePackrat/setParseAction);
     # pyparsing >=3.1 raises PyparsingDeprecationWarning on those -> fatal under
     # matplotlib's filterwarnings=error. <3.1 keeps the API but stays silent.
-    "matplotlib/matplotlib": ["pyparsing<3.1"],
+    # Second cause, same NO_COLLECTORS symptom: some matplotlib dev builds compute
+    # __version__ via setuptools_scm.get_version() AT IMPORT; setuptools-scm 8+ pulls
+    # in vcs-versioning, whose "release-branch-semver" entry-point is a deprecation
+    # shim that raises DeprecationWarning -> fatal collection error even once
+    # pyparsing is pinned. Downgrade to the self-contained setuptools-scm 7.x AND
+    # remove the orphaned vcs-versioning so the native (silent) scheme is used.
+    # A spec written as "-pkg" means uninstall pkg.
+    "matplotlib/matplotlib": ["pyparsing<3.1", "setuptools_scm<8", "-vcs_versioning"],
 }
 
 
@@ -340,12 +347,23 @@ def pin_warn_as_error_deps(repo_dir, repo_name, env_kind="uv", env_vars=None):
     if not os.path.exists(py):
         return []
     env = os.environ.copy(); env.update(env_vars or {})
-    quoted = " ".join('"%s"' % p for p in pins)
-    r = subprocess.run('"%s" -m pip install %s' % (py, quoted),
-                       shell=True, cwd=repo_dir, capture_output=True, text=True,
-                       timeout=600, env=env)
+    installs = [p for p in pins if not p.startswith("-")]
+    removals = [p[1:] for p in pins if p.startswith("-")]
+    ok = True
+    if installs:
+        quoted = " ".join('"%s"' % p for p in installs)
+        r = subprocess.run('"%s" -m pip install %s' % (py, quoted),
+                           shell=True, cwd=repo_dir, capture_output=True, text=True,
+                           timeout=600, env=env)
+        ok = ok and r.returncode == 0
+    for pkg in removals:
+        # uninstalling an absent package is not an error (pip prints "not installed")
+        r = subprocess.run('"%s" -m pip uninstall -y "%s"' % (py, pkg),
+                           shell=True, cwd=repo_dir, capture_output=True, text=True,
+                           timeout=300, env=env)
+        ok = ok and r.returncode == 0
     print(" -- warn-as-error dep pins (%s): %s" % (
-        "ok" if r.returncode == 0 else "FAIL", pins), flush=True)
+        "ok" if ok else "FAIL", pins), flush=True)
     return pins
 
 
