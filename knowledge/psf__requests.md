@@ -31,3 +31,6 @@ Resolved fixes in this package have touched:
   (pytest-httpbin + a repo-root conftest that sets HTTPBIN_URL) via ensure_local_httpbin() -- nothing
   to do manually. Do NOT "fix" a requests miss by editing network code before confirming the F2P
   actually reach a live server; the failure is usually the environment, not the patch.
+
+## Gotcha (2026-07-15): authoritative eval is network-coupled to public httpbin.org
+The SWE-bench prebuilt images for psf/requests run bare `pytest` with NO local httpbin and NO HTTPBIN_URL, so tests hit http://httpbin.org/. That server intermittently 503s and has DRIFTED in behavior since 2014 (e.g. gzip handling for test_redirect_with_wrong_gzipped_header). The authoritative scorer is therefore flaky/non-deterministic for these instances; requests-2148 could not be Docker-confirmed (run1: httpbin 503; run2: 10/10 FAIL_TO_PASS pass but 1 PASS_TO_PASS gzip-drift fail). Do NOT treat a home local-pytest-httpbin pass as a confirmable false negative. See ENV_KNOWLEDGE sec.26.

@@ -1,0 +1,37 @@
+{
+  "_doc": "Docker-authoritative false negatives for the SWE-bench home harness. The home harness scored these instances UNRESOLVED, but the AUTHORITATIVE SWE-bench Docker eval (swebench.harness.run_evaluation) confirmed the model's OWN prediction patch RESOLVES the instance. This file is a SCORING-LAYER correction manifest: reclaim ONLY entries with docker_confirmed=true. No instance-derived content is ever fed to the model; entries are keyed by public instance id and each is justified by an external Docker audit artifact (answer-leakage-safe).",
+  "confirmed_false_negatives": [
+    {
+      "id": "matplotlib__matplotlib-23964",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "warnings-as-errors repo + too-new pyparsing raises PyparsingDeprecationWarning -> pytest 'found no collectors' collection error -> a correct patch is scored as a miss"
+    },
+    {
+      "id": "matplotlib__matplotlib-23987",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "matplotlib__matplotlib-24149",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "matplotlib__matplotlib-23913",
+      "docker_confirmed": false,
+      "evidence": "home reused-venv: pin pyparsing==3.0.9 -> FAIL_TO_PASS test_legend_draggable collects+passes (2 passed). PENDING Docker confirmation before reclaim.",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    }
+  ],
+  "confirmed_real_misses": [
+    {
+      "id": "matplotlib__matplotlib-24265",
+      "docker_confirmed_miss": true,
+      "evidence": "ornith-corrected.mpl_audit.json:unresolved_ids",
+      "note": "Docker eval on the model's prediction FAILS -> genuine miss. Documented so future cycles do not re-audit it."
+    }
+  ]
+}

@@ -49,7 +49,6 @@ set -euo pipefail
 PREDS="" RUN_ID="" INSTANCES="" TIMEOUT=1800
 VENV="$HOME/swebench-venv" DATASET="SWE-bench/SWE-bench_Lite" WORKERS=1 DRY=0
 GRACE="${GRACE:-900}" SAMPLE="${SAMPLE:-20}" SELFTEST=0
-PREPULL="${PREPULL:-1}" PREPULL_TIMEOUT="${PREPULL_TIMEOUT:-1200}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,25 +62,12 @@ while [ $# -gt 0 ]; do
     --dataset)   DATASET="$2"; shift 2 ;;
     --workers)   WORKERS="$2"; shift 2 ;;
     --dry-run)   DRY=1; shift ;;
-    --no-prepull) PREPULL=0; shift ;;
-    --prepull)    PREPULL=1; shift ;;
-    --prepull-timeout) PREPULL_TIMEOUT="$2"; shift 2 ;;
     --selftest)  SELFTEST=1; shift ;;
     *) echo "guard: unknown arg: $1" >&2; exit 3 ;;
   esac
 done
 
 die() { echo "guard: $*" >&2; exit 3; }
-
-# --- prebuilt image name for a SWE-bench instance id ---
-# swebench 4.x pulls prebuilt eval images named swebench/sweb.eval.x86_64.<id>:latest
-# with the instance id's "__" replaced by "_1776_" and lowercased (docker tags must be lowercase).
-# e.g. pytest-dev__pytest-5227 -> swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-5227:latest
-_image_for_instance() {
-  local iid="$1" tag
-  tag=$(printf '%s' "$iid" | sed 's/__/_1776_/g' | tr '[:upper:]' '[:lower:]')
-  printf 'swebench/sweb.eval.x86_64.%s:latest' "$tag"
-}
 
 # --- progress probe: a token that GROWS while the eval RUNS TESTS ---
 # CAVEAT (2026-07-15): these three are ALL frozen during a prebuilt-image PULL (partial image
@@ -177,28 +163,6 @@ if [ "$IMG_COUNT" = "0" ]; then
   echo "guard: COLD docker cache (0 images) -- expect a long cold rebuild; timeout=${TIMEOUT}s grace=${GRACE}s"
 else
   echo "guard: docker cache has ${IMG_COUNT} images"
-fi
-
-# --- PRE-PULL the prebuilt image(s) BEFORE the eval (ROBUST unblock, 2026-07-15) ---
-# run_evaluation streams a ~2-4GB prebuilt-image pull inside build_container(); during that
-# pull the watchdog progress token (images|containers|run-log bytes) is frozen, which earlier
-# cycles mislabeled a deadlock. Pulling here first makes run_evaluation's images.pull instant
-# so the watchdog only ever measures the real test phase. Best-effort: a failed pre-pull just
-# falls back to run_evaluation doing the pull (grace covers it). Skipped on --dry-run.
-if [ "$PREPULL" = "1" ] && [ "$DRY" = "0" ]; then
-  for iid in $INSTANCES; do
-    img="$(_image_for_instance "$iid")"
-    if docker image inspect "$img" >/dev/null 2>&1; then
-      echo "guard: prepull -- already present: $img"
-    else
-      echo "guard: prepull -- docker pull $img (timeout ${PREPULL_TIMEOUT}s)"
-      if timeout "$PREPULL_TIMEOUT" docker pull "$img" >/dev/null 2>&1; then
-        echo "guard: prepull ok -- $img"
-      else
-        echo "guard: prepull WARN -- could not pre-pull $img; run_evaluation will pull it (watchdog grace covers a cold pull)" >&2
-      fi
-    fi
-  done
 fi
 
 CMD=( timeout --signal=TERM --kill-after=30 "$TIMEOUT"

@@ -1,0 +1,165 @@
+{
+  "_doc": "Docker-authoritative false negatives for the SWE-bench home harness. The home harness scored these instances UNRESOLVED, but the AUTHORITATIVE SWE-bench Docker eval (swebench.harness.run_evaluation) confirmed the model's OWN prediction patch RESOLVES the instance. This file is a SCORING-LAYER correction manifest: reclaim ONLY entries with docker_confirmed=true. No instance-derived content is ever fed to the model; entries are keyed by public instance id and each is justified by an external Docker audit artifact (answer-leakage-safe).",
+  "confirmed_false_negatives": [
+    {
+      "id": "matplotlib__matplotlib-23964",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "warnings-as-errors repo + too-new pyparsing raises PyparsingDeprecationWarning -> pytest 'found no collectors' collection error -> a correct patch is scored as a miss"
+    },
+    {
+      "id": "matplotlib__matplotlib-23987",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "matplotlib__matplotlib-24149",
+      "docker_confirmed": true,
+      "evidence": "ornith-corrected.mpl_audit.json:resolved_ids",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "matplotlib__matplotlib-23913",
+      "docker_confirmed": false,
+      "evidence": "home reused-venv: pin pyparsing==3.0.9 -> FAIL_TO_PASS test_legend_draggable collects+passes (2 passed). PENDING Docker confirmation before reclaim.",
+      "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25570",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model patch + test_patch applied, pandas 1.5.3 present): all 3 FAIL_TO_PASS test_empty_selection_pandas_output[list/bool/bool_int] now PASS (3 passed). Scored 3 skipped because pandas was absent at score time (results predate install_spec_extras). PENDING Docker confirmation before reclaim.",
+      "root_cause": "scikit-learn F2P tests are gated by pytest.importorskip(pandas); pandas not installed in the scored env -> tests SKIP -> a correct patch is scored UNRESOLVED. General fix install_spec_extras()+spec_extras.json (pandas<2.0.0) is now wired into run_one (line ~514) and active for current/future runs; this is a STALE pre-fix result."
+    },
+    {
+      "id": "pytest-dev__pytest-5227",
+      "docker_confirmed": false,
+      "evidence": "SHIPPED-SCORER-PATH verified: test_runner.run_tests (post --no-header version-gate fix) on the retained work-dir (model patch + test_patch applied) returns ok=True, exit=0, '3 passed' for the 3 FAIL_TO_PASS. Scored a miss purely because the pre-fix single test path appended --no-header, a pytest>=6.0 flag that pytest 4.4 rejects (exit 4, zero tests run). Stronger than a plain home-verify (runs the exact shipped code path). PENDING Docker confirmation before reclaim.",
+      "root_cause": "HARNESS scoring bug (not env): test_runner.run_tests appended --no-header (pytest>=6.0 only) to THE single test command; on pytest 4.x/5.x this is an 'unrecognized arguments' usage error -> exit 4, NO tests executed -> every old-pytest instance auto-scored UNRESOLVED regardless of patch correctness. Fixed by version-gating the flag (_pytest_major). Of 9 completed pytest<6 misses, ONLY 5227 flips to resolved; the other 8 are genuine misses (patch wrong)."
+    },
+    {
+      "id": "matplotlib__matplotlib-23314",
+      "docker_confirmed": false,
+      "evidence": "SHIPPED-SCORER-PATH verified: reset the retained work-dir venv (model patch + test_patch applied) to the broken state (pyparsing 3.3.2 / setuptools-scm 10.2.0 / vcs-versioning 2.2.2), ran the shipped pin_warn_as_error_deps(matplotlib) -> pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed, then FAIL_TO_PASS test_invisible_axes[png] flips collection-error -> 1 passed. Model self-verified its fix (fix_verified_by_model=true). PENDING Docker confirmation before reclaim.",
+      "root_cause": "matplotlib NO_COLLECTORS family, SECOND cause: this matplotlib dev build computes __version__ via setuptools_scm.get_version() at import; setuptools-scm 8+ pulls vcs-versioning whose release-branch-semver entry-point deprecation shim raises DeprecationWarning -> fatal under filterwarnings=error, so collection dies even after pyparsing is pinned. Fixed generally in swe_agent_v2.py WARN_AS_ERROR_DEP_PINS (setuptools_scm<8 + -vcs_versioning; commit d5c3348)."
+    },
+    {
+      "id": "psf__requests-2148",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model+test_patch applied, requests 2.3.0). httpbin.org is UNREACHABLE from this host and the suite defaults HTTPBIN to http://httpbin.org/ with no local httpbin -> all 10 FAIL_TO_PASS fail with ConnectionError (scored '5 failed, 5 passed in 53.73s' = network timeouts). Installed pytest-httpbin, ran its bundled httpbin Flask app on 127.0.0.1, exported HTTPBIN_URL to it, re-ran the 10 F2P node ids -> 10 passed. Clean env false-negative. PENDING Docker confirmation before reclaim.",
+      "root_cause": "psf/requests httpbin-network FN family: F2P hit httpbin('...') which resolves to the unreachable public httpbin.org in a network-isolated scorer -> ConnectionError regardless of patch correctness. General fix: provide a local httpbin (pytest-httpbin) and export HTTPBIN_URL before pytest. Not yet wired into the live scorer."
+    },
+    {
+      "id": "psf__requests-2674",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model+test_patch applied, requests 2.7.0). Same httpbin.org-unreachable mechanism (scored '5 failed, 7 passed in 69.62s'). With a local httpbin (HTTPBIN_URL -> 127.0.0.1) 11/12 FAIL_TO_PASS pass; the 12th (test_mixed_case_scheme_acceptable) fails ONLY because it swaps the scheme to https:// on the SAME host:port and the local server speaks plain HTTP (SSLError: record layer failure) -- against real httpbin.org (http:80 + https:443 on one host) it would pass, so a local-server limitation, NOT a patch defect. PENDING Docker confirmation before reclaim.",
+      "root_cause": "psf/requests httpbin-network FN family (see 2148). Additionally exercises a same-host http+https scheme-swap test that needs a dual-scheme local httpbin (pytest-httpbin can serve both)."
+    }
+  ],
+  "confirmed_real_misses": [
+    {
+      "id": "matplotlib__matplotlib-24265",
+      "docker_confirmed_miss": true,
+      "evidence": "ornith-corrected.mpl_audit.json:unresolved_ids",
+      "note": "Docker eval on the model's prediction FAILS -> genuine miss. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25500",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified with pandas 1.5.3 present: F2P test_isotonic_regression_output_predict FAILS (AssertionError: y_pred is a DataFrame, not np.ndarray). Model patched sklearn/calibration.py, not the isotonic predict path -> genuine miss even without the skip. Not a false negative.",
+      "note": "Same importorskip(pandas) skip family as 25570, but the patch is actually WRONG, so it stays a miss with or without the env fix. Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25638",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified with pandas 1.5.3 present: F2P test_confusion_matrix_pandas_nullable[Int64/Float64/boolean] FAIL (ValueError: mix of unknown and binary targets). Model patch does not fully fix -> genuine miss even without the skip. Not a false negative.",
+      "note": "Same importorskip(pandas) skip family as 25570, but the patch is actually WRONG, so it stays a miss with or without the env fix. Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "matplotlib__matplotlib-23476",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified in a fully cleared env (pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed): F2P test_unpickle_with_device_pixel_ratio COLLECTS then FAILS with a real AssertionError (Figure.dpi == 294). Model did NOT self-verify (fix_verified_by_model=false, phase2 budget death). Genuine miss, not a false negative.",
+      "note": "Same matplotlib NO_COLLECTORS env signature (pyparsing + vcs-versioning cascade) as 23314, but once the env is cleared the patch is actually WRONG. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "psf__requests-2317",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified against a LOCAL httpbin (HTTPBIN_URL -> 127.0.0.1, requests 2.4.3): all 8 FAIL_TO_PASS still FAIL with 'TypeError: isinstance() ...' from the model's patched requests/compat.py -- a genuine code defect that fails even with network fixed. Same requests+httpbin score signature ('8 failed in 0.62s') but NOT a false negative.",
+      "note": "Local-httpbin re-run cleanly discriminates the requests httpbin-network FN family (2148/2674 pass) from real misses (2317 fails with a TypeError). Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "matplotlib__matplotlib-23299",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified through the SHIPPED scorer path (test_runner.run_tests, model+test patch applied). Scored NO_COLLECTORS. Root env cause was a THIRD sub-cause: venv had pytest 9.1.1, which raises PytestRemovedIn10Warning for an unrelated same-file test (test_rcparams.py::test_validator_valid passes a generator to @parametrize) -> fatal under matplotlib filterwarnings=error -> whole module fails to collect. After the shipped pin_warn_as_error_deps (now includes pytest<8 -> pytest 7.4.4) collection is RESTORED and the target test test_no_backend_reset_rccontext RUNS and FAILS with a real AssertionError (rcParams backend reset to 'agg'). Model patch (get_backend -> dict.__getitem__(rcParams,'backend')) is insufficient. Genuine miss, not a false negative.",
+      "note": "Surfaced the pytest-9.x PytestRemovedIn10Warning third sub-cause of the matplotlib NO_COLLECTORS family; the general fix (pytest<8 in WARN_AS_ERROR_DEP_PINS, commit below) hardens the scorer but does NOT reclaim this instance. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "matplotlib__matplotlib-22835",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified in the retained work-dir (model+test patch applied). Scored NO_COLLECTORS via the standard pyparsing sub-cause. After the standard pins (pyparsing<3.1, setuptools_scm<8, -vcs_versioning) collection is restored and the target test test_artist.py::test_format_cursor_data_BoundaryNorm RUNS and FAILS with a real AssertionError at test_artist.py:411 (pytest version was not the blocker here; still fails under both pytest 9.1.1 and pinned 7.4.4). Model patch (try/except ValueError around norm.inverse) is insufficient. Genuine miss, not a false negative.",
+      "note": "Same matplotlib NO_COLLECTORS score signature but a real miss once the env is cleared. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "sympy__sympy-24102",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "Mathematica parser: a parenthesized function-argument case parses as a multiplication instead of a function application -> deterministic AssertionError on a case the model self-verify did not cover. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-22005",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "solvers: the guarded branch the model added raises NotImplementedError on the target input -> deterministic failure. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21847",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "polys/monomials: the produced monomial set differs from expected -> deterministic set-inequality AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-20639",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "pretty-printing of a nested radical/power: output layout mismatch -> deterministic AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21171",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "latex printing: parenthesization of a nested power is wrong -> deterministic AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21379",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "the model change triggers a genuine PolynomialError on the F2P input -> deterministic failure. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-23191",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": false,
+      "evidence": "model modified ONLY a test file (no source fix) -> guaranteed miss; F2P fails deterministically. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    }
+  ]
+}
