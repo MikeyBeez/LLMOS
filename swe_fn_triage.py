@@ -211,13 +211,23 @@ def main():
         if kind != "resolved":
             for sig, n in sig_by_family[f].most_common(4):
                 print(f"        {n:3d} | {sig[:64]}")
+        # informational only: self_verified split of the pending backlog. self_verified
+        # is NOT a reclaim filter -- Docker-confirmed FNs 5227/25570 are self_verified=False.
+        if kind == "reclaimable_fn":
+            _pend = sorted(set(ids) - confirmed)
+            if _pend:
+                _svt = sum(1 for _i in _pend if row_by_id[_i].get("fix_verified_by_model"))
+                print(f"        pending self_verified: True={_svt} False={len(_pend) - _svt}"
+                      "  (informational; Docker authoritative, self_verified NOT a filter)")
     print("=" * 72)
     print(f"reclaimable_fn: {reclaimable_total} total, {pending_total} pending Docker confirm")
     review = [f for f in fam_order if kind_of[f] == "review"]
     if any(buckets[f] for f in review):
         print("\n!! REVIEW bucket non-empty -- inspect for a NEW FN family:")
-        print("   (self_verified=True + collection error => likely scoring FN;")
-        print("    self_verified=False => likely a genuine budget/non-solve miss)")
+        print("   A collection/env anomaly is a POSSIBLE scoring FN REGARDLESS of")
+        print("   self_verified -- Docker eval is authoritative and self_verified is")
+        print("   NOT a reliable filter: Docker-confirmed FNs pytest-dev__pytest-5227")
+        print("   and scikit-learn__scikit-learn-25570 both have self_verified=False.")
         for f in review:
             for rid in sorted(buckets[f]):
                 r = row_by_id[rid]
