@@ -82,6 +82,27 @@ def clone(inst):
     return repo
 
 
+def _auto_verify_reject_detail(res):
+    """Turn an auto_verify_env() result into a short, actionable hint for the
+    model when the env-ready gate rejects a declare_env_ready. Returns None if
+    the env actually verified (nothing to surface). ENV-DIAGNOSTIC ONLY --
+    auto_verify_env excludes the instance's FAIL_TO_PASS tests, so this never
+    leaks gold/test content."""
+    if not isinstance(res, dict) or res.get("ok"):
+        return None
+    mod = res.get("missing_module")
+    if mod:
+        return ("harness auto-verify: environment is missing a TEST dependency "
+                "`" + str(mod) + "` -- install it (pip/uv) into the active env, "
+                "then declare again.")
+    err = res.get("error")
+    if err:
+        return "harness auto-verify failed: " + str(err)
+    return ("harness auto-verify could not confirm any green test -- check the "
+            "install; then call run_smoke_test WITH NO ARGUMENTS to let the "
+            "harness pick a known-stable test.")
+
+
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, gate=None, log=print, checkpoint=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
@@ -145,11 +166,14 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                   "tool_calls": [{"id": f"t{turn}", "type": "function",
                                                    "function": {"name": tool,
                                                                  "arguments": args}}]})
+                _gate_payload = {"error": "verification gate not passed; "
+                                          "run_sanity and run_smoke_test must "
+                                          "both return ok=true first"}
+                _detail = getattr(gate, "reject_detail", None)
+                if _detail:
+                    _gate_payload["harness_check"] = _detail
                 messages.append({"role": "tool", "tool_call_id": f"t{turn}",
-                                  "content": json.dumps({
-                                      "error": "verification gate not passed; "
-                                               "run_sanity and run_smoke_test must "
-                                               "both return ok=true first"})})
+                                  "content": json.dumps(_gate_payload)})
                 continue
             log(f"DECLARED {tool}")
             return "declared", messages + [
@@ -453,13 +477,19 @@ def run_one(inst):
     def _boot_gate():
         # On declare: if the package imports but smoke hasn't run, the harness
         # verifies the env itself (auto_verify_env) so the model never burns
-        # turns guessing a smoke test.
+        # turns guessing a smoke test. Capture its diagnostic so a REJECTED
+        # declare tells the model WHY (missing test dep / uncollectable suite)
+        # instead of only a generic "gate not passed".
         if b_state.get("sanity_ok") and not b_state.get("smoke_ok"):
             try:
-                auto_verify_env(b_state, repo)
+                _res = auto_verify_env(b_state, repo)
+                _boot_gate.reject_detail = _auto_verify_reject_detail(_res)
             except Exception:
-                pass
-        return env_ready(b_state)
+                _boot_gate.reject_detail = None
+        ok = env_ready(b_state)
+        if ok:
+            _boot_gate.reject_detail = None
+        return ok
     b_reason, b_msgs, b_meta = phase_run(cpu, BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS,
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
                                           goal, BOOTSTRAP_BUDGET,
