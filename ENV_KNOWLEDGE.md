@@ -238,7 +238,7 @@ retains model_patch + test_patch), confirm pandas is present, then run its FAIL_
 docker_confirmed=false, PENDING); if any FAIL -> real miss (patch wrong), record in
 confirmed_real_misses so future cycles skip it. Docker eval remains authoritative before any
 score is flipped. Verified example: scikit-learn-25570 (3 pandas_output F2P tests: skip->3
-passed) = PENDING FN; 25500 (wrong file; y_pred DataFrame not ndarray) and 25638 (ValueError
+passed) = DOCKER-CONFIRMED FN (authoritative run_evaluation 2026-07-15, run_id=skl25570_reclaim: resolved=true, 3/3 F2P + ALL P2P green, 0 failures -- the FIRST authoritative validation of this importorskip-skip family; promoted docker_confirmed=true, reclaim dry-run now +5); 25500 (wrong file; y_pred DataFrame not ndarray) and 25638 (ValueError
 mix of unknown/binary targets) FAIL with pandas present = real misses.
 
 
@@ -588,3 +588,19 @@ B) The AUTHORITATIVE scorer can be NON-DETERMINISTIC for network-coupled repos. 
    FNs 23964/23987/24149/5227), live results md5 UNCHANGED. CAVEAT for the shipped ensure_local_httpbin home fix (commit 9bab933):
    it makes the HOME scorer reliable, but that is a DIFFERENT env than the authoritative flaky external server; a home 'resolved'
    for these instances may not match a given-day authoritative run. Treat psf/requests as verification-ambiguous, not a clean env-FN family.
+
+## 27. Prepull hitting its timeout cap is NOT a failure -- run_evaluation resumes the cached layers
+Operational refinement to sec.25/26 (2026-07-15, confirming scikit-learn-25570 over slow wifi).
+docker_eval_guard.sh pre-pulls the prebuilt image with a --prepull-timeout cap (default 1200s).
+On a slow link a large eval image (sklearn = a multi-GB prebuilt) may NOT finish within that cap.
+That is fine and NOT a hang: docker pull writes each COMPLETED layer into the local layer cache,
+so when the cap fires and the guard proceeds to run_evaluation, run_evaluation own images.pull
+RESUMES from the cached layers, finishes the remainder, then builds the container and runs the
+tests to completion (verified: prepull capped at 1200s with the image not yet listed; eval then
+completed resolved=true). PRACTICAL RULE: treat --prepull-timeout as a best-effort WARM, not a
+hard gate; do NOT abort or retry a capped prepull. The eval hard --timeout (default 2400s) plus
+the stall-watchdog remain the real backstops. Only suspect a genuine problem if, AFTER the prepull
+cap, run_evaluation shows no network RX AND no image/container/run-log growth for the full --grace
+window. Corollary: for a first-time (cold) large image on a slow link, budget eval wall time as
+prepull-cap + pull-remainder + test phase, not just the test phase.
+
