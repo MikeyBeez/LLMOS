@@ -348,3 +348,12 @@ Triage of the two newly-surfaced NO_COLLECTORS instances (both `found no collect
   23913/25570/5227 precedent; promote via Docker eval).
 - **23476** = REAL MISS (did not self-verify; once env cleared, F2P fails with a genuine
   `AssertionError` on `Figure.dpi`) -> recorded in `confirmed_real_misses`.
+
+
+## 17. Scorer scope: PASS_TO_PASS is NOT enforced at home (false-positive analysis)
+
+`swe_agent_v2.score()` runs ONLY `inst['FAIL_TO_PASS']` (via `test_runner.run_tests`); `PASS_TO_PASS` is used for phase-1 smoke-test hints but is never run at scoring time. Official SWE-bench requires BOTH: every F2P transitions to pass AND every P2P stays green (no regression). So the home `resolved` flag has a THEORETICAL false-positive exposure: a patch that fixes F2P but breaks a previously-passing test scores resolved=True at home but UNRESOLVED under the authoritative Docker scorer.
+
+DETECTION (tools: `p2p_audit.py` fast pre-filter, `p2p_fp_audit.py` rigorous confirm). Do NOT trust a bare P2P re-run: many P2P tests fail in the home env even at base commit (home/gold env discrepancy). The valid discriminator is a TWO-STATE CAUSATION test per instance in its surviving work-dir (keeping .venv): A) base+test_patch (no model) run P2P; B) base+test_patch+model_patch run P2P. Genuine regression (suspected FP) = A green AND B fails. A fails = env discrepancy (NOT a scorer bug). A green AND B green = true positive. Confirm any genuine regression with the Docker eval before reclassifying; never edit results in place (clobber-safe; runner rewrites results_full300.json).
+
+EMPIRICAL RESULT (2026-07-15, 140 done / 58 resolved): audited all 56 resolved instances with surviving work-dirs -> 47 fully-green P2P, 9 P2P-fail, 2 no-workdir. Two-state causation test on the 9 -> ALL env discrepancy (8) or corrupted/missing venv (1, sympy-24152); ZERO genuine regressions. So the current resolved count is NOT inflated by the P2P skip, AND naively enforcing P2P at home would have created 8+ NEW false negatives. Conclusion: keep home scorer F2P-only; enforce P2P in the end-of-run Docker audit. Reports: ~/swe/p2p_audit_report.json, ~/swe/p2p_fp_audit_report.json.
