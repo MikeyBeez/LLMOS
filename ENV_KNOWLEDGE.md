@@ -357,3 +357,39 @@ Triage of the two newly-surfaced NO_COLLECTORS instances (both `found no collect
 DETECTION (tools: `p2p_audit.py` fast pre-filter, `p2p_fp_audit.py` rigorous confirm). Do NOT trust a bare P2P re-run: many P2P tests fail in the home env even at base commit (home/gold env discrepancy). The valid discriminator is a TWO-STATE CAUSATION test per instance in its surviving work-dir (keeping .venv): A) base+test_patch (no model) run P2P; B) base+test_patch+model_patch run P2P. Genuine regression (suspected FP) = A green AND B fails. A fails = env discrepancy (NOT a scorer bug). A green AND B green = true positive. Confirm any genuine regression with the Docker eval before reclassifying; never edit results in place (clobber-safe; runner rewrites results_full300.json).
 
 EMPIRICAL RESULT (2026-07-15, 140 done / 58 resolved): audited all 56 resolved instances with surviving work-dirs -> 47 fully-green P2P, 9 P2P-fail, 2 no-workdir. Two-state causation test on the 9 -> ALL env discrepancy (8) or corrupted/missing venv (1, sympy-24152); ZERO genuine regressions. So the current resolved count is NOT inflated by the P2P skip, AND naively enforcing P2P at home would have created 8+ NEW false negatives. Conclusion: keep home scorer F2P-only; enforce P2P in the end-of-run Docker audit. Reports: ~/swe/p2p_audit_report.json, ~/swe/p2p_fp_audit_report.json.
+
+## 18. psf/requests httpbin-network false-negative family (external-service tests in a network-isolated scorer)
+
+Signature: psf/requests misses whose FAIL_TO_PASS are httpbin endpoint tests
+(test_HTTP_200_OK_GET*, test_BASICAUTH_*, test_POSTBIN_*, test_unicode_multipart_post,
+test_manual_redirect_*, test_HTTP_302_ALLOW_REDIRECT_GET, ...). score_tail is either
+"N failed, M passed in <tens of seconds>" (DNS/connect timeouts to httpbin.org) or a fast
+"N failed in 0.Xs" (connection refused).
+
+Root cause: the requests test suite defines `HTTPBIN = os.environ.get('HTTPBIN_URL',
+'http://httpbin.org/')` and helper `httpbin(*suffix)`. On this host httpbin.org is UNREACHABLE,
+`pytest-httpbin` is NOT installed, and there is no conftest wiring a local server, so every
+httpbin-dependent F2P raises ConnectionError -- independent of whether the model's patch is
+correct. Same class as the matplotlib/sphinx/sklearn env-FN families (the test can't even run),
+just over the network instead of at collection.
+
+General fix (NOT yet wired into the live scorer): for psf/requests, install pytest-httpbin,
+start its bundled local httpbin Flask app on 127.0.0.1 (threaded), and export HTTPBIN_URL to
+that URL BEFORE pytest starts (the module reads HTTPBIN at import time, so a fixture is too late).
+Tests that scheme-swap http->https on the SAME netloc (e.g. test_mixed_case_scheme_acceptable)
+additionally need HTTPS on the same host -- use pytest-httpbin's dual http+https serving (or real
+httpbin.org connectivity).
+
+Triage / discrimination method (leakage-safe -- no gold/test-patch content to the model):
+in the retained work-dir (model+test patch already applied), `pip install pytest-httpbin`, run
+`python -c "from httpbin import app; app.run(host='127.0.0.1', port=P, threaded=True)"` in the
+background, `export HTTPBIN_URL=http://127.0.0.1:P/`, and re-run the exact F2P node ids.
+env-FNs flip to all-pass; genuine misses still fail with real assertions/TypeErrors.
+
+Findings (140-run, all 6 requests instances): requests-2148 = home-verified FALSE NEGATIVE
+(10/10 F2P pass locally); requests-2674 = FALSE NEGATIVE (11/12 pass; the 12th is the
+local-HTTPS-only artifact above); requests-2317 = REAL MISS (all 8 F2P fail with TypeError from
+the model's patched requests/compat.py, even with httpbin up). 2148/2674 recorded in
+swe_false_negatives.json as docker_confirmed=false (PENDING Docker confirm); 2317 in
+confirmed_real_misses. Resolved requests instances (3362/1963/863) have non-httpbin F2P and are
+unaffected.

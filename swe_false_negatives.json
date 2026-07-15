@@ -42,6 +42,18 @@
       "docker_confirmed": false,
       "evidence": "SHIPPED-SCORER-PATH verified: reset the retained work-dir venv (model patch + test_patch applied) to the broken state (pyparsing 3.3.2 / setuptools-scm 10.2.0 / vcs-versioning 2.2.2), ran the shipped pin_warn_as_error_deps(matplotlib) -> pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed, then FAIL_TO_PASS test_invisible_axes[png] flips collection-error -> 1 passed. Model self-verified its fix (fix_verified_by_model=true). PENDING Docker confirmation before reclaim.",
       "root_cause": "matplotlib NO_COLLECTORS family, SECOND cause: this matplotlib dev build computes __version__ via setuptools_scm.get_version() at import; setuptools-scm 8+ pulls vcs-versioning whose release-branch-semver entry-point deprecation shim raises DeprecationWarning -> fatal under filterwarnings=error, so collection dies even after pyparsing is pinned. Fixed generally in swe_agent_v2.py WARN_AS_ERROR_DEP_PINS (setuptools_scm<8 + -vcs_versioning; commit d5c3348)."
+    },
+    {
+      "id": "psf__requests-2148",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model+test_patch applied, requests 2.3.0). httpbin.org is UNREACHABLE from this host and the suite defaults HTTPBIN to http://httpbin.org/ with no local httpbin -> all 10 FAIL_TO_PASS fail with ConnectionError (scored '5 failed, 5 passed in 53.73s' = network timeouts). Installed pytest-httpbin, ran its bundled httpbin Flask app on 127.0.0.1, exported HTTPBIN_URL to it, re-ran the 10 F2P node ids -> 10 passed. Clean env false-negative. PENDING Docker confirmation before reclaim.",
+      "root_cause": "psf/requests httpbin-network FN family: F2P hit httpbin('...') which resolves to the unreachable public httpbin.org in a network-isolated scorer -> ConnectionError regardless of patch correctness. General fix: provide a local httpbin (pytest-httpbin) and export HTTPBIN_URL before pytest. Not yet wired into the live scorer."
+    },
+    {
+      "id": "psf__requests-2674",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model+test_patch applied, requests 2.7.0). Same httpbin.org-unreachable mechanism (scored '5 failed, 7 passed in 69.62s'). With a local httpbin (HTTPBIN_URL -> 127.0.0.1) 11/12 FAIL_TO_PASS pass; the 12th (test_mixed_case_scheme_acceptable) fails ONLY because it swaps the scheme to https:// on the SAME host:port and the local server speaks plain HTTP (SSLError: record layer failure) -- against real httpbin.org (http:80 + https:443 on one host) it would pass, so a local-server limitation, NOT a patch defect. PENDING Docker confirmation before reclaim.",
+      "root_cause": "psf/requests httpbin-network FN family (see 2148). Additionally exercises a same-host http+https scheme-swap test that needs a dual-scheme local httpbin (pytest-httpbin can serve both)."
     }
   ],
   "confirmed_real_misses": [
@@ -71,6 +83,13 @@
       "home_verified_miss": true,
       "evidence": "home-verified in a fully cleared env (pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed): F2P test_unpickle_with_device_pixel_ratio COLLECTS then FAILS with a real AssertionError (Figure.dpi == 294). Model did NOT self-verify (fix_verified_by_model=false, phase2 budget death). Genuine miss, not a false negative.",
       "note": "Same matplotlib NO_COLLECTORS env signature (pyparsing + vcs-versioning cascade) as 23314, but once the env is cleared the patch is actually WRONG. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "psf__requests-2317",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified against a LOCAL httpbin (HTTPBIN_URL -> 127.0.0.1, requests 2.4.3): all 8 FAIL_TO_PASS still FAIL with 'TypeError: isinstance() ...' from the model's patched requests/compat.py -- a genuine code defect that fails even with network fixed. Same requests+httpbin score signature ('8 failed in 0.62s') but NOT a false negative.",
+      "note": "Local-httpbin re-run cleanly discriminates the requests httpbin-network FN family (2148/2674 pass) from real misses (2317 fails with a TypeError). Documented so future cycles do not re-investigate."
     }
   ]
 }
