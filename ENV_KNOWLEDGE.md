@@ -213,3 +213,30 @@ future runs — NOT relaunched for a steering change.
 General lesson (also in engineering-patterns.json): a gate that auto-runs a check must feed
 back the check's SPECIFIC diagnostic, never a generic rejection, or the agent thrashes
 blind until budget death.
+
+## 13. scikit-learn importorskip("pandas") skip false-negative family (telemetry: "N skipped in Xs")
+
+SIGNATURE: a scikit-learn miss whose score_tail is "N skipped in 0.0Xs" (not "failed"/"error").
+Many sklearn FAIL_TO_PASS tests begin with `pd = pytest.importorskip("pandas")` (also
+matplotlib for plotting tests). If pandas is NOT installed in the scored env, pytest reports
+the target tests as SKIPPED, never as pass/fail. A skipped F2P test is not a pass, so the
+instance is scored UNRESOLVED even when the model's patch is correct -> FALSE NEGATIVE.
+This is a different mechanism from the matplotlib warnings-as-errors "found no collectors"
+family (a collection error) but the same outcome: the F2P tests never actually execute.
+
+GENERAL FIX (already shipped, active): install_spec_extras() in swe_agent_v2.py, called in
+run_one right after phase-1 env is ready (~line 514), installs the SWE-bench spec-declared
+optional TEST deps from ~/swe/spec_extras.json (e.g. sklearn -> pandas<2.0.0, matplotlib<3.9.0),
+version-matched, so importorskip-gated tests RUN instead of silently skipping. Env-layer only;
+never touches the answer. This makes scoring MORE accurate in BOTH directions: a correct patch
+now PASSES (was skip->miss); a wrong patch still FAILS. So it cannot manufacture false positives.
+
+TRIAGE / RECLAIM: results scored BEFORE install_spec_extras existed (e.g. Jul-12/13 sklearn
+traces) can carry stale "N skipped" misses. To check one: in its ~/swe/work/<id> venv (which
+retains model_patch + test_patch), confirm pandas is present, then run its FAIL_TO_PASS with
+-rs. If all F2P now PASS -> home-verified false negative (add to swe_false_negatives.json as
+docker_confirmed=false, PENDING); if any FAIL -> real miss (patch wrong), record in
+confirmed_real_misses so future cycles skip it. Docker eval remains authoritative before any
+score is flipped. Verified example: scikit-learn-25570 (3 pandas_output F2P tests: skip->3
+passed) = PENDING FN; 25500 (wrong file; y_pred DataFrame not ndarray) and 25638 (ValueError
+mix of unknown/binary targets) FAIL with pandas present = real misses.
