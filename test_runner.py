@@ -133,6 +133,36 @@ def _bin_rel(kind):
     return ".condaenv/bin" if kind == "conda" else ".venv/bin"
 
 
+# --- result telemetry (score_tail) -----------------------------------------
+# `tail` is harness-side telemetry ONLY (stored as score_tail). It never feeds
+# the model and never affects ok/passed/exit -> it cannot change any score.
+# It must surface the runner result-count summary (N passed/failed/error/
+# skipped) for false-negative triage, while preserving the final line (e.g.
+# pytest \"found no collectors\") so diagnostic substrings are not lost.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SUMMARY_RE = re.compile(
+    r"(\d+\s+(passed|failed|error|errors|skipped|xfailed|xpassed|deselected|warnings?)\b"
+    r"|Ran\s+\d+\s+tests?\b|^OK\b|^FAILED\b)", re.I)
+
+def _result_summary(out):
+    """Runner result-count summary line, scanned from the end.  if none."""
+    for line in reversed([l.strip() for l in out.splitlines() if l.strip()]):
+        clean = _ANSI_RE.sub("", line).strip()
+        if _SUMMARY_RE.search(clean):
+            return clean[:200]
+    return ""
+
+def _build_tail(out):
+    """Compact triage tail: result-count summary + final line (ANSI-stripped)."""
+    if not out.strip():
+        return "(no output)"
+    last = _ANSI_RE.sub("", out.strip().splitlines()[-1]).strip()
+    summ = _result_summary(out)
+    if summ and summ not in last:
+        return (summ + "  ||  " + last)[:300]
+    return (summ or last)[:300]
+
+
 def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
               timeout=600, max_installs=4, diagnose=False):
     """Run the given test node ids and report pass/fail. THE single test
@@ -187,7 +217,7 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
     passed = ("passed" in out) or (repo == "django/django" and "OK" in out
                                    and "FAILED" not in out and r.returncode == 0)
     ok = r.returncode == 0 and passed
-    tail = out.strip().splitlines()[-1][:160] if out.strip() else "(no output)"
+    tail = _build_tail(out)
     result = {"ok": ok, "exit": r.returncode, "passed": passed,
               "tail": tail, "stdout": (r.stdout or "")[-1500:],
               "installed": installed}

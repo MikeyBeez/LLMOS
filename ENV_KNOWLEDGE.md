@@ -130,3 +130,26 @@ Mitigation: launch audits through `~/Code/LLMOS/docker_eval_guard.sh`. It valida
     ~/Code/LLMOS/docker_eval_guard.sh --preds ~/swe/mpl_preds_23913.json --run-id mpl23913 --instances matplotlib__matplotlib-23913 --timeout 2400
 
 23913 (the §6/§8 PENDING item) still needs this guarded Docker confirmation before it can be reclaimed; its prediction patch is staged at `~/swe/mpl_preds_23913.json`.
+
+## 10. Scorer telemetry: capture the result-count summary, not just the last line
+`test_runner.run_tests` originally stored `tail = (stdout+stderr).splitlines()[-1][:160]`
+and `swe_agent_v2.score()` persisted it as `score_tail`. Problem for false-negative
+triage: the single last line of stdout+stderr is frequently NOT the pytest/unittest
+result summary. When a run has trailing stderr (a DeprecationWarning traceback), a
+crash, or ends on a `rootdir:`/node-path line (seen on pytest-dev instances and on
+matplotlib "found no collectors" node-id failures), the `N passed/failed/error/skipped`
+counts get buried mid-output and never reach `score_tail`. That is exactly the signal
+FN triage needs (real miss vs env/collection FN).
+
+Fix (telemetry-only, cannot change ok/passed/exit -> cannot change any score):
+`_build_tail(out)` now scans from the end for the runner result-count summary line
+(`_SUMMARY_RE`: N passed/failed/error/skipped/warnings, `Ran N tests`, `OK`,
+`FAILED`), strips ANSI, and returns `"<summary>  ||  <last line>"` when the summary
+is not already the last line -- otherwise the last line unchanged. This PRESERVES
+diagnostic substrings (e.g. "found no collectors") so existing signature matching
+still works, while always surfacing the counts. Unit-tested on: clean pytest (byte-
+for-byte unchanged), stderr-buried summary, collection-error-only, collection-error
++summary, django OK/FAILED, ANSI-coded lines, passed+warnings, empty. General lesson:
+harness observability strings must target the *semantic* result line, not a positional
+last line, because subprocess stream interleaving is not stable. Inert for a running
+process (module imported once); active on relaunch and for all future runs.
