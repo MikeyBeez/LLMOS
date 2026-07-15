@@ -367,6 +367,77 @@ def pin_warn_as_error_deps(repo_dir, repo_name, env_kind="uv", env_vars=None):
     return pins
 
 
+_LOCAL_HTTPBIN_MARKER = "LLMOS harness httpbin shim"
+
+# Repos whose test-suite reaches an EXTERNAL http service via an env var and so
+# fail OFFLINE with ConnectionError -> a correct patch is scored a false
+# negative. psf/requests test_requests.py does
+#   HTTPBIN = os.environ.get("HTTPBIN_URL", "http://httpbin.org/")
+# and httpbin.org is unreachable here. pytest-httpbin bundles a local httpbin
+# app; a repo-root conftest.py can start it and point HTTPBIN_URL at 127.0.0.1
+# BEFORE the test module imports. General, repo-level; no answer/instance data.
+LOCAL_HTTPBIN_REPOS = {"psf/requests"}
+
+_LOCAL_HTTPBIN_CONFTEST = """# """ + _LOCAL_HTTPBIN_MARKER + """ (env layer, auto-generated).
+# Some tests read HTTPBIN_URL and otherwise hit the public httpbin.org, which is
+# unreachable offline (ConnectionError). Start a local httpbin (bundled with
+# pytest-httpbin) and point HTTPBIN_URL at it, BEFORE test modules import. This
+# file contains NO instance-specific knowledge and nothing derived from a patch.
+import os
+import atexit
+
+if not os.environ.get("HTTPBIN_URL"):
+    try:
+        from httpbin import app as _httpbin_app
+        from pytest_httpbin import serve as _serve
+        _srv = _serve.Server(application=_httpbin_app)
+        _srv._thread.daemon = True  # never block pytest exit
+        _srv.start()
+        atexit.register(_srv.stop)
+        os.environ["HTTPBIN_URL"] = _srv.url
+    except Exception:
+        pass
+"""
+
+
+def ensure_local_httpbin(repo_dir, repo_name, env_kind="uv", env_vars=None):
+    """For repos whose tests read HTTPBIN_URL and otherwise hit httpbin.org
+    (offline ConnectionError -> false negative): ensure pytest-httpbin (bundles
+    a local server) is installed and drop a repo-root conftest.py that starts it
+    and sets HTTPBIN_URL. Env-layer; general (repo-level); never touches the
+    answer. Returns True if wired."""
+    if repo_name not in LOCAL_HTTPBIN_REPOS:
+        return False
+    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
+    py = os.path.join(repo_dir, env_dir, "bin", "python")
+    if not os.path.exists(py):
+        return False
+    env = os.environ.copy(); env.update(env_vars or {})
+    try:
+        chk = subprocess.run('"%s" -c "import pytest_httpbin, httpbin"' % py,
+                             shell=True, cwd=repo_dir, capture_output=True,
+                             text=True, timeout=120, env=env)
+        if chk.returncode != 0:
+            subprocess.run('"%s" -m pip install --prefer-binary pytest-httpbin' % py,
+                           shell=True, cwd=repo_dir, capture_output=True,
+                           text=True, timeout=900, env=env)
+    except Exception:
+        pass
+    cf = os.path.join(repo_dir, "conftest.py")
+    try:
+        if os.path.exists(cf):
+            existing = open(cf, encoding="utf-8", errors="ignore").read()
+            if _LOCAL_HTTPBIN_MARKER not in existing:
+                print(" -- local httpbin: repo already has a conftest.py; not modifying", flush=True)
+                return False
+        open(cf, "w", encoding="utf-8").write(_LOCAL_HTTPBIN_CONFTEST)
+        print(" -- local httpbin wired (conftest + HTTPBIN_URL) for %s" % repo_name, flush=True)
+        return True
+    except Exception as e:
+        print(" -- local httpbin wiring failed:", e, flush=True)
+        return False
+
+
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
@@ -382,6 +453,10 @@ def score(inst, repo, env_vars, env_kind="uv"):
     ap = sh("git apply _t.patch", cwd=repo)
     if ap.returncode != 0:
         return False, len(diff), "test patch did not apply (agent touched a test file?)"
+    # Local httpbin for repos whose tests read HTTPBIN_URL (else offline
+    # ConnectionError -> false negative). After the test patch so a suite-
+    # provided conftest is never clobbered.
+    ensure_local_httpbin(repo, inst["repo"], env_kind, env_vars)
     # One deterministic test path for everything (env kind, django runner,
     # positional node ids, ensure-pytest, missing-module reflex).
     import test_runner as _tr
@@ -530,6 +605,7 @@ def run_one(inst):
     # Corrections: install spec-declared optional test deps (pandas/matplotlib),
     # version-matched, so importorskip-gated tests run instead of silently skipping.
     install_spec_extras(repo, b_state.get("active_env_kind", "uv"), b_state["env_vars"], inst["instance_id"])
+    ensure_local_httpbin(repo, inst["repo"], b_state.get("active_env_kind", "uv"), b_state["env_vars"])
     # -------- Phase 2: fix --------
     # STRICT setting: problem statement only — no FAIL_TO_PASS ids (those
     # tests mostly do not exist until the scoring test_patch is applied,
