@@ -24,6 +24,12 @@
       "docker_confirmed": false,
       "evidence": "home reused-venv: pin pyparsing==3.0.9 -> FAIL_TO_PASS test_legend_draggable collects+passes (2 passed). PENDING Docker confirmation before reclaim.",
       "root_cause": "same pyparsing warnings-as-errors collection error"
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25570",
+      "docker_confirmed": false,
+      "evidence": "home reused work-dir venv (model patch + test_patch applied, pandas 1.5.3 present): all 3 FAIL_TO_PASS test_empty_selection_pandas_output[list/bool/bool_int] now PASS (3 passed). Scored 3 skipped because pandas was absent at score time (results predate install_spec_extras). PENDING Docker confirmation before reclaim.",
+      "root_cause": "scikit-learn F2P tests are gated by pytest.importorskip(pandas); pandas not installed in the scored env -> tests SKIP -> a correct patch is scored UNRESOLVED. General fix install_spec_extras()+spec_extras.json (pandas<2.0.0) is now wired into run_one (line ~514) and active for current/future runs; this is a STALE pre-fix result."
     }
   ],
   "confirmed_real_misses": [
@@ -32,6 +38,20 @@
       "docker_confirmed_miss": true,
       "evidence": "ornith-corrected.mpl_audit.json:unresolved_ids",
       "note": "Docker eval on the model's prediction FAILS -> genuine miss. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25500",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified with pandas 1.5.3 present: F2P test_isotonic_regression_output_predict FAILS (AssertionError: y_pred is a DataFrame, not np.ndarray). Model patched sklearn/calibration.py, not the isotonic predict path -> genuine miss even without the skip. Not a false negative.",
+      "note": "Same importorskip(pandas) skip family as 25570, but the patch is actually WRONG, so it stays a miss with or without the env fix. Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "scikit-learn__scikit-learn-25638",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified with pandas 1.5.3 present: F2P test_confusion_matrix_pandas_nullable[Int64/Float64/boolean] FAIL (ValueError: mix of unknown and binary targets). Model patch does not fully fix -> genuine miss even without the skip. Not a false negative.",
+      "note": "Same importorskip(pandas) skip family as 25570, but the patch is actually WRONG, so it stays a miss with or without the env fix. Documented so future cycles do not re-investigate."
     }
   ]
 }
