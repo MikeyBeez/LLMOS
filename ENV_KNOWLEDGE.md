@@ -153,3 +153,32 @@ for-byte unchanged), stderr-buried summary, collection-error-only, collection-er
 harness observability strings must target the *semantic* result line, not a positional
 last line, because subprocess stream interleaving is not stable. Inert for a running
 process (module imported once); active on relaunch and for all future runs.
+
+## 11. Full scorer output persisted for offline false-negative triage
+
+The final FAIL_TO_PASS scorer output used to be thrown away: run_tests kept only
+score_tail (one line) and result["stdout"] (last 1500 chars, not persisted to
+results). Twice this loop was blocked triaging a miss because the tail was
+uninformative (e.g. bare "rootdir: /home/bard/swe/work/<id>" for several
+pytest-dev misses that actually hit ModuleNotFoundError/collection-error) —
+distinguishing an env-collection FALSE NEGATIVE from a real miss then required a
+full re-run (Docker, cold-cache, deadlock-prone).
+
+Fix (commit e221321): run_tests takes an optional log_path; score() passes
+~/swe/score_logs/<instance_id>.log. _write_score_log writes the FULL scorer
+stdout+stderr with a header (cmd / exit / ok). Properties:
+  - TELEMETRY-ONLY: write-only, returns None, wrapped in try/except so a fs
+    error cannot disturb scoring. ok/passed/exit/tail computed exactly as before
+    (verified byte-identical with vs without log_path).
+  - NO ANSWER LEAKAGE: it is the scorer's own test output written to disk for the
+    operator; never feeds the model.
+  - Inert for an already-running runner (module imported once); active on
+    relaunch / all future runs. No relaunch was done for a telemetry change.
+
+Triage workflow going forward: for any post-relaunch miss, read
+~/swe/score_logs/<id>.log to see the real failure. Signatures that mark a likely
+FALSE NEGATIVE (env/collection, not a wrong patch): "found no collectors",
+"errors during collection", "ModuleNotFoundError"/"ImportError" at collection,
+"collected 0 items". Confirm via Docker (docker_eval_guard.sh) before flipping in
+swe_false_negatives.json. A wrong-patch real miss instead shows the target test
+"FAILED"/"X failed" after a clean collection.
