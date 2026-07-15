@@ -507,3 +507,35 @@ reconstructing RESOLVED 26011 (base+model+test) -> `1 passed` under pytest 7.4.4
 General pattern: in a warnings-as-errors suite, the test runner is a version-sensitive
 dependency like any other; pin it to the era of the code under test. See
 engineering-patterns.json entry #15.
+
+
+## 22. sympy misses are the verification FRONTIER, not an env false-negative family (verify before assuming env)
+
+The remaining benchmark to-do is dominated by django (93) and sympy (56); sympy also has
+11 of the current 86 misses. Before chasing a sympy env-FN family (as legitimately existed for
+matplotlib/sphinx/sklearn/requests), home-verify. This cycle re-ran FAIL_TO_PASS in each retained
+work-dir venv (model+test patch applied) for the 7 verifiable sympy misses:
+
+  24102 (Mathematica parser: parenthesized function-arg -> multiplication instead of a call)
+  22005 (solver raises NotImplementedError on the target input)
+  21847 (wrong monomial set)
+  20639 (pretty-print layout of a nested radical/power)
+  21171 (latex parenthesization of a nested power)
+  21379 (genuine PolynomialError triggered by the model change)
+  23191 (model edited ONLY a test file -> no source fix)
+  (24909 unverifiable this cycle: its work-dir venv was cleaned/overwritten.)
+
+Result: ALL reproduce as GENUINE, DETERMINISTIC failures. sympy is NOT a warnings-as-errors suite;
+the envs are healthy; there is NO NO_COLLECTORS / skip / network / fatal-warning signature anywhere.
+
+Frontier signature (distinct from every env-FN family in secs 8/13/14/15/16/18/21):
+  env_ok=true, healthy interpreter, score_tail "N failed, M warnings in <1s",
+  often fix_verified_by_model=true.
+The self-verify is systematically OVER-OPTIMISTIC: the model tests the happy path it just
+implemented, while the maintainers' hidden F2P exercises an adversarial/edge case (parenthesized
+args, cross-terms, nested-power printing). This is Issue #2 (declared-wrong), not Issue #1 (env-FN).
+
+ACTION for the loop: do NOT build a sympy env-pin / spec_extras fix -- there is nothing to pin.
+Spend sympy/parsing/printing effort on a stronger ACCEPTANCE signal (run the repo's own nearby
+pre-existing tests; generate adversarial cases) instead of trusting the model's own repro.
+Recorded all 7 in swe_false_negatives.json:confirmed_real_misses so future cycles skip re-auditing.

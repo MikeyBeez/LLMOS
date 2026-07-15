@@ -104,6 +104,62 @@
       "home_verified_miss": true,
       "evidence": "home-verified in the retained work-dir (model+test patch applied). Scored NO_COLLECTORS via the standard pyparsing sub-cause. After the standard pins (pyparsing<3.1, setuptools_scm<8, -vcs_versioning) collection is restored and the target test test_artist.py::test_format_cursor_data_BoundaryNorm RUNS and FAILS with a real AssertionError at test_artist.py:411 (pytest version was not the blocker here; still fails under both pytest 9.1.1 and pinned 7.4.4). Model patch (try/except ValueError around norm.inverse) is insufficient. Genuine miss, not a false negative.",
       "note": "Same matplotlib NO_COLLECTORS score signature but a real miss once the env is cleared. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "sympy__sympy-24102",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "Mathematica parser: a parenthesized function-argument case parses as a multiplication instead of a function application -> deterministic AssertionError on a case the model self-verify did not cover. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-22005",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "solvers: the guarded branch the model added raises NotImplementedError on the target input -> deterministic failure. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21847",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "polys/monomials: the produced monomial set differs from expected -> deterministic set-inequality AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-20639",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "pretty-printing of a nested radical/power: output layout mismatch -> deterministic AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21171",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "latex printing: parenthesization of a nested power is wrong -> deterministic AssertionError. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-21379",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": true,
+      "evidence": "the model change triggers a genuine PolynomialError on the F2P input -> deterministic failure. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
+    },
+    {
+      "id": "sympy__sympy-23191",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "self_verified_by_model": false,
+      "evidence": "model modified ONLY a test file (no source fix) -> guaranteed miss; F2P fails deterministically. home-verified this cycle in the retained work-dir venv (model+test patch applied); F2P re-run reproduces the failure DETERMINISTICALLY. sympy is not a warnings-as-errors suite and the env is healthy (no NO_COLLECTORS/skip/network signature) -> genuine miss, NOT a false negative. sympy misses belong to the Issue #2 declared-wrong verification frontier, not the Issue #1 env-FN frontier. Documented so future cycles do not re-audit.",
+      "note": "sympy verification-frontier real miss (cycle 2026-07-15). No env fix applies."
     }
   ]
 }
