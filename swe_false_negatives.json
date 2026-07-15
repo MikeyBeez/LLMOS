@@ -21,9 +21,10 @@
   },
   {
    "id": "matplotlib__matplotlib-23913",
-   "docker_confirmed": false,
+   "docker_confirmed": true,
    "evidence": "home reused-venv: pin pyparsing==3.0.9 -> FAIL_TO_PASS test_legend_draggable collects+passes (2 passed). PENDING Docker confirmation before reclaim.",
-   "root_cause": "same pyparsing warnings-as-errors collection error"
+   "root_cause": "same pyparsing warnings-as-errors collection error",
+   "docker_evidence": "AUTHORITATIVE swebench.harness.run_evaluation (SWE-bench_Lite, run_id=mpl23913_reclaim3, 2026-07-15) on the model OWN prediction (ornith-corrected): resolved=true, patch_successfully_applied=true, 2/2 FAIL_TO_PASS (test_legend_draggable[True], test_legend_draggable[False]) + ALL ~105 PASS_TO_PASS green, 0 failures/0 errors. Report: ~/swe/logs/run_evaluation/mpl23913_reclaim3/ornith-corrected/matplotlib__matplotlib-23913/report.json (+ summary ornith-corrected.mpl23913_reclaim3.json). Confirms the matplotlib NO_COLLECTORS pyparsing warnings-as-errors false-negative: at home score time too-new pyparsing raised PyparsingDeprecationWarning -> fatal under filterwarnings=error -> collection died -> a correct patch scored UNRESOLVED. General fix pin_warn_as_error_deps (pyparsing<3.1) hardens the live scorer. Prebuilt image swebench/sweb.eval.x86_64.matplotlib_1776_matplotlib-23913 (11.8GB) pulled slowly on shared wifi; prepull cap fired then run_evaluation resumed cached layers and completed the eval in ~11min."
   },
   {
    "id": "scikit-learn__scikit-learn-25570",
