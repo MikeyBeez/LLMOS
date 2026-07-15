@@ -288,12 +288,51 @@ def _run_with_missing_module_reflex(cmd, repo, env, env_dir, max_installs=4):
     return r
 
 
+# --- Env-faithfulness correction for warnings-as-errors repos -----------------
+# Some repos run with `filterwarnings = error`. A too-new *pure-python* dep can
+# emit a DeprecationWarning at import time that becomes fatal and turns test
+# COLLECTION into "found no collectors" -- scoring a CORRECT patch as a miss
+# (false negative; Docker-confirmed on matplotlib 23913/23964/23987/24149).
+# Pin such deps back to an era-compatible version. General, repo-level; derived
+# from package behaviour, never from any instance's answer.
+WARN_AS_ERROR_DEP_PINS = {
+    # matplotlib 3.x calls pyparsing's camelCase API (enablePackrat/setParseAction);
+    # pyparsing >=3.1 raises PyparsingDeprecationWarning on those -> fatal under
+    # matplotlib's filterwarnings=error. <3.1 keeps the API but stays silent.
+    "matplotlib/matplotlib": ["pyparsing<3.1"],
+}
+
+
+def pin_warn_as_error_deps(repo_dir, repo_name, env_kind="uv", env_vars=None):
+    """Downgrade too-new pure-python deps that break test collection under a
+    warnings-as-errors repo. Env-layer; general (repo-level); never touches the
+    answer. Returns the applied pins (empty if repo unaffected)."""
+    pins = WARN_AS_ERROR_DEP_PINS.get(repo_name)
+    if not pins:
+        return []
+    env_dir = ".condaenv" if env_kind == "conda" else ".venv"
+    py = os.path.join(repo_dir, env_dir, "bin", "python")
+    if not os.path.exists(py):
+        return []
+    env = os.environ.copy(); env.update(env_vars or {})
+    quoted = " ".join('"%s"' % p for p in pins)
+    r = subprocess.run('"%s" -m pip install %s' % (py, quoted),
+                       shell=True, cwd=repo_dir, capture_output=True, text=True,
+                       timeout=600, env=env)
+    print(" -- warn-as-error dep pins (%s): %s" % (
+        "ok" if r.returncode == 0 else "FAIL", pins), flush=True)
+    return pins
+
+
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
     # collection ERROR (astropy makes warnings fatal) and produced a false
     # resolved=False on astropy-14995 (manual rescore: FTP + 6 P2P all pass).
     shutil.rmtree(os.path.join(repo, ".hypothesis"), ignore_errors=True)
+    # Warnings-as-errors repos: pin era-compatible pure-python deps so an
+    # unrelated DeprecationWarning cannot turn collection into a false negative.
+    pin_warn_as_error_deps(repo, inst["repo"], env_kind, env_vars)
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
