@@ -158,6 +158,21 @@ def _reproduction_strength(script):
     return "weak"
 
 
+# Repo-agnostic test / test-infra path detector. A candidate patch that only
+# touches test paths can never resolve a SWE-bench instance (the scoring
+# FAIL_TO_PASS tests are held out), so such a patch must be refused at edit time
+# and must not satisfy the submit gate. pytest keeps its own suite under
+# testing/ (not tests/) and conftest.py is test infrastructure; both were
+# missed by the older (^|/)tests?/ regex.
+_TEST_PATH_RE = re.compile(
+    r"(^|/)(tests?|testing)/|(^|/)test_|_test\.py$|(^|/)conftest\.py$")
+
+
+def _is_test_path(path):
+    """True if `path` is a test or test-infra file (repo-agnostic)."""
+    return bool(_TEST_PATH_RE.search(str(path or "")))
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -184,8 +199,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                               text=True, timeout=timeout, env=env)
 
     def _diff_nonempty():
-        r = _run("git diff --stat", timeout=60)
-        return bool((r.stdout or "").strip())
+        # Gate helper: the working tree must contain at least one changed
+        # NON-TEST source file. Editing only tests/conftest can never resolve a
+        # SWE-bench instance, so a test-only diff must NOT satisfy the gate.
+        r = _run("git diff --name-only", timeout=60)
+        files = [f for f in (r.stdout or "").splitlines() if f.strip()]
+        return any(not _is_test_path(f) for f in files)
 
     def _gate():
         state["fix_verified"] = (state["seen_red"] and state["repro_green"]
@@ -338,7 +357,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         path = str(args.get("file", ""))
         old = str(args.get("old_snippet", ""))
         new = str(args.get("new_snippet", ""))
-        if re.search(r"(^|/)tests?/|/test_|_test\.py$", path):
+        if _is_test_path(path):
             return {"error": "refusing to edit a test file — fix the source, "
                              "not the tests"}
         full = os.path.join(repo_dir, path)
