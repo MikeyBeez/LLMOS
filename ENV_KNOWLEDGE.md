@@ -440,3 +440,30 @@ returns True on modern runtests.py and False on old/missing source. Live runner
 imported the module once, so the fix is INERT for the current 300-run and active
 on the next fresh/relaunched run; a relaunch would extend correct django scoring
 to the remaining to-do django instances.
+
+
+## 20. Fault-local regression-baseline sampling (swe_fix_tools._capture_baseline)
+
+The fix-loop captures a pre-patch 'baseline' of PASSING neighbor tests and reruns
+them after the patch; any that flip to failing are surfaced to the model as a
+regression warning (advisory; NOT part of the submit gate, and never part of
+score()). The baseline previously sampled the FIRST 6 distinct test files in
+pytest --collect-only order, which is top-of-tree/alphabetical -> in large repos
+(django, sympy) those files are unrelated to the code the model edits, so a
+locally-introduced regression was almost never in the sample and the acceptance/
+regression signal was near-worthless (a contributor to the Issue #2 'declared-
+wrong' verification frontier and Issue #4 thrash).
+
+FIX (commit 845b72e): h_reproduce now passes the reproduction traceback's in-repo
+frames (via _repo_frames) as hint paths; new module-level pure helpers
+_fault_proximity()/_rank_test_files() rank candidate test files by proximity to
+the fault (same dir +5, each shared leading path segment +1, module-name match
+e.g. test_expr.py<->expr.py +3) and take the top 6. STABLE: with no hints every
+score is 0, so selection is byte-identical to the old first-N behavior
+(unit-verified against a replica of the old inline selection). STEERING-ONLY and
+leakage-safe: score() uses test_runner directly (untouched); FAIL_TO_PASS tests
+fail pre-patch so they can never enter the passing-baseline; the neighbor ids
+shown to the model are PASS_TO_PASS-like, not the graded hidden tests. 15/15 unit
+asserts pass; py_compile OK; module import + make_fix_handlers construction OK.
+INERT for the current 300-run (module imported once); active on relaunch/fresh
+runs and in any rescore that reconstructs fix handlers.
