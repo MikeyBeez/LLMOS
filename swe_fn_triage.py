@@ -17,8 +17,8 @@ WHAT IT DOES
 ------------
 Classifies every completed instance in results_full300.json into exactly one
 bucket, reconciles the buckets against the total (asserts nothing is dropped),
-cross-references the Docker-confirmed FN manifest (swe_false_negatives.json) to
-show the reclaim backlog, and -- most importantly -- surfaces a REVIEW bucket:
+cross-references the manifest (swe_false_negatives.json) -- Docker-confirmed FNs
+AND adjudicated real misses -- to show the TRUE reclaim backlog, and -- most importantly -- surfaces a REVIEW bucket:
 any miss whose score_tail looks like an env/collection anomaly but does NOT match
 a catalogued family.  A non-empty REVIEW bucket is the "possible new FN family"
 radar the loop keeps needing.
@@ -145,6 +145,21 @@ def load_confirmed(manifest_path):
     return out
 
 
+def load_real_misses(manifest_path):
+    """Instances ADJUDICATED as genuine misses (home- or Docker-verified) in the
+    manifest's confirmed_real_misses. Their score_tail can still carry a
+    reclaimable-family signature (matplotlib NO_COLLECTORS, sklearn
+    importorskip-skip, ...) because the env artifact is what got scored -- but the
+    underlying patch is WRONG, so they are NOT reclaim candidates. Subtracting
+    them keeps the report from sending future cycles to Docker-confirm
+    already-settled misses. Public ids only (answer-leakage-safe)."""
+    try:
+        m = json.load(open(manifest_path))
+    except Exception:
+        return set()
+    return {e["id"] for e in m.get("confirmed_real_misses", []) if e.get("id")}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results", default=DEFAULT_RESULTS)
@@ -154,6 +169,7 @@ def main():
 
     data = json.load(open(args.results))
     confirmed = load_confirmed(args.manifest)
+    real_misses = load_real_misses(args.manifest)
     row_by_id = {row["id"]: row for row in data}
 
     buckets = collections.defaultdict(list)   # family -> [ids]
@@ -182,8 +198,10 @@ def main():
                     "count": len(buckets[f]),
                     "ids": sorted(buckets[f]),
                     "reclaimable_docker_confirmed": sorted(set(buckets[f]) & confirmed),
+                    "adjudicated_real_miss": sorted(set(buckets[f]) & real_misses)
+                        if kind_of[f] == "reclaimable_fn" else [],
                     "reclaimable_pending": sorted(
-                        set(buckets[f]) - confirmed) if kind_of[f] == "reclaimable_fn" else [],
+                        set(buckets[f]) - confirmed - real_misses) if kind_of[f] == "reclaimable_fn" else [],
                 }
                 for f in fam_order
             },
@@ -202,10 +220,12 @@ def main():
         line = f"{len(ids):3d}  {f:<28s} [{kind}]"
         if kind == "reclaimable_fn":
             conf = sorted(set(ids) & confirmed)
-            pend = sorted(set(ids) - confirmed)
+            adj_rm = sorted(set(ids) & real_misses)
+            pend = sorted(set(ids) - confirmed - real_misses)
             reclaimable_total += len(ids)
             pending_total += len(pend)
-            line += f"  docker_confirmed={len(conf)} pending={len(pend)}"
+            line += (f"  docker_confirmed={len(conf)}"
+                     f" real_miss={len(adj_rm)} pending={len(pend)}")
         print(line)
         # show the signature makeup for the non-resolved buckets (compact)
         if kind != "resolved":
@@ -214,13 +234,14 @@ def main():
         # informational only: self_verified split of the pending backlog. self_verified
         # is NOT a reclaim filter -- Docker-confirmed FNs 5227/25570 are self_verified=False.
         if kind == "reclaimable_fn":
-            _pend = sorted(set(ids) - confirmed)
+            _pend = sorted(set(ids) - confirmed - real_misses)
             if _pend:
                 _svt = sum(1 for _i in _pend if row_by_id[_i].get("fix_verified_by_model"))
                 print(f"        pending self_verified: True={_svt} False={len(_pend) - _svt}"
                       "  (informational; Docker authoritative, self_verified NOT a filter)")
     print("=" * 72)
-    print(f"reclaimable_fn: {reclaimable_total} total, {pending_total} pending Docker confirm")
+    print(f"reclaimable_fn: {reclaimable_total} total, {pending_total} pending Docker confirm "
+          f"({reclaimable_total - pending_total} already adjudicated = docker-confirmed FN or real-miss)")
     review = [f for f in fam_order if kind_of[f] == "review"]
     if any(buckets[f] for f in review):
         print("\n!! REVIEW bucket non-empty -- inspect for a NEW FN family:")
