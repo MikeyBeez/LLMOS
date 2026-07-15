@@ -206,6 +206,27 @@ def _pytest_major(py, repo_dir, env):
     return major
 
 
+_DJANGO_PARALLEL_CACHE = {}
+
+def _django_supports_parallel(repo_dir):
+    """django tests/runtests.py has accepted --parallel since Django 1.9.
+    Detect support from the runtests.py source (static read, no subprocess) so
+    the flag is only added when supported -- version-gated exactly like
+    _pytest_major gates --no-header, so an older django can never be handed an
+    unrecognized flag (which would run zero tests -> false miss)."""
+    key = repo_dir
+    if key in _DJANGO_PARALLEL_CACHE:
+        return _DJANGO_PARALLEL_CACHE[key]
+    supported = False
+    try:
+        with open(os.path.join(repo_dir, 'tests/runtests.py')) as fh:
+            supported = '--parallel' in fh.read()
+    except Exception:
+        supported = False
+    _DJANGO_PARALLEL_CACHE[key] = supported
+    return supported
+
+
 def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
               timeout=600, max_installs=4, diagnose=False, log_path=None):
     """Run the given test node ids and report pass/fail. THE single test
@@ -220,7 +241,14 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
     if repo == "django/django" and os.path.isfile(
             os.path.join(repo_dir, "tests/runtests.py")):
         labels = " ".join(f'"{_django_label(t, repo_dir)}"' for t in ids)
-        cmd = f'{py} tests/runtests.py {labels} -v 0'
+        # Force SERIAL execution: django runtests.py defaults to a parallel
+        # worker pool; on a failing test it cannot pickle the traceback,
+        # crashes the pool on teardown, and DROPS the OK/FAILED result
+        # summary (score_tail becomes a bare ResourceWarning) -- corrupting
+        # FN triage and risking a passing patch scoring as a miss. Serial
+        # matches the authoritative SWE-bench django harness. Version-gated.
+        par = ' --parallel 1' if _django_supports_parallel(repo_dir) else ''
+        cmd = f'{py} tests/runtests.py {labels} -v 0{par}'
     else:
         ids = _resolve_bare_ids(repo_dir, ids)
         nodes = " ".join(f'"{t}"' for t in ids)   # POSITIONAL, never -k
