@@ -373,12 +373,25 @@ httpbin-dependent F2P raises ConnectionError -- independent of whether the model
 correct. Same class as the matplotlib/sphinx/sklearn env-FN families (the test can't even run),
 just over the network instead of at collection.
 
-General fix (NOT yet wired into the live scorer): for psf/requests, install pytest-httpbin,
+General fix (SHIPPED 2026-07-15, commit 9bab933, ensure_local_httpbin in swe_agent_v2.py): for psf/requests, install pytest-httpbin,
 start its bundled local httpbin Flask app on 127.0.0.1 (threaded), and export HTTPBIN_URL to
 that URL BEFORE pytest starts (the module reads HTTPBIN at import time, so a fixture is too late).
 Tests that scheme-swap http->https on the SAME netloc (e.g. test_mixed_case_scheme_acceptable)
 additionally need HTTPS on the same host -- use pytest-httpbin's dual http+https serving (or real
 httpbin.org connectivity).
+
+SHIPPED mechanism (general, reusable): the harness writes a repo-root conftest.py whose MODULE
+BODY (not a fixture) starts the bundled local httpbin and sets HTTPBIN_URL. pytest imports
+conftest.py BEFORE it collects/imports the test modules, so this is the earliest hook that still
+beats the test's import-time os.environ.get('HTTPBIN_URL') read -- a session-scoped fixture runs
+too late. The server thread is daemon (+atexit stop) so a lingering serve_forever can never hang
+pytest at exit. The conftest is UNTRACKED, so it never enters the model's git-diff patch and
+carries no instance data. ensure_local_httpbin() runs in score() (AFTER the test patch, so a
+suite-provided conftest is never clobbered) and in run_one() after install_spec_extras (phase-2
+self-verify). Verified through the shipped path: requests-2148 F2P 3-fail -> 10 passed; real-miss
+requests-2317 stays 8 failed (no false positive); no-op for non-httpbin repos. Transferable lesson:
+when a suite reads config from the ENVIRONMENT at import time, inject via a repo-root conftest
+module body, not a fixture.
 
 Triage / discrimination method (leakage-safe -- no gold/test-patch content to the model):
 in the retained work-dir (model+test patch already applied), `pip install pytest-httpbin`, run

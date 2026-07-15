@@ -25,4 +25,9 @@ Resolved fixes in this package have touched:
 
 ## Gotchas
 
-- _(add as you hit them)_
+- Tests read `HTTPBIN = os.environ.get('HTTPBIN_URL', 'http://httpbin.org/')` at IMPORT. Offline,
+  every httpbin endpoint test (test_HTTP_200_OK_*, test_BASICAUTH_*, test_POSTBIN_*, ...) raises
+  ConnectionError and a correct patch scores as a miss. The harness auto-wires a local server
+  (pytest-httpbin + a repo-root conftest that sets HTTPBIN_URL) via ensure_local_httpbin() -- nothing
+  to do manually. Do NOT "fix" a requests miss by editing network code before confirming the F2P
+  actually reach a live server; the failure is usually the environment, not the patch.
