@@ -331,7 +331,13 @@ WARN_AS_ERROR_DEP_PINS = {
     # pyparsing is pinned. Downgrade to the self-contained setuptools-scm 7.x AND
     # remove the orphaned vcs-versioning so the native (silent) scheme is used.
     # A spec written as "-pkg" means uninstall pkg.
-    "matplotlib/matplotlib": ["pyparsing<3.1", "setuptools_scm<8", "-vcs_versioning"],
+    # Third cause, same NO_COLLECTORS symptom: uv resolves pytest to the LATEST
+    # (9.x / >=8.4), which raises PytestRemovedIn10Warning for an unrelated same-
+    # file test that passes a generator to @parametrize (e.g. test_rcparams.py::
+    # test_validator_valid) -> fatal under matplotlib filterwarnings=error -> the
+    # whole module fails to collect -> a correct target patch is scored a miss.
+    # Pin to the era-appropriate pytest 7.x (still supports --no-header).
+    "matplotlib/matplotlib": ["pyparsing<3.1", "setuptools_scm<8", "-vcs_versioning", "pytest<8"],
 }
 
 

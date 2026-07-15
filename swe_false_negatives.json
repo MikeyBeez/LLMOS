@@ -90,6 +90,20 @@
       "home_verified_miss": true,
       "evidence": "home-verified against a LOCAL httpbin (HTTPBIN_URL -> 127.0.0.1, requests 2.4.3): all 8 FAIL_TO_PASS still FAIL with 'TypeError: isinstance() ...' from the model's patched requests/compat.py -- a genuine code defect that fails even with network fixed. Same requests+httpbin score signature ('8 failed in 0.62s') but NOT a false negative.",
       "note": "Local-httpbin re-run cleanly discriminates the requests httpbin-network FN family (2148/2674 pass) from real misses (2317 fails with a TypeError). Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "matplotlib__matplotlib-23299",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified through the SHIPPED scorer path (test_runner.run_tests, model+test patch applied). Scored NO_COLLECTORS. Root env cause was a THIRD sub-cause: venv had pytest 9.1.1, which raises PytestRemovedIn10Warning for an unrelated same-file test (test_rcparams.py::test_validator_valid passes a generator to @parametrize) -> fatal under matplotlib filterwarnings=error -> whole module fails to collect. After the shipped pin_warn_as_error_deps (now includes pytest<8 -> pytest 7.4.4) collection is RESTORED and the target test test_no_backend_reset_rccontext RUNS and FAILS with a real AssertionError (rcParams backend reset to 'agg'). Model patch (get_backend -> dict.__getitem__(rcParams,'backend')) is insufficient. Genuine miss, not a false negative.",
+      "note": "Surfaced the pytest-9.x PytestRemovedIn10Warning third sub-cause of the matplotlib NO_COLLECTORS family; the general fix (pytest<8 in WARN_AS_ERROR_DEP_PINS, commit below) hardens the scorer but does NOT reclaim this instance. Documented so future cycles do not re-audit it."
+    },
+    {
+      "id": "matplotlib__matplotlib-22835",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified in the retained work-dir (model+test patch applied). Scored NO_COLLECTORS via the standard pyparsing sub-cause. After the standard pins (pyparsing<3.1, setuptools_scm<8, -vcs_versioning) collection is restored and the target test test_artist.py::test_format_cursor_data_BoundaryNorm RUNS and FAILS with a real AssertionError at test_artist.py:411 (pytest version was not the blocker here; still fails under both pytest 9.1.1 and pinned 7.4.4). Model patch (try/except ValueError around norm.inverse) is insufficient. Genuine miss, not a false negative.",
+      "note": "Same matplotlib NO_COLLECTORS score signature but a real miss once the env is cleared. Documented so future cycles do not re-audit it."
     }
   ]
 }

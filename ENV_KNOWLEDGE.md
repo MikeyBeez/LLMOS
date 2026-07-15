@@ -467,3 +467,43 @@ shown to the model are PASS_TO_PASS-like, not the graded hidden tests. 15/15 uni
 asserts pass; py_compile OK; module import + make_fix_handlers construction OK.
 INERT for the current 300-run (module imported once); active on relaunch/fresh
 runs and in any rescore that reconstructs fix handlers.
+
+## 21. matplotlib NO_COLLECTORS — the THIRD cause: too-new pytest (PytestRemovedIn10Warning) under filterwarnings=error
+
+The matplotlib `NO_COLLECTORS` false-negative family (see §8/§16) has a third, independent
+dep sub-cause beyond `pyparsing>=3.1` and the `setuptools-scm 8+ / vcs-versioning` hijack:
+the **test runner itself**. A fresh uv env resolves pytest to the LATEST (observed 9.1.1;
+also 8.4+), and matplotlib's suite sets `filterwarnings=error`. On collection, pytest raises
+`pytest.PytestRemovedIn10Warning: Passing a non-Collection iterable to parametrize is
+deprecated` for any same-file test that hands a **generator** to `@pytest.mark.parametrize`
+(e.g. `lib/matplotlib/tests/test_rcparams.py::test_validator_valid`). That warning is fatal
+under warnings-as-errors, so the ENTIRE module fails to collect and the graded target test
+(a sibling in the same file) is reported as `found no collectors` -> a correct patch scores a
+miss.
+
+Signature: `score_tail` = `ERROR: found no collectors ...`; the persisted score log shows
+`E   pytest.PytestRemovedIn10Warning: Passing a non-Collection iterable to parametrize ...`
+during `ERROR collecting lib/matplotlib/tests/<file>.py`.
+
+Fix (commit below): `WARN_AS_ERROR_DEP_PINS["matplotlib/matplotlib"]` now includes `pytest<8`
+(era-appropriate 7.x; still supports the harness's `--no-header` version-gate), applied by
+`pin_warn_as_error_deps()` in `score()` before FAIL_TO_PASS. Downgrading to pytest 7.4.4
+does not emit the deprecation, so collection is restored.
+
+Triage this cycle (2 NEW uncatalogued matplotlib NO_COLLECTORS misses):
+- **23299** — pytest 9.1.1 was the blocker; after the pin the target
+  `test_no_backend_reset_rccontext` COLLECTS and FAILS with a real AssertionError (backend
+  reset to `agg`). Model patch (`get_backend -> dict.__getitem__(rcParams,'backend')`)
+  insufficient = REAL MISS (recorded in swe_false_negatives.json:confirmed_real_misses).
+- **22835** — blocker was the standard `pyparsing` cause; after the standard pins the target
+  `test_format_cursor_data_BoundaryNorm` COLLECTS and FAILS (AssertionError at
+  test_artist.py:411) under both pytest 9 and 7 = REAL MISS.
+
+So the fix HARDENS the scorer (prevents this masking on any matplotlib instance whose F2P
+shares a file with a generator-parametrize test) but reclaims neither — restoring collection
+is about scorer correctness, not manufacturing reclaims. No-regression verified by
+reconstructing RESOLVED 26011 (base+model+test) -> `1 passed` under pytest 7.4.4.
+
+General pattern: in a warnings-as-errors suite, the test runner is a version-sensitive
+dependency like any other; pin it to the era of the code under test. See
+engineering-patterns.json entry #15.
