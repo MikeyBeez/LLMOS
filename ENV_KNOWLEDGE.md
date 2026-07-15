@@ -539,3 +539,11 @@ ACTION for the loop: do NOT build a sympy env-pin / spec_extras fix -- there is 
 Spend sympy/parsing/printing effort on a stronger ACCEPTANCE signal (run the repo's own nearby
 pre-existing tests; generate adversarial cases) instead of trusting the model's own repro.
 Recorded all 7 in swe_false_negatives.json:confirmed_real_misses so future cycles skip re-auditing.
+
+
+## 23. Reproduction-strength advisory (verification frontier / declared-wrong)
+**Signature:** `outcome.fix_verified_by_model=true` but `resolved=false`; `score_tail` = "N failed ..."; env healthy (env_ok, no collection/skip/network/warning FN signature). Dominant in sympy/django.
+**Root cause (scaffold, not env):** the fix-loop submit gate in `swe_fix_tools.py` is `seen_red AND repro_green AND diff_nonempty`, ALL measured on the MODEL'S OWN reproduction. When the reproduction goes RED via an uncaught exception and GREEN merely because the exception stops (`assert True`, or no value assertion at all), the gate is satisfied without ever verifying the OUTPUT is correct — so the model declares while the hidden FAIL_TO_PASS (which check the value) fail. Poster child: sympy-24102 repro ends `assert True` after `parse_mathematica('λ')` — GREEN = "no crash", not "right parse".
+**Data (147 traces):** weak-reproduction rate = 68% of self-verified misses (28/41) vs 55% of self-verified resolves (24/44). Directional, NOT a clean classifier (correct crash-fixes legitimately lack value assertions) → ADVISORY, not a gate.
+**Fix (commit 644f3b2):** module-level pure `_reproduction_strength(script)` → `value_check` / `vacuous_constant` / `weak`; `h_verify_fix` adds advisory `result["repro_strength"]` and, at GREEN when not value_check, a steering `result["repro_note"]` urging an expected-VALUE assertion. STEERING-ONLY + leakage-safe: additions-only diff (50 ins / 0 del), never touches `ok`/`_gate()`/score (the scorer uses test_runner directly), reads only the model's own script. INERT until the runner is relaunched (module imported once).
+**Next:** on the next fresh/relaunched run, compare the declared-wrong rate for sympy/django with vs without the note; if it helps, consider promoting `vacuous_constant`-only-at-GREEN to a soft re-prompt before allowing submit (still never a hard block).
