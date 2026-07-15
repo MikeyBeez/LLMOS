@@ -2,13 +2,23 @@
 # docker_eval_guard.sh -- safe wrapper around the SWE-bench Docker eval for overnight audits.
 #
 # WHY: the AUTHORITATIVE SWE-bench Docker eval (swebench.harness.run_evaluation) can
-# DEADLOCK -- observed 2026-07-15 (multiple cycles): all Python threads parked in
-# futex_do_wait, ~1% CPU, 0 docker images / 0 build cache, NO progress. On 2026-07-15
-# ~09:53 CDT this was REPRODUCED even with a WARM registry and a SUCCESSFUL HuggingFace
-# dataset load (docker-py 7.1.0 handshake = 0.02s; CLI + low-level + high-level SDK builds
-# of a trivial image all succeed in <0.1s). So the hang is INSIDE run_evaluation's build
-# orchestration, BEFORE any build step dispatches -- not the network, not the SDK, not a
-# cold cache. An unguarded eval silently consumes an entire overnight cycle.
+# APPEAR hung for many minutes. CORRECTED DIAGNOSIS (2026-07-15 ~10:15 CDT, faulthandler
+# all-threads dump of the parked eval; see ENV_KNOWLEDGE sec.25): it is NOT an orchestration
+# deadlock. With the default namespace (swebench 4.x pulls PREBUILT images), build_container()
+# calls docker images.pull() of a ~2.5GB eval image; the WORKER thread parks in socket.readinto
+# streaming that pull while the MAIN thread waits in as_completed -- exactly the "~1% CPU, 0
+# images, empty run log, futex_do_wait" signature earlier cycles mislabeled a deadlock. PROOF:
+# an UNGUARDED run of pytest-dev__pytest-5227 COMPLETED in 259s (resolved=true). So these evals
+# do finish; they just need patience for a cold prebuilt-image pull.
+#
+# WATCHDOG CAVEAT: the progress token below (image count | containers | run-log bytes) is
+# INHERENTLY BLIND to an in-flight pull -- a partial image is not listed, and no container or
+# run-log exists until the pull finishes -- so ALL THREE stay frozen during a legitimate pull.
+# That is what falsely flagged working pulls as deadlocks. MITIGATION here: default --grace is
+# widened to 900s so a cold pull is not aborted; the hard --timeout (1800s) remains the real
+# backstop for a genuine hang. ROBUST REMEDY (recommended): pre-pull the prebuilt image
+# (docker pull swebench/sweb.eval.x86_64.<id-with __->_1776_>:latest) BEFORE the eval, so
+# run_evaluation's images.pull returns instantly and the token tracks the real test phase.
 #
 # This wrapper makes a hang FAIL FAST and VISIBLY:
 #   * validates the predictions file (exists, non-empty JSON list)
@@ -38,7 +48,7 @@ set -euo pipefail
 
 PREDS="" RUN_ID="" INSTANCES="" TIMEOUT=1800
 VENV="$HOME/swebench-venv" DATASET="SWE-bench/SWE-bench_Lite" WORKERS=1 DRY=0
-GRACE="${GRACE:-300}" SAMPLE="${SAMPLE:-20}" SELFTEST=0
+GRACE="${GRACE:-900}" SAMPLE="${SAMPLE:-20}" SELFTEST=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,9 +69,10 @@ done
 
 die() { echo "guard: $*" >&2; exit 3; }
 
-# --- progress probe: a token that STRICTLY GROWS while the eval does real work ---
-# During the observed deadlock NONE of these move; a real (even slow) build grows at least
-# one, so an unchanged token for GRACE seconds == deadlock.
+# --- progress probe: a token that GROWS while the eval RUNS TESTS ---
+# CAVEAT (2026-07-15): these three are ALL frozen during a prebuilt-image PULL (partial image
+# not listed; no container/run-log yet), so they only track the post-pull test phase. Keep
+# --grace above the largest expected cold pull; the hard --timeout is the true hang backstop.
 _progress_token() {
   local imgs conts logb
   imgs=$(docker images -q 2>/dev/null | wc -l | tr -d ' ')
