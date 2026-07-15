@@ -92,7 +92,7 @@ and you have to let it, correctly:
 
 - **scikit-learn** — needs numpy, scipy, pandas, matplotlib for its tests; pandas is a *test* extra (floor 1.0.5), not core. Era split: v0.20–0.22 → Python **3.6**; v1.3 → **3.9**. `NUMPY_MIN_VERSION` for v1.3 is `1.19.2`, which has no cp39 wheel → use `1.19.5`. The v1.3 pandas bugs cluster around the new `set_output` / `transform_output="pandas"` feature and nullable dtypes.
 - **astropy** — treats warnings as errors; its `conftest.py` imports matplotlib if it's installed. Do not add a too-new matplotlib. Canonical Python for the 5.x era is 3.9.
-- **matplotlib** — treats warnings as errors (`filterwarnings = error`). matplotlib 3.x calls pyparsing's camelCase API (`ParserElement.enablePackrat`, `setParseAction`); pyparsing **>=3.1** raises `PyparsingDeprecationWarning` on those, fatal at import → pytest reports `found no collectors` and a CORRECT patch is scored as a miss (false negative). The scorer now auto-pins `pyparsing<3.1` for matplotlib via `pin_warn_as_error_deps()` in `swe_agent_v2.py` (runs inside `score()` before FAIL_TO_PASS). Reclaimed FNs: 23913, 23964, 23987, 24149; 24265 is a REAL miss. Pattern is general: for any warnings-as-errors repo, an unrelated too-new *pure-python* dep can convert collection into a false negative — pin it era-compatible in `WARN_AS_ERROR_DEP_PINS`. Canonical era: matplotlib 3.5–3.6 → Python 3.9–3.11.
+- **matplotlib** — treats warnings as errors (`filterwarnings = error`). matplotlib 3.x calls pyparsing's camelCase API (`ParserElement.enablePackrat`, `setParseAction`); pyparsing **>=3.1** raises `PyparsingDeprecationWarning` on those, fatal at import → pytest reports `found no collectors` and a CORRECT patch is scored as a miss (false negative). The scorer now auto-pins `pyparsing<3.1` for matplotlib via `pin_warn_as_error_deps()` in `swe_agent_v2.py` (runs inside `score()` before FAIL_TO_PASS). Docker-confirmed false negatives (authoritative): 23964, 23987, 24149. Home-verified but PENDING Docker confirmation: 23913. Docker-confirmed REAL miss: 24265. Reclaim via the scoring-layer tool in §8. Pattern is general: for any warnings-as-errors repo, an unrelated too-new *pure-python* dep can convert collection into a false negative — pin it era-compatible in `WARN_AS_ERROR_DEP_PINS`. Canonical era: matplotlib 3.5–3.6 → Python 3.9–3.11.
 - **pytest** — import-machinery bugs (e.g. importlib double-import) are *Python-version sensitive*; run on the canonical interpreter or the bug won't reproduce as intended. 8.x era → 3.9.
 - *(add rows as you meet new repos)*
 
@@ -101,3 +101,17 @@ and you have to let it, correctly:
 ## 7. Meta
 
 - SWE-bench publishes the exact environment per instance (`MAP_REPO_VERSION_TO_SPECS`: Python + packages + install command). Using it is **legitimate** (the environment is given; only the gold patch / test patch / FAIL_TO_PASS are off-limits). But the *better* system **derives** the env from the repo's own evidence so it generalizes to any repo — use the spec only as the answer key to grade the deriver against, never as its input.
+
+
+---
+
+## 8. False-negative reclaim (scoring-layer correction)
+
+Some correct model patches are scored UNRESOLVED because of a harness/env artifact (chiefly the warnings-as-errors collection error in §6). These are FALSE NEGATIVES, not real misses. The **authoritative** arbiter is the SWE-bench Docker eval (`swebench.harness.run_evaluation`): re-run the model's OWN prediction patch there; if it resolves, the home miss was a false negative.
+
+Workflow (general, answer-leakage-safe — operates only on public instance ids + the resolved flag, never on gold/test patches):
+1. Docker-audit suspected FNs (`--predictions_path` = the model's own patches, `--max_workers 2`).
+2. For each Docker-CONFIRMED FN, add an entry to `~/Code/LLMOS/swe_false_negatives.json` with `docker_confirmed: true` and an `evidence` pointer to the audit artifact. Record Docker-confirmed real misses under `confirmed_real_misses` so future cycles don't re-audit them.
+3. At/after end-of-run, run `python3 ~/Code/LLMOS/reclaim_false_negatives.py --out <results>.corrected.json`. It flips only `docker_confirmed:true` records, writes a SEPARATE corrected file (it NEVER overwrites the live results — the runner rewrites the whole file per instance and would clobber an in-place edit), and prints before/after scores. `docker_confirmed:false` entries (e.g. home-verified only) are reported PENDING and left untouched.
+
+Current manifest: reclaim now — 23964/23987/24149; PENDING Docker confirmation — 23913; confirmed real miss — 24265. Extending to a new repo: Docker-confirm first, then add the entry (do not reclaim on home-reproduction alone).
