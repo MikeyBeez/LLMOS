@@ -595,6 +595,27 @@ def run_one(inst):
                                           gate=_boot_gate,
                                           checkpoint=ckpt)
     env_ok = env_ready(b_state)
+    if not env_ok and b_state.get("sanity_ok"):
+        # LAST-RESORT env check (general robustness): the model exhausted the
+        # BOOTSTRAP_BUDGET without landing a passing smoke test, but the env may
+        # be healthy -- a common failure mode is the model repeatedly picking
+        # smoke tests that fail to COLLECT (e.g. a module importing the
+        # CPython-internal _testcapi, absent from uv standalone builds) instead
+        # of a stable passing test. Give the env ONE deterministic
+        # auto_verify_env pass before discarding the whole instance.
+        # STRICTLY NON-WORSENING: only fires when the instance would otherwise
+        # be recorded env_ok=False (a total loss); reuses the exact accept
+        # logic already trusted for the model-driven auto path; leakage-safe
+        # (auto_verify_env excludes FAIL_TO_PASS, runs only generic tests).
+        try:
+            _lr = auto_verify_env(b_state, repo)
+            if _lr.get("ok"):
+                _lr_msg = _lr.get("auto_test") or (_lr.get("note") or "")[:60]
+                print(f" -- phase 1 last-resort auto_verify_env ACCEPTED env ({_lr_msg})",
+                      flush=True)
+        except Exception as _e:
+            print(f" -- last-resort auto_verify_env errored: {_e}", flush=True)
+        env_ok = env_ready(b_state)
     if not env_ok:
         # Save trace & bail out on this instance without spending fix budget.
         dt = time.time() - t0
