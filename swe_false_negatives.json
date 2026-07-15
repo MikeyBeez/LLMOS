@@ -27,9 +27,10 @@
   },
   {
    "id": "scikit-learn__scikit-learn-25570",
-   "docker_confirmed": false,
+   "docker_confirmed": true,
    "evidence": "home reused work-dir venv (model patch + test_patch applied, pandas 1.5.3 present): all 3 FAIL_TO_PASS test_empty_selection_pandas_output[list/bool/bool_int] now PASS (3 passed). Scored 3 skipped because pandas was absent at score time (results predate install_spec_extras). PENDING Docker confirmation before reclaim.",
-   "root_cause": "scikit-learn F2P tests are gated by pytest.importorskip(pandas); pandas not installed in the scored env -> tests SKIP -> a correct patch is scored UNRESOLVED. General fix install_spec_extras()+spec_extras.json (pandas<2.0.0) is now wired into run_one (line ~514) and active for current/future runs; this is a STALE pre-fix result."
+   "root_cause": "scikit-learn F2P tests are gated by pytest.importorskip(pandas); pandas not installed in the scored env -> tests SKIP -> a correct patch is scored UNRESOLVED. General fix install_spec_extras()+spec_extras.json (pandas<2.0.0) is now wired into run_one (line ~514) and active for current/future runs; this is a STALE pre-fix result.",
+   "docker_evidence": "AUTHORITATIVE swebench.harness.run_evaluation (SWE-bench_Lite, run_id=skl25570_reclaim, 2026-07-15) on the model OWN prediction: resolved=true, patch_successfully_applied=true, 3/3 FAIL_TO_PASS (test_empty_selection_pandas_output[list/bool/bool_int]) + ALL PASS_TO_PASS green, 0 failures/0 errors. Report: ~/swe/logs/run_evaluation/skl25570_reclaim/ornith-home/scikit-learn__scikit-learn-25570/report.json (+ summary ornith-home.skl25570_reclaim.json). Confirms the pandas-importorskip skip false-negative: the scored env lacked pandas -> F2P SKIP -> correct patch scored UNRESOLVED; install_spec_extras (pandas<2.0.0) now wired into run_one fixes future runs; this was a STALE pre-fix result. Eval pulled the prebuilt image swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-25570 (~slow wifi, prepull hit 1200s cap then run_evaluation resumed the cached layers and completed)."
   },
   {
    "id": "pytest-dev__pytest-5227",
