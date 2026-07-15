@@ -30,6 +30,12 @@
       "docker_confirmed": false,
       "evidence": "home reused work-dir venv (model patch + test_patch applied, pandas 1.5.3 present): all 3 FAIL_TO_PASS test_empty_selection_pandas_output[list/bool/bool_int] now PASS (3 passed). Scored 3 skipped because pandas was absent at score time (results predate install_spec_extras). PENDING Docker confirmation before reclaim.",
       "root_cause": "scikit-learn F2P tests are gated by pytest.importorskip(pandas); pandas not installed in the scored env -> tests SKIP -> a correct patch is scored UNRESOLVED. General fix install_spec_extras()+spec_extras.json (pandas<2.0.0) is now wired into run_one (line ~514) and active for current/future runs; this is a STALE pre-fix result."
+    },
+    {
+      "id": "pytest-dev__pytest-5227",
+      "docker_confirmed": false,
+      "evidence": "SHIPPED-SCORER-PATH verified: test_runner.run_tests (post --no-header version-gate fix) on the retained work-dir (model patch + test_patch applied) returns ok=True, exit=0, '3 passed' for the 3 FAIL_TO_PASS. Scored a miss purely because the pre-fix single test path appended --no-header, a pytest>=6.0 flag that pytest 4.4 rejects (exit 4, zero tests run). Stronger than a plain home-verify (runs the exact shipped code path). PENDING Docker confirmation before reclaim.",
+      "root_cause": "HARNESS scoring bug (not env): test_runner.run_tests appended --no-header (pytest>=6.0 only) to THE single test command; on pytest 4.x/5.x this is an 'unrecognized arguments' usage error -> exit 4, NO tests executed -> every old-pytest instance auto-scored UNRESOLVED regardless of patch correctness. Fixed by version-gating the flag (_pytest_major). Of 9 completed pytest<6 misses, ONLY 5227 flips to resolved; the other 8 are genuine misses (patch wrong)."
     }
   ],
   "confirmed_real_misses": [

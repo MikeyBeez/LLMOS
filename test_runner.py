@@ -184,6 +184,28 @@ def _write_score_log(log_path, cmd, exit_code, ok, out):
     return None
 
 
+_PYMAJOR_CACHE = {}
+
+def _pytest_major(py, repo_dir, env):
+    """Detected pytest MAJOR version for this interpreter (cached). Returns 0
+    when it cannot be determined so version-gated flags are omitted (safe)."""
+    key = os.path.join(repo_dir, py)   # repo_dir-qualified: relative py is identical across instances
+    if key in _PYMAJOR_CACHE:
+        return _PYMAJOR_CACHE[key]
+    major = 0
+    try:
+        r = subprocess.run(f'{py} -m pytest --version', shell=True, cwd=repo_dir,
+                           capture_output=True, text=True, timeout=60, env=env)
+        m = re.search(r'pytest\s+version\s+(\d+)', r.stdout + r.stderr) or \
+            re.search(r'pytest\s+(\d+)\.', r.stdout + r.stderr)
+        if m:
+            major = int(m.group(1))
+    except Exception:
+        major = 0
+    _PYMAJOR_CACHE[key] = major
+    return major
+
+
 def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
               timeout=600, max_installs=4, diagnose=False, log_path=None):
     """Run the given test node ids and report pass/fail. THE single test
@@ -202,7 +224,12 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
     else:
         ids = _resolve_bare_ids(repo_dir, ids)
         nodes = " ".join(f'"{t}"' for t in ids)   # POSITIONAL, never -k
-        cmd = f'{py} -m pytest {nodes} -p no:cacheprovider -q --no-header'
+        # --no-header is a pytest>=6.0 flag; on pytest 4.x/5.x it is an
+        # 'unrecognized arguments' usage error (exit 4) that runs NO tests,
+        # turning every old-pytest scoring run into a false miss. Gate it on
+        # detected pytest version so the single test path works on all eras.
+        hdr = '--no-header' if _pytest_major(py, repo_dir, env) >= 6 else ''
+        cmd = f'{py} -m pytest {nodes} -p no:cacheprovider -q {hdr}'.rstrip()
 
     installed = []
     tried = set()
