@@ -313,3 +313,38 @@ sphinx instances are already scored, so this fix yields nothing for the current 
 gain via a **targeted re-run of the 13 Sphinx <5 instances** (fresh env, so the model can actually
 verify) or on the next fresh full run. General lesson promoted to engineering-patterns.json
 (collection/version errors = env, not code) and to knowledge/sphinx-doc__sphinx.md (the pin recipe).
+
+
+## 16. matplotlib NO_COLLECTORS — the SECOND cause: setuptools_scm/vcs-versioning entry-point hijack
+
+Section 8/the WARN_AS_ERROR_DEP_PINS fix pinned `pyparsing<3.1` to stop matplotlib's
+`filterwarnings=error` from turning a `PyparsingDeprecationWarning` into a fatal collection
+error. But some matplotlib **dev builds** (e.g. 3.6.0.dev / 23314, 23476) compute
+`matplotlib.__version__` via `setuptools_scm.get_version()` **at import**
+(`lib/matplotlib/__init__.py::_get_version`). With `setuptools-scm` 8+ installed, the
+sibling package **`vcs-versioning`** registers the `release-branch-semver` version-scheme
+entry point as a *deprecation shim* (`vcs_versioning/_version_schemes/_standard.py`:
+"Version scheme 'release-branch-semver' has been renamed…"). matplotlib's `setup.py` still
+requests the old name, so the shim raises a `DeprecationWarning` -> fatal -> **collection
+dies even after pyparsing is pinned**. Same `found no collectors` symptom, different dep.
+
+Key subtlety: downgrading `setuptools_scm` to 7.x alone does **not** help while
+`vcs-versioning` is still installed — its entry point is still resolved. You must
+**uninstall** `vcs-versioning` (and use the self-contained 7.x line). It is also
+**version-dependent**: instances whose build reads a cached `_version.py` (e.g. 23987 with
+pyparsing already pinned) collect fine, so the extra pins are a harmless no-op there.
+
+Fix (commit d5c3348): `WARN_AS_ERROR_DEP_PINS["matplotlib/matplotlib"] =
+["pyparsing<3.1", "setuptools_scm<8", "-vcs_versioning"]`, and `pin_warn_as_error_deps`
+now parses `-pkg` specs as `pip uninstall -y pkg` (installs first, then removals). Verified
+end-to-end through the shipped function on a reset-to-broken 23314 venv: F2P
+`test_invisible_axes[png]` flips collection-error -> **1 passed**; no-op for django. Inert
+for the running process (module imported once) — active on relaunch/fresh runs, where it
+makes the LIVE scorer correct for this family without needing the reclaim manifest.
+
+Triage of the two newly-surfaced NO_COLLECTORS instances (both `found no collectors`):
+- **23314** = home-verified FALSE NEGATIVE (model self-verified; F2P passes once env cleared)
+  -> added to swe_false_negatives.json as `docker_confirmed=false` (PENDING, per the
+  23913/25570/5227 precedent; promote via Docker eval).
+- **23476** = REAL MISS (did not self-verify; once env cleared, F2P fails with a genuine
+  `AssertionError` on `Figure.dpi`) -> recorded in `confirmed_real_misses`.

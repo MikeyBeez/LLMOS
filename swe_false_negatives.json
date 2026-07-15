@@ -36,6 +36,12 @@
       "docker_confirmed": false,
       "evidence": "SHIPPED-SCORER-PATH verified: test_runner.run_tests (post --no-header version-gate fix) on the retained work-dir (model patch + test_patch applied) returns ok=True, exit=0, '3 passed' for the 3 FAIL_TO_PASS. Scored a miss purely because the pre-fix single test path appended --no-header, a pytest>=6.0 flag that pytest 4.4 rejects (exit 4, zero tests run). Stronger than a plain home-verify (runs the exact shipped code path). PENDING Docker confirmation before reclaim.",
       "root_cause": "HARNESS scoring bug (not env): test_runner.run_tests appended --no-header (pytest>=6.0 only) to THE single test command; on pytest 4.x/5.x this is an 'unrecognized arguments' usage error -> exit 4, NO tests executed -> every old-pytest instance auto-scored UNRESOLVED regardless of patch correctness. Fixed by version-gating the flag (_pytest_major). Of 9 completed pytest<6 misses, ONLY 5227 flips to resolved; the other 8 are genuine misses (patch wrong)."
+    },
+    {
+      "id": "matplotlib__matplotlib-23314",
+      "docker_confirmed": false,
+      "evidence": "SHIPPED-SCORER-PATH verified: reset the retained work-dir venv (model patch + test_patch applied) to the broken state (pyparsing 3.3.2 / setuptools-scm 10.2.0 / vcs-versioning 2.2.2), ran the shipped pin_warn_as_error_deps(matplotlib) -> pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed, then FAIL_TO_PASS test_invisible_axes[png] flips collection-error -> 1 passed. Model self-verified its fix (fix_verified_by_model=true). PENDING Docker confirmation before reclaim.",
+      "root_cause": "matplotlib NO_COLLECTORS family, SECOND cause: this matplotlib dev build computes __version__ via setuptools_scm.get_version() at import; setuptools-scm 8+ pulls vcs-versioning whose release-branch-semver entry-point deprecation shim raises DeprecationWarning -> fatal under filterwarnings=error, so collection dies even after pyparsing is pinned. Fixed generally in swe_agent_v2.py WARN_AS_ERROR_DEP_PINS (setuptools_scm<8 + -vcs_versioning; commit d5c3348)."
     }
   ],
   "confirmed_real_misses": [
@@ -58,6 +64,13 @@
       "home_verified_miss": true,
       "evidence": "home-verified with pandas 1.5.3 present: F2P test_confusion_matrix_pandas_nullable[Int64/Float64/boolean] FAIL (ValueError: mix of unknown and binary targets). Model patch does not fully fix -> genuine miss even without the skip. Not a false negative.",
       "note": "Same importorskip(pandas) skip family as 25570, but the patch is actually WRONG, so it stays a miss with or without the env fix. Documented so future cycles do not re-investigate."
+    },
+    {
+      "id": "matplotlib__matplotlib-23476",
+      "docker_confirmed_miss": false,
+      "home_verified_miss": true,
+      "evidence": "home-verified in a fully cleared env (pyparsing 3.0.9 / setuptools-scm 7.1.0 / vcs-versioning removed): F2P test_unpickle_with_device_pixel_ratio COLLECTS then FAILS with a real AssertionError (Figure.dpi == 294). Model did NOT self-verify (fix_verified_by_model=false, phase2 budget death). Genuine miss, not a false negative.",
+      "note": "Same matplotlib NO_COLLECTORS env signature (pyparsing + vcs-versioning cascade) as 23314, but once the env is cleared the patch is actually WRONG. Documented so future cycles do not re-audit it."
     }
   ]
 }

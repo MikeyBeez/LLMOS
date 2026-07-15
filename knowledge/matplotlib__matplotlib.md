@@ -28,3 +28,13 @@ Resolved fixes in this package have touched:
 ## Gotchas
 
 - _(add as you hit them)_
+
+
+### Gotcha: NO_COLLECTORS under warnings-as-errors has TWO dep causes
+1. `pyparsing>=3.1` -> `PyparsingDeprecationWarning` on matplotlib's camelCase API -> fatal.
+2. Dev builds call `setuptools_scm.get_version()` at import; `setuptools-scm` 8+ + the
+   `vcs-versioning` fork make the old `release-branch-semver` scheme name a fatal
+   `DeprecationWarning`. Downgrading setuptools-scm is not enough — **uninstall
+   vcs-versioning**. The harness clears both via `WARN_AS_ERROR_DEP_PINS`
+   (`pyparsing<3.1`, `setuptools_scm<8`, `-vcs_versioning`). Effect is version-dependent
+   (no-op where a cached `_version.py` is used).
