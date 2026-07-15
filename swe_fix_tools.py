@@ -124,6 +124,40 @@ def _rank_test_files(file_nids, hint_paths, limit=6):
     return [nid for _, (f, nid) in ranked[:limit]]
 
 
+def _reproduction_strength(script):
+    """Classify a reproduction's ACCEPTANCE strength (advisory only, never a gate).
+
+    Returns one of:
+      'value_check'      -> asserts an expected value/relation or a specific
+                            exception (assert x == y, assertEqual, pytest.raises)
+                            -> a meaningful RED->GREEN discriminator.
+      'vacuous_constant' -> the only assertion is a literal constant
+                            (assert True / assert 1) -> verifies nothing.
+      'weak'             -> no assertion, or only truthiness asserts; GREEN means
+                            only "no exception was raised".
+
+    Leakage-safe: inspects ONLY the model's own reproduction script text; no
+    gold/test-patch/FAIL_TO_PASS data is consulted. Used to steer the model, not
+    to change any score or the submit gate.
+    """
+    if not script:
+        return "weak"
+    body = "\n".join(re.sub(r"#.*$", "", ln) for ln in script.splitlines())
+    asserts = re.findall(r"\bassert\s+(.+)", body)
+    value_sig = (
+        bool(re.search(r"\bassert\b[^\n]*(==|!=|<=|>=|<|>| in | is | not in )", body))
+        or bool(re.search(r"\bassert(Equal|AlmostEqual|In|Is|ListEqual|Dict|Set|Regex|Raises|Greater|Less)\b", body))
+        or "np.testing" in body or "pytest.raises" in body or ".raises(" in body
+        or "assertRaises" in body)
+    only_const = bool(asserts) and all(
+        re.match(r"^\(?\s*(True|1)\s*\)?\s*$", a.strip()) for a in asserts)
+    if only_const:
+        return "vacuous_constant"
+    if value_sig:
+        return "value_check"
+    return "weak"
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -349,6 +383,22 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                            "diff_nonempty": _diff_nonempty(),
                            "no_regressions": not regressed,
                            "fix_verified": gate_ok}}
+        _strength = _reproduction_strength(state.get("repro_script") or "")
+        result["repro_strength"] = _strength
+        if green and _strength != "value_check":
+            if _strength == "vacuous_constant":
+                result["repro_note"] = (
+                    "Your reproduction's only assertion is a constant (e.g. "
+                    "assert True) and verifies nothing about the output; GREEN "
+                    "here means only 'no exception was raised'. If this bug is "
+                    "about producing a CORRECT value/format, rewrite the "
+                    "reproduction to assert the EXPECTED result before submitting.")
+            else:
+                result["repro_note"] = (
+                    "Your reproduction has no value assertion; GREEN here means "
+                    "only that no exception was raised. If the bug is about "
+                    "producing a CORRECT value/format (not just avoiding a crash), "
+                    "add an assertion on the expected result before submitting.")
         if regressed:
             result["warning"] = (f"your patch broke {len(regressed)} test(s) "
                                  f"that passed before: {regressed[:3]} — a "
