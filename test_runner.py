@@ -163,8 +163,29 @@ def _build_tail(out):
     return (summ or last)[:300]
 
 
+def _write_score_log(log_path, cmd, exit_code, ok, out):
+    """Persist the FULL final-scorer test output for offline false-negative
+    triage. TELEMETRY-ONLY: write-only side effect, returns None, and is fully
+    wrapped so any filesystem error can never disturb scoring. The content is
+    the scorer's own test stdout/stderr (same data score_tail is derived from);
+    it is written to disk for the operator and never feeds the model, so it
+    cannot leak answers or change ok/passed/exit/tail."""
+    try:
+        d = os.path.dirname(log_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        header = ("# score-log\n# cmd: %s\n# exit: %s  ok: %s\n%s\n"
+                  % (cmd, exit_code, ok, "-" * 60))
+        with open(log_path, "w") as fh:
+            fh.write(header)
+            fh.write(out)
+    except Exception:
+        pass
+    return None
+
+
 def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
-              timeout=600, max_installs=4, diagnose=False):
+              timeout=600, max_installs=4, diagnose=False, log_path=None):
     """Run the given test node ids and report pass/fail. THE single test
     execution path. Returns dict: ok, exit, passed, tail, installed."""
     env = _env(repo_dir, kind, env_vars)
@@ -218,6 +239,8 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
                                    and "FAILED" not in out and r.returncode == 0)
     ok = r.returncode == 0 and passed
     tail = _build_tail(out)
+    if log_path:
+        _write_score_log(log_path, cmd, r.returncode, ok, out)
     result = {"ok": ok, "exit": r.returncode, "passed": passed,
               "tail": tail, "stdout": (r.stdout or "")[-1500:],
               "installed": installed}

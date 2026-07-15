@@ -44,6 +44,7 @@ BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package i
 FIX_BUDGET      = 80
 WORK = os.path.expanduser("~/swe/work")
 TRACES = os.path.expanduser("~/swe/traces_v2")
+SCORE_LOGS = os.path.expanduser("~/swe/score_logs")  # full final-scorer output (telemetry only)
 
 
 def sh(cmd, cwd=None, timeout=300):
@@ -343,7 +344,8 @@ def score(inst, repo, env_vars, env_kind="uv"):
     # positional node ids, ensure-pytest, missing-module reflex).
     import test_runner as _tr
     res = _tr.run_tests(repo, env_kind, inst["FAIL_TO_PASS"],
-                        env_vars=env_vars, repo=inst["repo"], timeout=600)
+                        env_vars=env_vars, repo=inst["repo"], timeout=600,
+                        log_path=os.path.join(SCORE_LOGS, inst["instance_id"] + ".log"))
     return res["ok"], len(diff), res["tail"]
 
 
