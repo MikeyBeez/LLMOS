@@ -26,4 +26,4 @@ Resolved fixes in this package have touched:
 
 ## Gotchas
 
-- _(add as you hit them)_
+- SCORING: run `tests/runtests.py` with `--parallel 1`. Its default parallel worker pool cannot pickle a failing test's traceback -> crashes the pool on teardown, drops the `OK`/`FAILED (failures=N)` summary (score_tail becomes a bare `ResourceWarning: unclosed running multiprocessing pool`), and can perturb the exit code so a passing patch scores as a miss. Serial matches the authoritative SWE-bench harness. (test_runner._django_supports_parallel gates the flag; ENV_KNOWLEDGE sec.19.)

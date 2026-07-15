@@ -406,3 +406,37 @@ the model's patched requests/compat.py, even with httpbin up). 2148/2674 recorde
 swe_false_negatives.json as docker_confirmed=false (PENDING Docker confirm); 2317 in
 confirmed_real_misses. Resolved requests instances (3362/1963/863) have non-httpbin F2P and are
 unaffected.
+
+
+## 19. django runtests.py default PARALLELISM corrupts scoring (telemetry loss + latent false negative)
+
+Signature: a `django/django` miss whose `score_tail` is a bare
+`ResourceWarning: unclosed running multiprocessing pool <...Pool state=RUN pool_size=N>`
+with NO `FAILED (failures=N)` / `OK` summary (e.g. django-16820).
+
+Root cause (NOT env, NOT the patch): `tests/runtests.py` defaults to a
+multiprocessing worker pool. On any failing test the worker tries to pickle the
+traceback to ship it to the parent; when the traceback is unpicklable django
+prints `tracebacks cannot be pickled, making it impossible for the parallel test
+runner to handle this exception cleanly`, the pool is deleted while still RUN
+(the ResourceWarning), and the final result-summary line is dropped from output.
+Effects: (1) score_tail loses the count summary -> FN triage blinded; (2) on a
+run that WOULD be green a suppressed `OK` line or teardown-perturbed exit code
+can score a correct patch as a miss (false negative). Passing runs are unaffected
+(no traceback to pickle), so the defect hides on green instances.
+
+Fix (shipped, commit d275337): `test_runner.run_tests` now appends `--parallel 1`
+to the django `runtests.py` command, forcing serial execution — matching the
+authoritative SWE-bench django harness and making results deterministic.
+Version-gated via `_django_supports_parallel(repo_dir)` (a cached static read of
+`tests/runtests.py` for the string `--parallel`) so an older django that lacks the
+flag is never handed an unrecognized argument (which would run zero tests -> a
+false miss, exactly the `--no-header`/pytest<6 failure mode, sec.14).
+
+Verification (through the shipped run_tests scorer path): django-16820 verdict
+unchanged (ok=False) but tail flips ResourceWarning -> `FAILED (failures=7)`;
+resolved django-16527/16139 stay ok=True with tail `OK` (no regression); the gate
+returns True on modern runtests.py and False on old/missing source. Live runner
+imported the module once, so the fix is INERT for the current 300-run and active
+on the next fresh/relaunched run; a relaunch would extend correct django scoring
+to the remaining to-do django instances.
