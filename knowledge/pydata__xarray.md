@@ -12,9 +12,6 @@ _Seeded from 1 resolved run(s)._
 - Backend: uv
 - Common installs: numpy, pandas
 
-### Build answers found via web search
-
-- none needed so far.
 
 ## Fix landscape (orientation, NOT answers)
 

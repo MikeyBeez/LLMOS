@@ -12,9 +12,6 @@ _Seeded from 2 resolved run(s)._
 - Backend: uv
 - Common installs: setuptools, pytest
 
-### Build answers found via web search
-
-- none needed so far.
 
 ## Fix landscape (orientation, NOT answers)
 

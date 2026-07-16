@@ -12,14 +12,6 @@ _Seeded from 2 resolved run(s)._
 - Backend: uv
 - Common installs: mpmath
 
-### Build answers found via web search
-
-- **Q:** sympy core tests test_symbols.py test_str_repr
-  **A (snippet):** {"query": "sympy core tests test_symbols.py test_str_repr", "hits": [{"title": "Writing Tests - SymPy 1.14.0 documentation", "snippet": "Writing Tests \u00b6 The most important thing for a mathematica
-- **Q:** site:github.com sympy physics units tests "test_bases"
-  **A (snippet):** {"query": "site:github.com sympy physics units tests \"test_bases\"", "hits": [], "answer": "", "goal_stack": "no active subgoals"}
-- **Q:** site:github.com sympy sympy/physics/units/tests test_bases
-  **A (snippet):** {"query": "site:github.com sympy sympy/physics/units/tests test_bases", "hits": [{"title": "sympy/sympy/physics/units/tests/test_prefixes.py at master - GitHub", "snippet": "A computer algebra system 
 
 ## Fix landscape (orientation, NOT answers)
 
@@ -30,4 +22,13 @@ Resolved fixes in this package have touched:
 
 ## Gotchas
 
-- _(add as you hit them)_
+- Return SymPy SINGLETONS from `_eval_*`, arithmetic and simplification methods:
+  `S.One`, `S.Zero`, `S.NegativeOne` -- never bare python literals `1` / `0` / `-1`.
+  Downstream code expects a `Basic` instance; a raw python int silently breaks
+  `.args`, printing and further simplification. (Public sympy convention.)
+- Guard the ZERO/degenerate branch of any rewrite. `sign(x)` style rewrites are
+  correct as `x/Abs(x)` for every x EXCEPT 0, so the general form usually needs a
+  `Piecewise((0, Eq(arg, 0)), (<general form>, True))`.
+- Printer methods (`_print_*`) are called with an optional `exp=` when the object
+  is raised to a power. If you add `exp` support, the exponent must wrap the WHOLE
+  printed form, not be appended to an inner fragment.

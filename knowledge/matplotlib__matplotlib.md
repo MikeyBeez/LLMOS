@@ -12,10 +12,6 @@ _Seeded from 3 resolved run(s)._
 - Backend: uv
 - Common installs: pybind11, pyparsing, numpy, oldest-supported-numpy, certifi, meson-python, setuptools, pytest, setuptools_scm
 
-### Build answers found via web search
-
-- **Q:** matplotlib test_pickle.py test functions defined
-  **A (snippet):** {"query": "matplotlib test_pickle.py test functions defined", "hits": [{"title": "Testing \u2014 Matplotlib 3.12.0.dev340+gdcac4b84e documentation", "snippet": "To run a single test from the command l
 
 ## Fix landscape (orientation, NOT answers)
 
