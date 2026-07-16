@@ -556,6 +556,11 @@ def run_one(inst):
                 flush=True)
         elif _se.get("version"):
             print(" -- spec env: no local pins for v%s" % _se.get("version"), flush=True)
+        _sd = spec_env.apply_system_deps(inst["instance_id"], inst["repo"])
+        if _sd.get("installed"):
+            print(" -- spec env: installed system deps: %s" % _sd["installed"], flush=True)
+        elif _sd.get("failed"):
+            print(" -- spec env: system deps MISSING (no sudo?): %s" % _sd["failed"], flush=True)
     # -------- Phase 1: bootstrap --------
     b_handlers, b_state = make_bootstrap_handlers(
         repo, fail_to_pass=inst["FAIL_TO_PASS"],

@@ -138,3 +138,84 @@ def install_spec_pins(repo_dir, env_kind, env_vars, iid, repo):
         return pins if r.returncode == 0 else []
     except Exception:
         return []
+
+
+# --------------------------------------------------------------------------
+# System (apt) dependencies from the spec's pre_install.
+# --------------------------------------------------------------------------
+# Some recipes (matplotlib) install SYSTEM libs the test-suite needs -- imagemagick,
+# ffmpeg, texlive (LaTeX-rendered figures), dvipng. Their absence does not cause the
+# collection-error false negatives (those are pip-level, e.g. pyparsing), but it does
+# fail image/animation/LaTeX tests, so it is real env fidelity.
+#
+# TWO DELIBERATE DEVIATIONS FROM THE RECIPE, because the container is disposable and
+# this machine is NOT:
+#   1. `apt-get upgrade` is NEVER run. A system-wide upgrade on a real workstation can
+#      take the NVIDIA/CUDA stack (and the llama-server the agent depends on) with it.
+#      The recipe only wants the INSTALLS; the upgrade is gratuitous risk here.
+#   2. Non-apt pre_install steps (matplotlib's qhull download) are skipped: they are
+#      separate shell lines whose variables only persist inside one container RUN, and
+#      they hardcode the container path /testbed. Running them here would litter the
+#      host and accomplish nothing. matplotlib builds fine without them.
+import re as _re
+
+_APT_INSTALL_RE = _re.compile(r"apt-get\s+(?:-y\s+)?install\s+(?:-y\s+)?([^&|;]+)")
+_APT_MARKER_DIR = os.path.expanduser("~/swe/.spec_apt_done")
+
+
+def _apt_packages(spec):
+    pkgs = []
+    for cmd in (spec.get("pre_install") or []):
+        if "apt-get" not in cmd:
+            continue
+        for m in _APT_INSTALL_RE.finditer(cmd):
+            for tok in m.group(1).split():
+                if tok.startswith("-") or "=" in tok:
+                    continue
+                pkgs.append(tok)
+    return sorted(set(pkgs))
+
+
+def _installed(pkg):
+    try:
+        r = subprocess.run(["dpkg", "-s", pkg], capture_output=True, text=True, timeout=20)
+        return "Status: install ok installed" in r.stdout
+    except Exception:
+        return False
+
+
+def apply_system_deps(iid, repo):
+    """Install the spec's apt packages (install-only, idempotent, no upgrade).
+
+    Cheap no-op once satisfied: only missing packages are installed. Never raises.
+    """
+    out = {"ok": False, "needed": [], "installed": [], "failed": []}
+    try:
+        spec, v = spec_for(iid, repo)
+        if not spec:
+            return out
+        pkgs = _apt_packages(spec)
+        if not pkgs:
+            return out
+        missing = [p for p in pkgs if not _installed(p)]
+        out["needed"] = missing
+        if not missing:
+            out["ok"] = True
+            return out
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+            out["failed"] = missing
+            return out
+        subprocess.run(["sudo", "-n", "apt-get", "-y", "update"],
+                       capture_output=True, text=True, timeout=600)
+        env = os.environ.copy(); env["DEBIAN_FRONTEND"] = "noninteractive"
+        r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y"] + missing,
+                           capture_output=True, text=True, timeout=3600, env=env)
+        if r.returncode == 0:
+            out["installed"] = missing; out["ok"] = True
+        else:
+            out["failed"] = missing
+        os.makedirs(_APT_MARKER_DIR, exist_ok=True)
+        open(os.path.join(_APT_MARKER_DIR, "%s_%s" % (repo.replace("/", "__"), v)), "w").write("done")
+    except Exception as e:
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+    return out
