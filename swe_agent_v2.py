@@ -43,6 +43,8 @@ NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "2048"))
 BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package is 1 turn)
 FIX_BUDGET      = 80
 WORK = os.path.expanduser("~/swe/work")
+import spec_env
+
 TRACES = os.path.expanduser("~/swe/traces_v2")
 SCORE_LOGS = os.path.expanduser("~/swe/score_logs")  # full final-scorer output (telemetry only)
 
@@ -541,6 +543,19 @@ def run_one(inst):
     print(f"\n=== {inst['instance_id']} ({inst['repo']}) ===", flush=True)
     t0 = time.time()
     repo = clone(inst)
+    # ENV FIDELITY: apply the official (repo, version) spec pre_install dep-pin
+    # edits to setup.py BEFORE any env is built, so the model own
+    # "pip install -e .[test]" resolves era-correct versions instead of today.
+    # Root cause of the Docker-confirmed scoring false negatives. Opt out: USE_SPEC_ENV=0.
+    if os.environ.get("USE_SPEC_ENV", "1") != "0":
+        _se = spec_env.apply_pre_install(repo, inst["instance_id"], inst["repo"])
+        if _se.get("applied"):
+            print(" -- spec env: applied %d pre_install pins (v%s)%s" % (
+                len(_se["applied"]), _se.get("version"),
+                ("; skipped %d non-local" % len(_se["skipped"])) if _se.get("skipped") else ""),
+                flush=True)
+        elif _se.get("version"):
+            print(" -- spec env: no local pins for v%s" % _se.get("version"), flush=True)
     # -------- Phase 1: bootstrap --------
     b_handlers, b_state = make_bootstrap_handlers(
         repo, fail_to_pass=inst["FAIL_TO_PASS"],
