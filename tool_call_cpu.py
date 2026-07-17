@@ -50,6 +50,9 @@ class ToolCallCPU(OllamaCPU):
         self.budget_recent = int(os.environ.get("TOOL_BUDGET_RECENT", budget_recent))
         self.budget_old = int(os.environ.get("TOOL_BUDGET_OLD", budget_old))
         self.recent_turns = int(os.environ.get("TOOL_RECENT_TURNS", recent_turns))
+        # per-turn accounting of what the clip withheld from the model
+        self._clip_drop = 0
+        self._clip_events = 0
 
     # --- Override step() rather than _generate(): tool-calling doesn't go through
     # the interpretive JSON-ISA decode path at all. ---
@@ -61,6 +64,11 @@ class ToolCallCPU(OllamaCPU):
             return Instruction(Op.RETURN,
                                {"result": "CPU device error", "error": str(e)})
         self.last_meta = meta
+        if isinstance(meta, dict):
+            # what the model was NOT shown this turn. prompt_tokens says what it
+            # got; without this the trace cannot tell a starved agent from a dumb one.
+            meta["clipped_chars"] = self._clip_drop
+            meta["clipped_msgs"] = self._clip_events
         tcs = msg.get("tool_calls") or []
         if not tcs:
             # Model reasoned but didn't call a tool. Extract thinking, ask the
@@ -91,6 +99,8 @@ class ToolCallCPU(OllamaCPU):
         """Build the conversation from the process context. System prompt + user
         goal + one assistant/tool pair per prior CALL/RETURN step."""
         msgs = []
+        self._clip_drop = 0
+        self._clip_events = 0
         if self.system_prompt:
             msgs.append({"role": "system", "content": self.system_prompt})
         msgs.append({"role": "user", "content": pcb.goal})
@@ -114,6 +124,8 @@ class ToolCallCPU(OllamaCPU):
         s = json.dumps(result, default=str)
         if len(s) <= budget:
             return s
+        self._clip_drop += len(s) - budget
+        self._clip_events += 1
         head = max(200, budget // 4)
         tail = budget - head - 80
         if tail <= 0:
