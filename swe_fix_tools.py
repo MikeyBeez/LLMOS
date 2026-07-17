@@ -168,6 +168,17 @@ _TEST_PATH_RE = re.compile(
     r"(^|/)(tests?|testing)/|(^|/)test_|_test\.py$|(^|/)conftest\.py$")
 
 
+def _failure_sig(exit_code, stderr):
+    """Normalized failure signature: same bug -> same sig across reruns.
+    Strips addresses, durations, tmp paths, line numbers."""
+    t = (stderr or "")[-1500:]
+    t = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", t)
+    t = re.sub(r"\b\d+\.\d+s\b", "T", t)
+    t = re.sub(r"/tmp/[\w./-]+", "/tmp/PATH", t)
+    t = re.sub(r"line \d+", "line N", t)
+    return "%s:%s" % (exit_code, hash(t))
+
+
 def _is_test_path(path):
     """True if `path` is a test or test-infra file (repo-agnostic)."""
     return bool(_TEST_PATH_RE.search(str(path or "")))
@@ -402,6 +413,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             f.write(new_text)
         state["repro_green"] = False
         state["fix_verified"] = False
+        state["same_verify_count"] = 0
+        state["last_verify_sig"] = None
         return {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                 "delta_bytes": len(new) - len(old),
                 "match": _how, "note": "verification invalidated — run verify_fix"}
@@ -451,6 +464,20 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                  "correct fix should not break working tests. "
                                  "Investigate before submitting.")
         if not green:
+            _sig = _failure_sig(r.returncode, r.stderr)
+            if _sig == state.get("last_verify_sig"):
+                state["same_verify_count"] = state.get("same_verify_count", 1) + 1
+            else:
+                state["same_verify_count"] = 1
+            state["last_verify_sig"] = _sig
+            result["same_failure_as_last"] = state["same_verify_count"] > 1
+            result["verify_attempt"] = state["same_verify_count"]
+            if state["same_verify_count"] >= 3:
+                result["note"] = (
+                    "IDENTICAL failure %d times in a row. Verifying again "
+                    "without changing the patch will return this same result. "
+                    "Read fault_locations, change the PATCH, then verify."
+                    % state["same_verify_count"])
             _fl = _repo_frames(r.stderr or "", repo_dir)
             if _fl:
                 result["fault_locations"] = _fl

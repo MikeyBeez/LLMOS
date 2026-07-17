@@ -514,6 +514,46 @@ def _load_repo_knowledge(repo):
     return "PACKAGE KNOWLEDGE BASE for %s (accumulated, general; consult before guessing):\n%s" % (repo, txt[:2600])
 
 
+def _triage(problem, repo):
+    """One structured understanding pass before any tool is touched."""
+    if not os.environ.get("TRIAGE"):
+        return None
+    raw = llm_call(
+        system=("You triage bug reports for an autonomous fixing agent. "
+                "Answer ONLY the JSON form. kind must be one of: crash, "
+                "wrong_output, regression, api_contract, performance, build."),
+        prompt=("Repository: %s\n\nIssue:\n%s\n\n"
+                'Return JSON: {"kind": "...", "subsystem": "...", '
+                '"repro_criteria": "what a failing script must demonstrate", '
+                '"done_criteria": "what change in behavior proves the fix", '
+                '"needs": ["resources to gather FIRST: docs to web-search '
+                '(e.g. an installation or API guide), packages, reference '
+                'pages -- empty list if none"], '
+                '"dont_break": ["behavior that must keep working"], '
+                '"steps": ["3-5 subtasks"]}' % (repo, problem[:2500])),
+        max_tokens=650, format_json=True)
+    from repo_bootstrap_tools import _extract_json as _xj
+    t = _xj(raw) or {}
+    if not t.get("kind"):
+        return None
+    steps = t.get("steps") or []
+    needs = t.get("needs") or []
+    dont = t.get("dont_break") or []
+    out = ("TRIAGE (done before you start; verify against the code, do not "
+           "assume):\n"
+           "  problem kind: %s | subsystem: %s\n"
+           "  a valid reproduction must show: %s\n"
+           "  the fix is done when: %s"
+           % (t.get("kind"), t.get("subsystem"),
+              t.get("repro_criteria"), t.get("done_criteria")))
+    if needs:
+        out += "\n  gather first: %s" % "; ".join(str(x) for x in needs[:4])
+    if dont:
+        out += "\n  must keep working: %s" % "; ".join(str(x) for x in dont[:4])
+    out += "\n  plan: %s" % "; ".join(str(s) for s in steps[:5])
+    return out
+
+
 def _load_atlas(repo):
     """Code atlas: topic -> files, from our own resolved runs. Env-gated,
     leave-one-out enforced by the builder, provenance = our own patches only."""
@@ -692,6 +732,10 @@ def run_one(inst):
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
+    _tri = _triage(inst["problem_statement"], inst["repo"])
+    if _tri:
+        fix_goal += "\n\n" + _tri
+        print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
     _atlas = _load_atlas(inst["repo"])
     if _atlas:
         fix_goal += ("\n\nWHERE TO LOOK FIRST — read_range these before any "
