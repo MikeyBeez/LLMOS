@@ -514,9 +514,16 @@ def _load_repo_knowledge(repo):
     return "PACKAGE KNOWLEDGE BASE for %s (accumulated, general; consult before guessing):\n%s" % (repo, txt[:2600])
 
 
-def _archive_success(inst):
-    """Before a re-run overwrites this instance's trace, preserve the prior one
-    (tagged with its outcome + a timestamp) so a resolved run is never lost."""
+def _archive_prior_trace(inst):
+    """Preserve this instance's EXISTING trace before the current run overwrites
+    it, tagged with its outcome + a timestamp.
+
+    MUST be called at the top of run_one, before _save_trace. It was previously
+    called after _save_trace and only when the new run resolved, which meant it
+    copied the run that had just finished (not the prior one) and never fired in
+    the case that actually loses data: a re-run that FAILS and clobbers a
+    previously-resolved trace. Ungated on purpose -- a miss re-run over a solve is
+    precisely the pair we need for a regression diff."""
     import shutil, json as _json, time as _time
     iid = inst["instance_id"]
     base = os.path.join(TRACES, iid + ".trace.json")
@@ -541,6 +548,8 @@ def _archive_success(inst):
 
 def run_one(inst):
     print(f"\n=== {inst['instance_id']} ({inst['repo']}) ===", flush=True)
+    # FIRST: this run is about to overwrite any existing trace for this instance.
+    _archive_prior_trace(inst)
     t0 = time.time()
     repo = clone(inst)
     # ENV FIDELITY: apply the official (repo, version) spec pre_install dep-pin
@@ -699,8 +708,6 @@ def run_one(inst):
     _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta, "state": b_state,
                         "phase2": f_msgs, "phase2_meta": f_meta,
                         "fix_state": f_state, "outcome": outcome})
-    if outcome.get("resolved"):
-        _archive_success(inst)
     return outcome
 
 
