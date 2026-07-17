@@ -34,7 +34,8 @@ class ToolCallCPU(OllamaCPU):
                  model="ornith:35b", host="http://127.0.0.1:8080",
                  temperature=0.6, num_predict=2048, num_ctx=65536,
                  seed=0, keep_alive="24h", log=None,
-                 request_timeout=600):
+                 request_timeout=600, budget_recent=6000, budget_old=1200,
+                 recent_turns=16):
         super().__init__(model=model, host=host, seed=seed, log=log,
                          keep_alive=keep_alive,
                          num_predict=num_predict, num_ctx=num_ctx)
@@ -43,6 +44,12 @@ class ToolCallCPU(OllamaCPU):
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.request_timeout = request_timeout
+        # How much of each prior tool result the model actually gets to see.
+        # 1800 (the old fixed head-clip) starved it: pytest back-loads the
+        # assertion diff, so the model saw boilerplate and never the reason.
+        self.budget_recent = int(os.environ.get("TOOL_BUDGET_RECENT", budget_recent))
+        self.budget_old = int(os.environ.get("TOOL_BUDGET_OLD", budget_old))
+        self.recent_turns = int(os.environ.get("TOOL_RECENT_TURNS", recent_turns))
 
     # --- Override step() rather than _generate(): tool-calling doesn't go through
     # the interpretive JSON-ISA decode path at all. ---
@@ -87,11 +94,37 @@ class ToolCallCPU(OllamaCPU):
         if self.system_prompt:
             msgs.append({"role": "system", "content": self.system_prompt})
         msgs.append({"role": "user", "content": pcb.goal})
-        for s in pcb.context:
-            msgs.extend(self._pair_for(s))
+        n = len(pcb.context)
+        for idx, s in enumerate(pcb.context):
+            recent = (n - idx) <= self.recent_turns
+            msgs.extend(self._pair_for(
+                s, self.budget_recent if recent else self.budget_old))
         return msgs
 
-    def _pair_for(self, s):
+    def _clip_result(self, result, budget):
+        """Serialize a tool result for the model, keeping BOTH ends.
+
+        A head-only clip is exactly wrong for test output: pytest/unittest put
+        the identifying header first but the *diagnosis* -- assertion diff,
+        short test summary, the failing line -- last. Keep a head (so the
+        identifying fields survive) and a tail (so the reason survives), and
+        say out loud that the middle went, so the model can narrow its next
+        request instead of blindly re-issuing the same call.
+        """
+        s = json.dumps(result, default=str)
+        if len(s) <= budget:
+            return s
+        head = max(200, budget // 4)
+        tail = budget - head - 80
+        if tail <= 0:
+            return s[:budget]
+        marker = ("\n...[%d chars elided from the middle; re-read a narrower "
+                  "range to see them]...\n" % (len(s) - head - tail))
+        return s[:head] + marker + s[-tail:]
+
+    def _pair_for(self, s, budget=None):
+        if budget is None:
+            budget = self.budget_recent
         op = s.get("op")
         if op == "CALL":
             name = (s.get("args") or {}).get("name", "")
@@ -102,7 +135,7 @@ class ToolCallCPU(OllamaCPU):
                      "tool_calls": [{"id": cid, "type": "function",
                                      "function": {"name": tool, "arguments": targs}}]},
                     {"role": "tool", "tool_call_id": cid,
-                     "content": json.dumps(s.get("result"), default=str)[:1800]}]
+                     "content": self._clip_result(s.get("result"), budget)}]
         if op == "PLAN":
             txt = (s.get("args") or {}).get("text", "")
             return [{"role": "assistant", "content": (txt or "")[:600]},
