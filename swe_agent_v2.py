@@ -514,6 +514,20 @@ def _load_repo_knowledge(repo):
     return "PACKAGE KNOWLEDGE BASE for %s (accumulated, general; consult before guessing):\n%s" % (repo, txt[:2600])
 
 
+def _load_atlas(repo):
+    """Code atlas: topic -> files, from our own resolved runs. Env-gated,
+    leave-one-out enforced by the builder, provenance = our own patches only."""
+    adir = os.environ.get("ATLAS_DIR")
+    if not adir:
+        return ""
+    fp = os.path.join(adir, repo.replace("/", "__") + ".md")
+    try:
+        txt = open(fp, encoding="utf-8").read()
+    except OSError:
+        return ""
+    return txt[:3500]
+
+
 def _archive_prior_trace(inst):
     """Preserve this instance's EXISTING trace before the current run overwrites
     it, tagged with its outcome + a timestamp.
@@ -678,6 +692,11 @@ def run_one(inst):
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
+    _atlas = _load_atlas(inst["repo"])
+    if _atlas:
+        fix_goal += ("\n\nWHERE TO LOOK FIRST — read_range these before any "
+                     "locate/grep:\n" + _atlas)
+        print(" -- injected code atlas", flush=True)
     pats = patterns_load()
     if pats:
         fix_goal += "\n\n" + format_patterns_context(pats)
