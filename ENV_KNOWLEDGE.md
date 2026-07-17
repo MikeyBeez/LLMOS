@@ -682,3 +682,32 @@ case ~= 67K -- both inside the window.
 **Method note.** Found by reading the message the model *receives*, not the value
 the tool *returns*. Traces log tool output pre-clip, so this was invisible from
 every trace review we did. When an agent looks stupid, dump its prompt first.
+
+
+## 36. h_reproduce rejected the model in silence (pattern #6, unapplied)
+
+```python
+if registered:               note = "...now the registered reproduction..."
+elif not state["seen_red"]:  note = "...exited 0, show the bug..."
+return result                # <-- no else
+```
+
+Once a red reproduction was registered, every later green script returned a bare
+`{"exit":0,"stdout":"","stderr":"","registered_as_reproduction":false}` with **no
+note**. Measured across 162 traces: **799 reproduce calls, 442 rejected, 380 of
+those (86%) silent.** The model re-issued the same script because nothing it
+received distinguished the attempt from the last one.
+
+Worse, `FIX_SYSTEM_PROMPT` step 1 says *"If your script exits 0, it does not
+demonstrate the bug — rewrite it"* — true before a red is registered, wrong after
+(the correct move is `verify_fix`). The prompt herded the model into the loop the
+tool then declined to explain.
+
+Fix: an `else` branch that names the state and the advancing call — *a
+reproduction is ALREADY registered and still stands; call verify_fix; only call
+reproduce again to REPLACE it* — plus an empty-output hint. Piece-checked through
+the shipped `make_fix_handlers` against a real venv.
+
+**The lesson is not the else.** We had written this exact diagnosis as
+engineering pattern #6, about a different gate, and never grepped for the shape
+elsewhere. A pattern only pays when it is applied everywhere it fits.

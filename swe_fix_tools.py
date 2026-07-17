@@ -288,6 +288,26 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                               "Write a script that FAILS (nonzero exit, e.g. "
                               "an assert or uncaught exception) because of "
                               "the reported bug.")
+        else:
+            # Rejected AFTER a red reproduction is already registered. This
+            # branch used to attach NO note, so the model got a bare
+            # registered_as_reproduction:False with nothing to act on and
+            # re-ran the same script until its budget died (pattern #6:
+            # never reject a tool call without the specific diagnostic).
+            # Say what happened AND name the tool that actually advances.
+            _empty = not (r.stdout or "").strip()
+            result["note"] = (
+                "Script exited 0, so it was NOT registered"
+                + (" (it also printed nothing — it may not be exercising the "
+                   "bug at all)" if _empty else "")
+                + ". That is not a problem: a reproduction is ALREADY registered "
+                "from an earlier turn and it still stands. Calling reproduce "
+                "again does NOT re-check your fix and will keep returning this. "
+                "To check whether your patch works, call verify_fix — it reruns "
+                "the REGISTERED reproduction and is the only check that counts. "
+                "Call reproduce again ONLY if you mean to REPLACE the registered "
+                "reproduction with a different script that FAILS (nonzero exit) "
+                "because of the bug.")
         return result
 
     def h_locate(pcb, args):
