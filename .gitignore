@@ -22,3 +22,6 @@ probe*.py
 llmos/._*
 *.stale
 *.pre-symlink
+*.bak.*
+__pycache__/
+*.pyc
