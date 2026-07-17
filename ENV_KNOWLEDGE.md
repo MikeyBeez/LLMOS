@@ -652,3 +652,33 @@ swe_fn_triage.py's "pending Docker confirm" backlog was (reclaimable-family memb
 Fix (commit cc460a2): the tool now also loads confirmed_real_misses; each reclaimable_fn family reports docker_confirmed / real_miss (adjudicated) / pending, with pending = members - confirmed_FN - real_misses (and the --json output gains an adjudicated_real_miss field). Verified do-no-harm: taxonomy buckets + ids byte-identical old-vs-new (total 159; every family count and id set unchanged), only the pending sub-split moves (21->15, adjudicated_real_miss=6); results_full300.json md5 unchanged; reclaim_false_negatives.py --dry-run unaffected. Read-only + answer-leakage-safe (public ids + manifest only).
 
 STILL UNPERSISTED (next action): the pytest<6 bare-rootdir family (8 pending) was home-verified ALL real-miss at cycle 04:58, and the sphinx COLLECT_ERR family (5 pending: 7686/8273/8435/8506/8595) was home-verified ALL real-miss at cycle 05:28 -- but neither set was written to confirmed_real_misses, so they still show as pending. A future cycle should re-verify (or trust the logged home-verification) and record them in confirmed_real_misses, which would drop TRUE pending from 15 to ~2 (only matplotlib-23563 + sklearn-25747 genuinely un-adjudicated; requests 2148/2674 are network-coupled, tracked separately).
+
+
+## 35. The scaffold was starving the model (tool-result clipping)
+
+`tool_call_cpu._pair_for` serialized each prior tool result and kept `[:1800]`
+chars -- a **head** clip -- while llama-server ran `--ctx-size 131072`. Two
+compounding harms:
+
+1. **Wrong size.** ~450 tokens/turn x 60 turns = ~27K of a 131K window. We paid
+   for the context and used a fifth of it.
+2. **Wrong end.** pytest back-loads its diagnosis: `E   ValueError...`, the
+   failing `file:line`, and the `short test summary` all come last. A head clip
+   keeps `platform linux -- Python 3.9.20, pytest-7.4.0...` and throws the answer
+   away. Our own scorer reads `score_tail` -- we already knew the tail was where
+   the signal lived, and still fed the model the head.
+
+Signature: the agent re-issues an identical call several times running and a
+loop-detecting critic fires with no effect. That is not a model ignoring its
+history -- it is a model whose history contains no reason to do anything else.
+
+Fix (`_clip_result`): head+tail with an explicit `...[N chars elided...]` marker
+so the model can narrow its request, plus a recency budget --
+`TOOL_BUDGET_RECENT=6000`, `TOOL_BUDGET_OLD=1200`, `TOOL_RECENT_TURNS=16`, all
+env-overridable. Verified without llama-server: the old clip hid the short test
+summary, the new clip keeps it; 60-turn history ~= 37K tokens, 160-turn worst
+case ~= 67K -- both inside the window.
+
+**Method note.** Found by reading the message the model *receives*, not the value
+the tool *returns*. Traces log tool output pre-clip, so this was invisible from
+every trace review we did. When an agent looks stupid, dump its prompt first.
