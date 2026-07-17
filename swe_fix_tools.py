@@ -350,7 +350,14 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         '"reason":"why this one", '
                         '"discard":["path:LINE reasons to skip"]}'))
             parsed = _extract_json(ranking) or {}
-            result["ranked"] = parsed
+            # top_hit_only: keep the judge's DECISION, never its sampled prose.
+            # The wording of "reason"/"discard" varies run-to-run even when the
+            # decision is identical, and embedding it in the tool result makes
+            # the whole downstream trajectory nondeterministic (observed:
+            # determinism check diverged first at exactly this field).
+            th = parsed.get("top_hit")
+            if isinstance(th, str) and th.strip():
+                result["top_hit"] = th.strip()
         return result
 
     def h_read_range(pcb, args):
