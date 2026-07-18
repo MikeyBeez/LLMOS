@@ -533,16 +533,12 @@ def _triage(problem, repo):
                 '"dont_break": ["behavior that must keep working"], '
                 '"steps": ["3-5 subtasks"], '
                 '"invariant": "the checkable property the issue says is '
-                'violated, stated formally (identity: same input twice gives '
-                'the same object; idempotence: applying twice = once; '
+                'violated, in ONE short sentence (identity: same input twice '
+                'gives the same object; idempotence: applying twice = once; '
                 'roundtrip: parse(print(x))==x; expected-value: f(input) == '
-                'stated output; no-raise: f(input) must not raise)", '
-                '"probe_script": "a STANDALONE python script (no pytest) that '
-                'tests EXACTLY that stated property against this repo, exits '
-                'NONZERO while the bug is present and 0 once fixed. Use only '
-                'the issue text. No placeholders."}'
+                'stated output; no-raise: f(input) must not raise)"}'
                 % (repo, problem[:2500])),
-        max_tokens=3000, format_json=True)
+        max_tokens=8000, format_json=True)
     t = _extract_json(raw) or {}
     if not t.get("kind"):
         return None, ""
@@ -563,7 +559,7 @@ def _triage(problem, repo):
     if t.get("invariant"):
         out += "\n  the issue states this checkable property: %s" % t["invariant"]
     out += "\n  plan: %s" % "; ".join(str(s) for s in steps[:5])
-    return out, (t.get("probe_script") or "")
+    return out, (t.get("invariant") or "")
 
 
 def _atlas_learn(inst):
@@ -611,6 +607,42 @@ def _atlas_learn(inst):
         print(" -- atlas learned: %s -> %s" % (iid, ",".join(files[:2])), flush=True)
     except Exception as e:
         print(" -- atlas learn failed (non-fatal): %s" % e, flush=True)
+
+
+def _write_probe(problem, invariant, repo):
+    """Second, focused call: turn the stated invariant into a standalone probe
+    script. PLAIN CODE out -- no JSON wrapper (a code-bearing JSON field made
+    the thinking model truncate before emitting anything). Validated with
+    compile() before the scaffold will lock it; any failure returns ""."""
+    if not (os.environ.get("TRIAGE") and invariant):
+        return ""
+    from repo_bootstrap_tools import llm_call
+    raw = llm_call(
+        system=("You write verification probes: short standalone python "
+                "scripts that test ONE stated property of a library. Output "
+                "ONLY python code. No prose, no markdown fences."),
+        prompt=("Repository: %s (installed and importable).\n"
+                "Issue (for context):\n%s\n\n"
+                "Property to test: %s\n\n"
+                "Write a standalone script (stdlib + this repo only, no "
+                "pytest) that tests EXACTLY that property: print a one-line "
+                "verdict, exit(1) while the property is violated, exit(0) "
+                "once it holds. No placeholders."
+                % (repo, problem[:1800], invariant)),
+        max_tokens=6000)
+    code = (raw or "").strip()
+    if code.startswith("```"):
+        code = code.split("\n", 1)[-1]
+        code = code.rsplit("```", 1)[0]
+    code = code.strip()
+    if not code:
+        return ""
+    try:
+        compile(code, "<probe>", "exec")
+    except SyntaxError:
+        print(" -- probe writer produced non-compiling code; discarded", flush=True)
+        return ""
+    return code
 
 
 def _load_atlas(repo, exclude_iid=None):
@@ -810,10 +842,11 @@ def run_one(inst):
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
-    _tri, _probe = _triage(inst["problem_statement"], inst["repo"])
+    _tri, _inv = _triage(inst["problem_statement"], inst["repo"])
     if _tri:
         fix_goal += "\n\n" + _tri
         print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
+    _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])
     _probe_status = f_handlers["_lock_probe"](_probe) if _probe else "none"
     _atlas = _load_atlas(inst["repo"], exclude_iid=inst["instance_id"])
     if _atlas:
