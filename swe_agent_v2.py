@@ -554,6 +554,53 @@ def _triage(problem, repo):
     return out
 
 
+def _atlas_learn(inst):
+    """Append this resolved instance's lesson to the atlas ledger and refresh
+    the repo's atlas file. Called on every resolve; never raises."""
+    import re as _re, json as _json
+    try:
+        adir = os.path.expanduser("~/swe/atlas")
+        os.makedirs(adir, exist_ok=True)
+        iid = inst["instance_id"]
+        pp = os.path.join(TRACES, iid + ".patch")
+        if not os.path.isfile(pp):
+            return
+        files = sorted(set(_re.findall(r"^diff --git a/(\S+)",
+                                       open(pp).read(), _re.M)))
+        if not files:
+            return
+        title = (inst.get("problem_statement") or "").strip().splitlines()
+        title = (title[0] if title else "")[:100]
+        led = os.path.join(adir, "ledger.jsonl")
+        rows = {}
+        if os.path.isfile(led):
+            for ln in open(led):
+                try:
+                    r = _json.loads(ln)
+                    rows[r["iid"]] = r
+                except Exception:
+                    pass
+        rows[iid] = {"iid": iid, "repo": inst["repo"], "title": title,
+                     "files": files, "ts": int(time.time())}
+        with open(led, "w") as f:
+            for r in rows.values():
+                f.write(_json.dumps(r) + "\n")
+        # regenerate this repo's atlas file from the ledger
+        repo = inst["repo"]
+        ours = [r for r in rows.values() if r["repo"] == repo]
+        fn = os.path.join(adir, repo.replace("/", "__") + ".md")
+        lines = ["CODE ATLAS for %s — where past issues were actually fixed" % repo,
+                 "(from this system's own resolved runs; treat as evidence, "
+                 "verify by reading — past fixes suggest, they do not decide)",
+                 ""]
+        for r in sorted(ours, key=lambda x: x.get("ts", 0)):
+            lines.append("- %s\n    -> %s" % (r["title"], ", ".join(r["files"][:4])))
+        open(fn, "w").write("\n".join(lines) + "\n")
+        print(" -- atlas learned: %s -> %s" % (iid, ",".join(files[:2])), flush=True)
+    except Exception as e:
+        print(" -- atlas learn failed (non-fatal): %s" % e, flush=True)
+
+
 def _load_atlas(repo):
     """Code atlas: topic -> files, from our own resolved runs. Env-gated,
     leave-one-out enforced by the builder, provenance = our own patches only."""
@@ -771,6 +818,8 @@ def run_one(inst):
     _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta, "state": b_state,
                         "phase2": f_msgs, "phase2_meta": f_meta,
                         "fix_state": f_state, "outcome": outcome})
+    if outcome.get("resolved"):
+        _atlas_learn(inst)   # learning is a side effect of running, not a chore
     return outcome
 
 
