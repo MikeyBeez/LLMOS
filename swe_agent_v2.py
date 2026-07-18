@@ -601,18 +601,37 @@ def _atlas_learn(inst):
         print(" -- atlas learn failed (non-fatal): %s" % e, flush=True)
 
 
-def _load_atlas(repo):
-    """Code atlas: topic -> files, from our own resolved runs. Env-gated,
-    leave-one-out enforced by the builder, provenance = our own patches only."""
+def _load_atlas(repo, exclude_iid=None):
+    """Code atlas: topic -> files, from our own resolved runs. Env-gated.
+    LEAVE-ONE-OUT AT INJECTION: rebuilt from the iid-keyed ledger excluding the
+    current instance, so a re-run never sees knowledge derived from itself.
+    Remembering is total (the ledger keeps everything); only self-knowledge is
+    withheld, per instance, at read time."""
+    import json as _json
     adir = os.environ.get("ATLAS_DIR")
     if not adir:
         return ""
-    fp = os.path.join(adir, repo.replace("/", "__") + ".md")
+    led = os.path.join(adir, "ledger.jsonl")
+    rows = []
     try:
-        txt = open(fp, encoding="utf-8").read()
+        for ln in open(led, encoding="utf-8"):
+            try:
+                r = _json.loads(ln)
+            except Exception:
+                continue
+            if r.get("repo") == repo and r.get("iid") != exclude_iid:
+                rows.append(r)
     except OSError:
+        pass
+    if not rows:
         return ""
-    return txt[:3500]
+    lines = ["CODE ATLAS for %s — where past issues were actually fixed" % repo,
+             "(from this system's own resolved runs; treat as evidence, "
+             "verify by reading — past fixes suggest, they do not decide)", ""]
+    for r in sorted(rows, key=lambda x: x.get("ts", 0)):
+        lines.append("- %s\n    -> %s" % (r.get("title", ""),
+                                           ", ".join((r.get("files") or [])[:4])))
+    return "\n".join(lines)[:3500]
 
 
 def _archive_prior_trace(inst):
@@ -783,7 +802,7 @@ def run_one(inst):
     if _tri:
         fix_goal += "\n\n" + _tri
         print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
-    _atlas = _load_atlas(inst["repo"])
+    _atlas = _load_atlas(inst["repo"], exclude_iid=inst["instance_id"])
     if _atlas:
         fix_goal += ("\n\nWHERE TO LOOK FIRST — read_range these before any "
                      "locate/grep:\n" + _atlas)
