@@ -517,7 +517,7 @@ def _load_repo_knowledge(repo):
 def _triage(problem, repo):
     """One structured understanding pass before any tool is touched."""
     if not os.environ.get("TRIAGE"):
-        return None
+        return None, ""
     from repo_bootstrap_tools import llm_call, _extract_json
     raw = llm_call(
         system=("You triage bug reports for an autonomous fixing agent. "
@@ -531,11 +531,21 @@ def _triage(problem, repo):
                 '(e.g. an installation or API guide), packages, reference '
                 'pages -- empty list if none"], '
                 '"dont_break": ["behavior that must keep working"], '
-                '"steps": ["3-5 subtasks"]}' % (repo, problem[:2500])),
+                '"steps": ["3-5 subtasks"], '
+                '"invariant": "the checkable property the issue says is '
+                'violated, stated formally (identity: same input twice gives '
+                'the same object; idempotence: applying twice = once; '
+                'roundtrip: parse(print(x))==x; expected-value: f(input) == '
+                'stated output; no-raise: f(input) must not raise)", '
+                '"probe_script": "a STANDALONE python script (no pytest) that '
+                'tests EXACTLY that stated property against this repo, exits '
+                'NONZERO while the bug is present and 0 once fixed. Use only '
+                'the issue text. No placeholders."}'
+                % (repo, problem[:2500])),
         max_tokens=3000, format_json=True)
     t = _extract_json(raw) or {}
     if not t.get("kind"):
-        return None
+        return None, ""
     steps = t.get("steps") or []
     needs = t.get("needs") or []
     dont = t.get("dont_break") or []
@@ -550,8 +560,10 @@ def _triage(problem, repo):
         out += "\n  gather first: %s" % "; ".join(str(x) for x in needs[:4])
     if dont:
         out += "\n  must keep working: %s" % "; ".join(str(x) for x in dont[:4])
+    if t.get("invariant"):
+        out += "\n  the issue states this checkable property: %s" % t["invariant"]
     out += "\n  plan: %s" % "; ".join(str(s) for s in steps[:5])
-    return out
+    return out, (t.get("probe_script") or "")
 
 
 def _atlas_learn(inst):
@@ -798,10 +810,11 @@ def run_one(inst):
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
-    _tri = _triage(inst["problem_statement"], inst["repo"])
+    _tri, _probe = _triage(inst["problem_statement"], inst["repo"])
     if _tri:
         fix_goal += "\n\n" + _tri
         print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
+    _probe_status = f_handlers["_lock_probe"](_probe) if _probe else "none"
     _atlas = _load_atlas(inst["repo"], exclude_iid=inst["instance_id"])
     if _atlas:
         fix_goal += ("\n\nWHERE TO LOOK FIRST — read_range these before any "
@@ -837,6 +850,8 @@ def run_one(inst):
     _save_trace(inst, {"phase1": b_msgs, "phase1_meta": b_meta, "state": b_state,
                         "phase2": f_msgs, "phase2_meta": f_meta,
                         "fix_state": f_state, "outcome": outcome})
+    outcome["probe_status"] = _probe_status
+    outcome["probe_green"] = f_state.get("probe_green")
     if outcome.get("resolved"):
         _atlas_learn(inst)   # learning is a side effect of running, not a chore
     return outcome

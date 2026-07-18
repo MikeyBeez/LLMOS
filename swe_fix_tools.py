@@ -195,7 +195,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "regressions": [],
              "repro_script": None,      # the registered failing script
              "seen_red": False,         # a reproduction has failed (bug shown)
-             "repro_green": False}      # registered script now exits 0
+             "repro_green": False,      # registered script now exits 0
+             "probe_script": None,      # LOCKED issue-invariant probe (immutable)
+             "probe_green": None}       # probe status after last verify
 
     def _run(cmd, timeout=300):
         env = os.environ.copy()
@@ -218,8 +220,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return any(not _is_test_path(f) for f in files)
 
     def _gate():
-        state["fix_verified"] = (state["seen_red"] and state["repro_green"]
-                                 and _diff_nonempty())
+        ok = (state["seen_red"] and state["repro_green"] and _diff_nonempty())
+        # a locked issue-invariant probe is part of "verified": a fix that
+        # leaves the issue's own stated property broken cannot pass the gate.
+        if ok and state.get("probe_script") and not state.get("probe_green"):
+            ok = False
+        state["fix_verified"] = ok
         return state["fix_verified"]
 
     def _capture_baseline(hint_paths=None):
@@ -419,6 +425,27 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 "delta_bytes": len(new) - len(old),
                 "match": _how, "note": "verification invalidated — run verify_fix"}
 
+    def lock_probe(script):
+        """Run the triage-written invariant probe once, pre-theory. RED (nonzero
+        exit) locks it as the immutable verification target. GREEN means the
+        probe does not demonstrate the bug -- discard it (recorded), fall back.
+        Called by the runner, never exposed to the model as a tool."""
+        script = (script or "").strip()
+        if not script:
+            return "none"
+        try:
+            r = _run(f"{env_dir}/bin/python -c {shlex.quote(script)}", timeout=180)
+        except Exception as e:
+            print(" -- probe errored at lock time (%s); discarded" % e, flush=True)
+            return "error"
+        if r.returncode != 0:
+            state["probe_script"] = script
+            state["probe_green"] = False
+            print(" -- invariant probe LOCKED (red confirmed)", flush=True)
+            return "locked"
+        print(" -- invariant probe exited 0 pre-fix; discarded (bad probe)", flush=True)
+        return "green_prefix"
+
     def h_verify_fix(pcb, args):
         """Rerun the registered reproduction. GREEN when it exits 0."""
         shutil.rmtree(os.path.join(repo_dir, ".hypothesis"), ignore_errors=True)
@@ -431,6 +458,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                  f'{shlex.quote(state["repro_script"])}', timeout=300)
         green = r.returncode == 0
         state["repro_green"] = green
+        if green and state.get("probe_script"):
+            pr = _run(f"{env_dir}/bin/python -c "
+                      f"{shlex.quote(state['probe_script'])}", timeout=180)
+            state["probe_green"] = (pr.returncode == 0)
         regressed = _check_regressions() if green else []
         gate_ok = _gate()
         result = {"ok": green, "exit": r.returncode,
@@ -442,6 +473,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                            "diff_nonempty": _diff_nonempty(),
                            "no_regressions": not regressed,
                            "fix_verified": gate_ok}}
+        if state.get("probe_script"):
+            result["probe_green"] = state.get("probe_green")
+            result["gate"]["probe_green"] = state.get("probe_green")
+            if green and state.get("probe_green") is False:
+                result["probe_note"] = (
+                    "Your reproduction passes, but the LOCKED issue-invariant "
+                    "probe still FAILS. The probe tests the property the issue "
+                    "itself states; your patch fixes your theory of the bug, "
+                    "not the reported bug. Re-read the issue and the probe "
+                    "output; do not submit until the probe is green.")
         _strength = _reproduction_strength(state.get("repro_script") or "")
         result["repro_strength"] = _strength
         if green and _strength != "value_check":
@@ -529,6 +570,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.run_tests":   h_run_tests,
         "swe.submit":      h_submit,
     }
+    handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
     return handlers, state
 
 
