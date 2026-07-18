@@ -518,6 +518,7 @@ def _triage(problem, repo):
     """One structured understanding pass before any tool is touched."""
     if not os.environ.get("TRIAGE"):
         return None
+    from repo_bootstrap_tools import llm_call, _extract_json
     raw = llm_call(
         system=("You triage bug reports for an autonomous fixing agent. "
                 "Answer ONLY the JSON form. kind must be one of: crash, "
@@ -531,9 +532,8 @@ def _triage(problem, repo):
                 'pages -- empty list if none"], '
                 '"dont_break": ["behavior that must keep working"], '
                 '"steps": ["3-5 subtasks"]}' % (repo, problem[:2500])),
-        max_tokens=650, format_json=True)
-    from repo_bootstrap_tools import _extract_json as _xj
-    t = _xj(raw) or {}
+        max_tokens=3000, format_json=True)
+    t = _extract_json(raw) or {}
     if not t.get("kind"):
         return None
     steps = t.get("steps") or []
