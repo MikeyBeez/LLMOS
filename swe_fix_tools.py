@@ -184,6 +184,56 @@ def _is_test_path(path):
     return bool(_TEST_PATH_RE.search(str(path or "")))
 
 
+def render_worksheet(state):
+    """Deterministic worksheet from the fix-state ledger. Fixed template, no
+    sampled prose (pattern #33): equal state -> byte-identical worksheet."""
+    ph = state.get("patch_history") or []
+    if state.get("repro_green"):
+        repro = "GREEN (your registered reproduction passes)"
+    elif state.get("seen_red"):
+        repro = "RED registered (verify_fix reruns exactly it)"
+    else:
+        repro = "none yet - write a script that FAILS because of the bug"
+    if state.get("probe_script"):
+        probe = "GREEN" if state.get("probe_green") else                 "locked, still RED (the issue's stated property is not fixed)"
+    else:
+        probe = "none"
+    if ph:
+        last = ph[-1]
+        pline = "%d (last: %s -> %s%s)" % (
+            len(ph), last["file"], last["verdict"],
+            ", same failure x%d" % state["same_verify_count"]
+            if state.get("same_verify_count", 0) > 1 else "")
+    else:
+        pline = "0"
+    # next obligation: what the form says must happen, as one imperative
+    if not state.get("seen_red"):
+        nxt = "register a failing reproduction"
+    elif not state.get("repro_green"):
+        if state.get("same_verify_count", 0) >= 2:
+            nxt = ("your patch is not reaching the failing code path - re-read "
+                   "fault_locations and change the PATCH, not the reproduction")
+        elif ph:
+            nxt = "verify_fix (or improve the patch)"
+        else:
+            nxt = "read the fault location, then patch"
+    elif state.get("probe_script") and not state.get("probe_green"):
+        nxt = ("repro passes but the locked probe does not - your fix answers "
+               "your theory, not the issue; re-read the issue and patch again")
+    else:
+        nxt = "run_tests on the neighborhood, then submit"
+    lines = ["WORKSHEET (maintained by the harness; facts, not suggestions):"]
+    if state.get("triage_goal"):
+        lines.append("  trying to get : %s" % state["triage_goal"][:200])
+    if state.get("triage_repro"):
+        lines.append("  valid repro   : %s" % state["triage_repro"][:200])
+    lines.append("  repro status  : %s" % repro)
+    lines.append("  probe status  : %s" % probe)
+    lines.append("  patches tried : %s" % pline)
+    lines.append("  next          : %s" % nxt)
+    return "\n".join(lines)
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -198,7 +248,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "repro_green": False,      # registered script now exits 0
              "probe_script": None,      # LOCKED issue-invariant probe (immutable)
              "probe_green": None,       # probe status after last verify
-             "rejected_repro_streak": 0}  # consecutive green-exit repro scripts
+             "rejected_repro_streak": 0,  # consecutive green-exit repro scripts
+             "patch_history": [],       # [{file, verdict}] verdict set by next verify
+             "triage_goal": "",         # done_criteria from the understanding pass
+             "triage_repro": ""}        # repro_criteria from the understanding pass
 
     def _run(cmd, timeout=300):
         env = os.environ.copy()
@@ -433,6 +486,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["same_verify_count"] = 0
         state["last_verify_sig"] = None
         state["rejected_repro_streak"] = 0
+        state["patch_history"].append(
+            {"file": str(args.get("file", "?")), "verdict": "unverified"})
         return {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                 "delta_bytes": len(new) - len(old),
                 "match": _how, "note": "verification invalidated — run verify_fix"}
@@ -516,6 +571,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                  f"that passed before: {regressed[:3]} — a "
                                  "correct fix should not break working tests. "
                                  "Investigate before submitting.")
+        if state["patch_history"]:
+            state["patch_history"][-1]["verdict"] = (
+                "repro GREEN" if green else "repro still red")
         if not green:
             _sig = _failure_sig(r.returncode, r.stderr)
             if _sig == state.get("last_verify_sig"):

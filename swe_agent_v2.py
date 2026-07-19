@@ -106,7 +106,7 @@ def _auto_verify_reject_detail(res):
 
 
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
-              budget, gate=None, log=print, checkpoint=None):
+              budget, gate=None, log=print, checkpoint=None, worksheet=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -120,6 +120,13 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     meta_log = []
     searched_sigs = {}   # error signature -> turn first searched
     for turn in range(budget):
+        if worksheet is not None:
+            # the state object, written down and re-shown EVERY turn: the model
+            # reads its situation instead of having to remember it
+            try:
+                messages[1]["content"] = user_goal + "\n\n" + worksheet()
+            except Exception:
+                pass
         msg = None
         for attempt in range(3):
             try:
@@ -864,6 +871,14 @@ def run_one(inst):
     if _tri:
         fix_goal += "\n\n" + _tri
         print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
+    try:
+        for _ln in (_tri or "").splitlines():
+            if "the fix is done when:" in _ln:
+                f_state["triage_goal"] = _ln.split("when:", 1)[1].strip()
+            if "reproduction must show:" in _ln:
+                f_state["triage_repro"] = _ln.split("show:", 1)[1].strip()
+    except Exception:
+        pass
     _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])
     if not _probe and _inv:
         print(" -- probe empty; retrying once", flush=True)
@@ -880,9 +895,11 @@ def run_one(inst):
         print(f" -- injected {len(pats)} engineering patterns", flush=True)
     if _kb:
         fix_goal += "\n\n" + _kb
+    from swe_fix_tools import render_worksheet as _rw
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
+                                          worksheet=lambda: _rw(f_state),
                                           gate=lambda: f_state["fix_verified"],
                                           checkpoint=ckpt)
     # Score with the exact SWE-bench recipe.
