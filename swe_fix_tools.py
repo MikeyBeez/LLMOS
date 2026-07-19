@@ -796,6 +796,12 @@ FIX_SYSTEM_PROMPT = (
     "  7. If verify_fix still fails, return to step 3 with the new evidence.\n"
     "  8. submit — only accepted after RED (step 1) then GREEN (step 5) with a "
     "real diff.\n\n"
+    "NAMING: when your change produces user-facing text -- a column header, "
+    "a label, a message, a key -- name it after the FIELD it displays, using "
+    "the codebase's own vocabulary, NOT the issue reporter's wording. If a "
+    "column shows the value of `rule.subdomain`, its header is \"Subdomain\", "
+    "not a synonym you invented. The maintainers name things after their own "
+    "attributes.\n\n"
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )
