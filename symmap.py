@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""symmap: ephemeral system map + pseudo-code map for one repo checkout.
+
+Mikey's spec, 2026-07-18: "go into the code, find out what it's called, write
+it to state" / "you might want to also create a pseudo code map" / "probably
+not something that should be saved for more than one session."
+
+Design, per those three sentences:
+  EPHEMERAL by design. Each instance checks out a different base commit, so a
+  cached map would describe the wrong code. Rebuild per checkout (~2s for
+  django); maps live in ~/swe/symmaps/ keyed by work-dir name, OUTSIDE the repo
+  tree so they can never appear in the model's git diff. Wiped per session.
+
+  TWO LAYERS, both mechanical (stdlib ast, no LLM, no dice):
+    symbols:  name -> [file:line, kind] for every function/class/method.
+              The lookup that replaces grep-and-guess, and the lexicon the
+              naming lint checks coined words against.
+    pseudo:   name -> signature + first docstring line. The repo's own
+              pseudo-code: "parse_http_date(date) -- Parse a date in one of
+              the HTTP date formats and return a datetime". Undocumented
+              functions get signature only; deeper LLM summaries are a
+              possible later layer, not this one (easier-way principle).
+
+Standalone tool: NOT imported by the frozen v3 runner. Wiring into locate /
+triage-slices / the naming lint is v4 work, after 300/300.
+
+usage:
+  symmap.py build <repo_dir> [pkg_subdir]     build both layers
+  symmap.py lookup <repo_dir> <name>          where is it + what does it do
+  symmap.py slice <repo_dir> <module_prefix>  pseudo-code for one subsystem
+  symmap.py lexicon <repo_dir> <file.py>      identifier vocabulary of a file
+"""
+import ast
+import json
+import os
+import sys
+import time
+
+MAPDIR = os.path.expanduser("~/swe/symmaps")
+
+
+def _map_path(repo_dir):
+    return os.path.join(MAPDIR, os.path.basename(os.path.abspath(repo_dir)) + ".json")
+
+
+def _sig(node):
+    a = node.args
+    parts = [x.arg for x in a.posonlyargs] + [x.arg for x in a.args]
+    if a.vararg:
+        parts.append("*" + a.vararg.arg)
+    if a.kwonlyargs:
+        if not a.vararg:
+            parts.append("*")
+        parts += [x.arg for x in a.kwonlyargs]
+    if a.kwarg:
+        parts.append("**" + a.kwarg.arg)
+    return "(%s)" % ", ".join(parts)
+
+
+def build(repo_dir, pkg=None):
+    """Walk the package, build symbols + pseudo layers, write the map."""
+    t0 = time.time()
+    root = os.path.join(repo_dir, pkg) if pkg else repo_dir
+    symbols = {}
+    pseudo = {}
+    files = 0
+    for dp, dns, fns in os.walk(root):
+        # skip test trees, venvs and vendored deps: the map is the SOURCE's anatomy
+        dns[:] = [d for d in dns if d not in
+                  (".git", ".venv", ".condaenv", "node_modules", "__pycache__")
+                  and not d.startswith("test")]
+        for fn in fns:
+            if not fn.endswith(".py") or fn.startswith("test_"):
+                continue
+            p = os.path.join(dp, fn)
+            try:
+                tree = ast.parse(open(p, encoding="utf-8", errors="ignore").read())
+            except SyntaxError:
+                continue
+            files += 1
+            rel = os.path.relpath(p, repo_dir)
+
+            def visit(node, prefix=""):
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        qual = prefix + child.name
+                        symbols.setdefault(child.name, []).append(
+                            {"loc": "%s:%d" % (rel, child.lineno),
+                             "kind": "method" if prefix else "function",
+                             "qual": qual})
+                        doc = (ast.get_docstring(child) or "").strip().splitlines()
+                        pseudo[qual] = {"sig": child.name + _sig(child),
+                                        "doc": doc[0][:140] if doc else "",
+                                        "loc": "%s:%d" % (rel, child.lineno)}
+                    elif isinstance(child, ast.ClassDef):
+                        symbols.setdefault(child.name, []).append(
+                            {"loc": "%s:%d" % (rel, child.lineno),
+                             "kind": "class", "qual": child.name})
+                        doc = (ast.get_docstring(child) or "").strip().splitlines()
+                        pseudo[child.name] = {"sig": "class " + child.name,
+                                              "doc": doc[0][:140] if doc else "",
+                                              "loc": "%s:%d" % (rel, child.lineno)}
+                        visit(child, child.name + ".")
+
+            visit(tree)
+    os.makedirs(MAPDIR, exist_ok=True)
+    blob = {"built": int(time.time()), "repo_dir": os.path.abspath(repo_dir),
+            "files": files, "symbols": symbols, "pseudo": pseudo}
+    json.dump(blob, open(_map_path(repo_dir), "w"))
+    dt = time.time() - t0
+    print("mapped %d files in %.1fs: %d names, %d pseudo entries -> %s"
+          % (files, dt, len(symbols), len(pseudo), _map_path(repo_dir)))
+    return blob
+
+
+def _load(repo_dir):
+    p = _map_path(repo_dir)
+    if not os.path.isfile(p):
+        return build(repo_dir)
+    return json.load(open(p))
+
+
+def lookup(repo_dir, name):
+    m = _load(repo_dir)
+    hits = m["symbols"].get(name)
+    if not hits:
+        near = [k for k in m["symbols"] if name.lower() in k.lower()][:8]
+        print("no exact hit for %r; near: %s" % (name, near))
+        return
+    for h in hits:
+        ps = m["pseudo"].get(h["qual"]) or m["pseudo"].get(name) or {}
+        print("%-9s %-40s %s" % (h["kind"], h["loc"], ps.get("sig", "")))
+        if ps.get("doc"):
+            print("          %s" % ps["doc"])
+
+
+def slice_module(repo_dir, prefix):
+    m = _load(repo_dir)
+    rows = [(q, v) for q, v in m["pseudo"].items() if v["loc"].startswith(prefix)]
+    rows.sort(key=lambda r: r[1]["loc"])
+    for q, v in rows[:80]:
+        print("%-32s %s%s" % (v["loc"], v["sig"],
+                              ("  -- " + v["doc"]) if v["doc"] else ""))
+    print("(%d entries in %s)" % (len(rows), prefix))
+
+
+def lexicon(repo_dir, relfile):
+    """Identifier vocabulary of one file: what the naming lint checks against."""
+    p = os.path.join(repo_dir, relfile)
+    tree = ast.parse(open(p, encoding="utf-8", errors="ignore").read())
+    words = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            words.add(node.name)
+        elif isinstance(node, ast.arg):
+            words.add(node.arg)
+        elif isinstance(node, ast.Attribute):
+            words.add(node.attr)
+        elif isinstance(node, ast.Name):
+            words.add(node.id)
+    words = sorted(w for w in words if not w.startswith("_") and len(w) > 2)
+    print(json.dumps(words))
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
+    if cmd == "build":
+        build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    elif cmd == "lookup":
+        lookup(sys.argv[2], sys.argv[3])
+    elif cmd == "slice":
+        slice_module(sys.argv[2], sys.argv[3])
+    elif cmd == "lexicon":
+        lexicon(sys.argv[2], sys.argv[3])
+    else:
+        print(__doc__)
