@@ -346,6 +346,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "baseline_pass": None,   # neighbor tests passing pre-patch
              "regressions": [],
              "repro_script": None,      # the registered failing script
+             "repro_mode": "script",    # "script" (python -c) or "pytest"
              "seen_red": False,         # a reproduction has failed (bug shown)
              "repro_green": False,      # registered script now exits 0
              "probe_script": None,      # LOCKED issue-invariant probe (immutable)
@@ -431,6 +432,28 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["regressions"] = regressed
         return regressed
 
+    def _exec_repro(script, mode, timeout=300):
+        """Run the reproduction with the instrument its problem type needs.
+        Returns the completed process. mode=="pytest" runs it through the repo's
+        own framework via a temp file OUTSIDE the repo (so it never enters the
+        model's git diff). Nonzero exit = RED; for pytest, exit 5 (no tests)
+        is caller-checked as INVALID, not red."""
+        if mode == "pytest":
+            import tempfile
+            fd, tmp = tempfile.mkstemp(suffix="_llmos_repro.py", dir="/tmp")
+            os.close(fd)
+            open(tmp, "w").write(script)
+            try:
+                return _run(f"{env_dir}/bin/python -m pytest -x -q "
+                            f"{shlex.quote(tmp)}", timeout=timeout)
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return _run(f"{env_dir}/bin/python -c {shlex.quote(script)}",
+                    timeout=timeout)
+
     def h_reproduce(pcb, args):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
@@ -469,10 +492,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 "reproductions cannot advance the fix. Read fault_locations, "
                 "change the PATCH, then verify_fix. reproduce unlocks after "
                 "your next patch or read_range.")}
-        r = _run(f'{env_dir}/bin/python -c {shlex.quote(script)}', timeout=180)
+        _mode = "pytest" if (args.get("as_pytest")
+                             or bool(re.search(r"^\s*def test_", script, re.M))
+                             ) else "script"
+        r = _exec_repro(script, _mode, timeout=180)
         registered = False
-        if r.returncode != 0:
+        _invalid_pytest = (_mode == "pytest" and r.returncode == 5)  # no tests
+        if r.returncode != 0 and not _invalid_pytest:
             state["repro_script"] = script
+            state["repro_mode"] = _mode
             state["seen_red"] = True
             state["repro_green"] = False
             state["rejected_repro_streak"] = 0
@@ -651,9 +679,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "error": ("no registered reproduction — use reproduce() "
                               "with a script that fails because of the bug "
                               "BEFORE patching")}
-        r = _run(f'{env_dir}/bin/python -c '
-                 f'{shlex.quote(state["repro_script"])}', timeout=300)
-        green = r.returncode == 0
+        r = _exec_repro(state["repro_script"],
+                        state.get("repro_mode", "script"), timeout=300)
+        # pytest exit 5 (no tests collected) is not a pass; only exit 0 is green.
+        green = (r.returncode == 0)
         state["repro_green"] = green
         if green:
             # First red -> green transition freezes the target (see h_reproduce).
@@ -795,15 +824,24 @@ FIX_TOOLS = [
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (
-            "Run a small Python script inside the (verified) venv that demonstrates "
-            "the bug by EXITING NONZERO (uncaught exception or failed assert). The "
-            "last failing script becomes the registered reproduction that verify_fix "
-            "reruns after your patch. Do this FIRST — a fix without a failing "
-            "reproduction is guessing, and submit will be rejected without one."),
+            "Run a reproduction inside the (verified) venv that demonstrates the "
+            "bug by EXITING NONZERO. The last failing reproduction becomes the "
+            "registered one that verify_fix reruns after your patch. Do this "
+            "FIRST. TWO INSTRUMENTS — pick the one that can actually show THIS "
+            "bug: (a) default: a plain script (python -c) for crashes, wrong "
+            "return values, exceptions; (b) as_pytest=true: your script is a "
+            "PYTEST TEST FILE (define test_ functions), run through the project's "
+            "own framework. Use as_pytest for bugs that only manifest INSIDE the "
+            "framework — import machinery, collection, fixtures, plugin behavior, "
+            "test-runner semantics — which a standalone script cannot reproduce."),
         "parameters": {"type": "object", "properties": {
             "python_script": {"type": "string",
-                              "description": "script that raises/asserts on the buggy "
-                                             "behavior, exits 0 once fixed"},
+                              "description": "the reproduction: a script (default) "
+                                             "or a pytest test file (if as_pytest)"},
+            "as_pytest": {"type": "boolean",
+                          "description": "run the reproduction via `pytest` instead "
+                                         "of `python -c`; use for framework-internal "
+                                         "bugs (imports/collection/fixtures/plugins)"},
         }, "required": ["python_script"]}}},
     {"type": "function", "function": {
         "name": "locate",
@@ -878,7 +916,7 @@ FIX_TOOL2SYS = {
 
 FIX_SYSTEM_PROMPT = (
     "The environment is verified and ready. Fix the bug using this loop:\n"
-    "  1. reproduce — write a script that FAILS (nonzero exit: uncaught "
+    "  1. reproduce — write a reproduction that FAILS (nonzero exit: uncaught "
     "exception or assert) because of the reported bug. This registers your "
     "reproduction. If your script exits 0, it does not demonstrate the bug — "
     "rewrite it.\n"
