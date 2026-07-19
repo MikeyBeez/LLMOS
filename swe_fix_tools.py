@@ -55,8 +55,45 @@ def _apply_edit(text, old, new):
     if len(hits) > 1:
         return None, ("old_snippet matches %d places (whitespace-insensitive) - "
                       "add more surrounding context" % len(hits))
-    return None, ("old_snippet not found. Copy it verbatim from read_range output, "
-                  "or include a few unique surrounding lines.")
+    return None, _anchor_diagnostic(tlines, want, olines)
+
+
+def _anchor_diagnostic(tlines, want, olines):
+    """Explain WHY an old_snippet did not match: locate the best partial match
+    and name the first line that diverges, with what the file actually holds
+    there. A constant 'not found' carries no new information, so the model's
+    only move is to resend the same text; a divergence point is actionable.
+    General: no repo-, file- or instance-specific knowledge."""
+    tstrip = [l.strip() for l in tlines]
+    starts = [i for i, l in enumerate(tstrip) if l == want[0]]
+    if not starts:
+        present = sum(1 for w in want if w in tstrip)
+        if present == 0:
+            return ("old_snippet not found: NONE of its %d lines appear in this "
+                    "file. Either the wrong file, or the text came from memory "
+                    "rather than from a read_range of this file. read_range the "
+                    "region, then copy 1-3 lines verbatim." % len(want))
+        return ("old_snippet not found: its first line %r does not appear in "
+                "this file (%d of its %d lines do). Re-anchor on 1-3 lines you "
+                "can see verbatim in a fresh read_range."
+                % (olines[0].strip()[:100], present, len(want)))
+    best_i, best_n = starts[0], 0
+    for i in starts:
+        n = 0
+        while n < len(want) and i + n < len(tstrip) and tstrip[i + n] == want[n]:
+            n += 1
+        if n > best_n:
+            best_i, best_n = i, n
+    j = best_i + best_n
+    sent = want[best_n] if best_n < len(want) else "<snippet ended>"
+    have = tstrip[j] if j < len(tstrip) else "<end of file>"
+    return ("old_snippet not found. It matched the first %d of its %d lines "
+            "starting at file line %d, then diverged at file line %d:\n"
+            "  you sent: %s\n"
+            "  file has: %s\n"
+            "Correct that line, or re-anchor on <=3 lines copied verbatim from "
+            "a fresh read_range. Do NOT resend this snippet unchanged."
+            % (best_n, len(want), best_i + 1, j + 1, sent[:120], have[:120]))
 
 
 def _repo_frames(stderr, repo_dir):
