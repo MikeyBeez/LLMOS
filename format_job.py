@@ -57,17 +57,22 @@ def existing_test_words(repo_dir):
     """Words the repo's PUBLIC tests (base commit) already assert on in CLI
     output -- maintainer testing vocabulary. Legitimate: these files are part
     of the checkout the agent works in."""
+    # LEAKAGE GUARD: read test files from the BASE COMMIT (git show HEAD:),
+    # never the working tree -- after scoring, the tree contains the applied
+    # hidden test patch, and scanning it reads the answer key. Caught live
+    # 2026-07-19: Subdomain/Host appeared in signal B only because the demo
+    # ran post-score. Too-good signals are leakage until proven otherwise.
+    import subprocess
     words = {}
-    for dp, dns, fns in os.walk(repo_dir):
-        dns[:] = [d for d in dns if d not in (".git", ".venv", ".condaenv")]
-        for fn in fns:
-            if not (fn.startswith("test") and fn.endswith(".py")):
-                continue
-            try:
-                txt = open(os.path.join(dp, fn), encoding="utf-8",
-                           errors="ignore").read()
-            except OSError:
-                continue
+    ls = subprocess.run(["git", "-C", repo_dir, "ls-files"],
+                        capture_output=True, text=True).stdout.splitlines()
+    for rel in ls:
+        fn = os.path.basename(rel)
+        if not (fn.startswith("test") and fn.endswith(".py")):
+            continue
+        txt = subprocess.run(["git", "-C", repo_dir, "show", "HEAD:" + rel],
+                             capture_output=True, text=True).stdout
+        if True:
             for m in re.finditer(
                     r"assert\s+[\"\']([A-Z][A-Za-z ]{2,20})[\"\']\s+in", txt):
                 w = m.group(1)
