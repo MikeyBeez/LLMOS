@@ -184,6 +184,40 @@ def _is_test_path(path):
     return bool(_TEST_PATH_RE.search(str(path or "")))
 
 
+def _format_lint(diff_text):
+    """Diff-scoped naming check: added Title-case labels should derive from
+    attributes the added lines read. Returns (warning_or_None)."""
+    import re as _re
+    reads = {}
+    labels = []
+    for ln in diff_text.splitlines():
+        if not ln.startswith("+"):
+            continue
+        for m in _re.finditer(r"\b\w+\.([a-z_][a-z0-9_]*)\b", ln):
+            a = m.group(1)
+            if a not in ("format", "join", "append", "get", "items",
+                         "startswith", "strip", "split", "replace"):
+                reads[a] = reads.get(a, 0) + 1
+        for m in _re.finditer(r"[\"\']([A-Z][A-Za-z]{2,18})[\"\']", ln):
+            labels.append(m.group(1))
+    if not labels or not reads:
+        return None
+    derived = set()
+    for a in reads:
+        derived.add(a.title().replace("_", ""))
+        derived.add(a.replace("_", " ").title())
+        derived.add(a.capitalize())
+    coined = [l for l in sorted(set(labels)) if l not in derived]
+    if not coined:
+        return None
+    cands = sorted(reads, key=reads.get, reverse=True)[:4]
+    return ("FORMAT CHECK: your patch introduces label(s) %s but reads "
+            "attribute(s) %s. Labels should be named after the fields they "
+            "display (e.g. %s). Rename, or be certain the coined word is the "
+            "project's own term." % (coined, cands,
+                                     ", ".join(a.title() for a in cands[:2])))
+
+
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -230,6 +264,8 @@ def render_worksheet(state):
     lines.append("  repro status  : %s" % repro)
     lines.append("  probe status  : %s" % probe)
     lines.append("  patches tried : %s" % pline)
+    if state.get("format_warning"):
+        lines.append("  format check  : %s" % state["format_warning"][:220])
     lines.append("  next          : %s" % nxt)
     return "\n".join(lines)
 
@@ -550,6 +586,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "itself states; your patch fixes your theory of the bug, "
                     "not the reported bug. Re-read the issue and the probe "
                     "output; do not submit until the probe is green.")
+        if result_format_note:
+            result["format_check"] = result_format_note
         _strength = _reproduction_strength(state.get("repro_script") or "")
         result["repro_strength"] = _strength
         if green and _strength != "value_check":
@@ -574,6 +612,18 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if state["patch_history"]:
             state["patch_history"][-1]["verdict"] = (
                 "repro GREEN" if green else "repro still red")
+        if green:
+            try:
+                _d = _run("git diff", timeout=30)
+                state["format_warning"] = _format_lint(_d.stdout or "")
+            except Exception:
+                state["format_warning"] = None
+            if state.get("format_warning"):
+                result_format_note = state["format_warning"]
+            else:
+                result_format_note = None
+        else:
+            result_format_note = None
         if not green:
             _sig = _failure_sig(r.returncode, r.stderr)
             if _sig == state.get("last_verify_sig"):
