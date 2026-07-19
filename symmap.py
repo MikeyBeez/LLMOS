@@ -144,6 +144,37 @@ def slice_module(repo_dir, prefix):
     print("(%d entries in %s)" % (len(rows), prefix))
 
 
+def schema(repo_dir, receiver):
+    """Usage-derived object schema: every attribute the REPO ITSELF accesses
+    on variables named <receiver>. No type inference -- the codebase's own
+    usage is the vocabulary authority. This is the reformatted map (Mikey,
+    2026-07-18): object -> fields, shaped for GENERATION, where the flat
+    name -> location index is shaped for navigation. Would have told the
+    flask-5063 run: rule(subdomain, endpoint, rule, methods, ...) -- the
+    column it printed as "Domain" had a name, and this is where it lived."""
+    import collections
+    counts = collections.Counter()
+    for dp, dns, fns in os.walk(repo_dir):
+        dns[:] = [d for d in dns if d not in (".git", ".venv", ".condaenv",
+                                              "node_modules", "__pycache__")]
+        for fn in fns:
+            if not fn.endswith(".py"):
+                continue
+            try:
+                tree = ast.parse(open(os.path.join(dp, fn), encoding="utf-8",
+                                      errors="ignore").read())
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == receiver):
+                    counts[node.attr] += 1
+    fields = [k for k, _ in counts.most_common() if not k.startswith("_")][:12]
+    print("%s(%s)" % (receiver, ", ".join(fields)))
+    return fields
+
+
 def lexicon(repo_dir, relfile):
     """Identifier vocabulary of one file: what the naming lint checks against."""
     p = os.path.join(repo_dir, relfile)
@@ -170,6 +201,8 @@ if __name__ == "__main__":
         lookup(sys.argv[2], sys.argv[3])
     elif cmd == "slice":
         slice_module(sys.argv[2], sys.argv[3])
+    elif cmd == "schema":
+        schema(sys.argv[2], sys.argv[3])
     elif cmd == "lexicon":
         lexicon(sys.argv[2], sys.argv[3])
     else:
