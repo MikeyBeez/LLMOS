@@ -837,8 +837,11 @@ FIX_SYSTEM_PROMPT = (
     "a label, a message, a key -- name it after the FIELD it displays, using "
     "the codebase's own vocabulary, NOT the issue reporter's wording. If a "
     "column shows the value of `rule.subdomain`, its header is \"Subdomain\", "
-    "not a synonym you invented. The maintainers name things after their own "
-    "attributes.\n\n"
+    "not a synonym you invented. When an object exposes ALTERNATIVE fields "
+    "for the same slot (e.g. `rule.host` vs `rule.subdomain`, chosen by a "
+    "mode flag), read the code to find EVERY such field and cover each with "
+    "its own field-derived label. The maintainers name things after their "
+    "own attributes.\n\n"
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )
