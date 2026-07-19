@@ -586,6 +586,18 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "itself states; your patch fixes your theory of the bug, "
                     "not the reported bug. Re-read the issue and the probe "
                     "output; do not submit until the probe is green.")
+        if green:
+            try:
+                _d = _run("git diff", timeout=30)
+                state["format_warning"] = _format_lint(_d.stdout or "")
+            except Exception:
+                state["format_warning"] = None
+            if state.get("format_warning"):
+                result_format_note = state["format_warning"]
+            else:
+                result_format_note = None
+        else:
+            result_format_note = None
         if result_format_note:
             result["format_check"] = result_format_note
         _strength = _reproduction_strength(state.get("repro_script") or "")
@@ -612,18 +624,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if state["patch_history"]:
             state["patch_history"][-1]["verdict"] = (
                 "repro GREEN" if green else "repro still red")
-        if green:
-            try:
-                _d = _run("git diff", timeout=30)
-                state["format_warning"] = _format_lint(_d.stdout or "")
-            except Exception:
-                state["format_warning"] = None
-            if state.get("format_warning"):
-                result_format_note = state["format_warning"]
-            else:
-                result_format_note = None
-        else:
-            result_format_note = None
         if not green:
             _sig = _failure_sig(r.returncode, r.stderr)
             if _sig == state.get("last_verify_sig"):
