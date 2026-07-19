@@ -75,9 +75,13 @@ def gather(iid, note=""):
 
 def list_records():
     for p in sorted(glob.glob(os.path.join(RDIR, "*.json"))):
-        r = json.load(open(p))
+        try:
+            r = json.load(open(p))
+        except Exception:
+            continue
+        iid = r.get("instance_id") or os.path.basename(p)[:-5]
         print("%-34s attempts=%d  note: %s"
-              % (r["instance_id"], len(r.get("attempts", [])),
+              % (iid, len(r.get("attempts", [])),
                  (r.get("analyst_note") or "")[:80]))
 
 
