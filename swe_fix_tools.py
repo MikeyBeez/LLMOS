@@ -321,6 +321,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "repro_green": False,      # registered script now exits 0
              "probe_script": None,      # LOCKED issue-invariant probe (immutable)
              "probe_green": None,       # probe status after last verify
+             "repro_locked": False,     # reproduction proven green: immutable
              "rejected_repro_streak": 0,  # consecutive green-exit repro scripts
              "patch_history": [],       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
@@ -405,6 +406,23 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
+        if state.get("repro_locked"):
+            # The registered reproduction has already gone RED -> GREEN under
+            # verify_fix. It is the only artifact that can satisfy the submit
+            # gate, so it is immutable from here on: a later script that
+            # happens to exit nonzero must not be allowed to overwrite it and
+            # reset repro_green (observed: an inverted "demonstrate the bug"
+            # script with an unconditional sys.exit(1) replaced a green
+            # reproduction, made verify_fix structurally unreachable, and burned
+            # the remaining budget to an empty diff).
+            return {"error": (
+                "reproduce LOCKED: the registered reproduction has already "
+                "passed verify_fix, so it is now the fixed verification "
+                "target and cannot be replaced. Writing another reproduction "
+                "cannot advance the fix and risks discarding a verified "
+                "state. If your patch is complete, call submit. If you changed "
+                "the source since the last check, call verify_fix — it reruns "
+                "the REGISTERED reproduction and is the only check that counts.")}
         if state.get("rejected_repro_streak", 0) >= 3 and state["seen_red"]:
             return {"error": (
                 "reproduce PAUSED: your last 3 scripts all exited 0 while a "
@@ -598,6 +616,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                  f'{shlex.quote(state["repro_script"])}', timeout=300)
         green = r.returncode == 0
         state["repro_green"] = green
+        if green:
+            # First red -> green transition freezes the target (see h_reproduce).
+            state["repro_locked"] = True
         if green and state.get("probe_script"):
             pr = _run(f"{env_dir}/bin/python -c "
                       f"{shlex.quote(state['probe_script'])}", timeout=180)
