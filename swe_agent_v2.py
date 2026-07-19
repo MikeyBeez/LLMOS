@@ -105,6 +105,40 @@ def _auto_verify_reject_detail(res):
             "harness pick a known-stable test.")
 
 
+
+def _parse_tool_args(s):
+    """Parse a tool-call `arguments` string tolerantly.
+
+    Returns (dict, None) on success or ({}, reason) on failure. Local models
+    routinely truncate long argument strings at the num_predict ceiling; those
+    are unrecoverable and must be reported back to the model rather than
+    dispatched to a handler that will misdiagnose the missing fields.
+    """
+    for kw in ({}, {"strict": False}):
+        try:
+            v = json.loads(s, **kw)
+            if isinstance(v, dict):
+                return v, None
+        except Exception:
+            pass
+    t = s.strip()
+    m = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```$", t, re.S)
+    if m:
+        t = m.group(1).strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i != -1 and j > i:
+        blk = t[i:j + 1]
+        for kw in ({"strict": False}, {}):
+            try:
+                v = json.loads(blk, **kw)
+                if isinstance(v, dict):
+                    return v, None
+            except Exception:
+                pass
+    reason = ("truncated mid-JSON" if not t.rstrip().endswith("}")
+              else "malformed JSON")
+    return {}, reason
+
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, gate=None, log=print, checkpoint=None, worksheet=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
@@ -160,11 +194,34 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         fn = tc.get("function", {})
         tool = fn.get("name", "")
         args = fn.get("arguments") or {}
+        args_err = None
         if isinstance(args, str):
-            try: args = json.loads(args)
-            except Exception: args = {"_raw": args}
+            args, args_err = _parse_tool_args(args)
         target = tool2sys.get(tool, "")
         log(f"  [{turn:>2}] {tool}({str(args)[:80]}) -> ", end="", flush=True)
+        if args_err is not None:
+            # The argument string never parsed -- almost always because the
+            # generation was cut off at the num_predict ceiling. Dispatching
+            # a placeholder dict here makes the handler answer with a
+            # misleading error about the missing field, and the model, having
+            # no idea its JSON was truncated, re-sends the identical call.
+            # Nothing is executed; say what actually happened instead.
+            log(f"ARGS-UNPARSEABLE ({args_err})")
+            messages.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"id": f"t{turn}", "type": "function",
+                                             "function": {"name": tool,
+                                                          "arguments": "{}"}}]})
+            messages.append({"role": "tool", "tool_call_id": f"t{turn}",
+                             "content": json.dumps({
+                                 "error": "your tool-call arguments were not valid "
+                                          f"JSON ({args_err}); NOTHING was executed",
+                                 "hint": "The argument string ended early, so this "
+                                         "call never ran. Re-send the same tool call "
+                                         "with complete, valid JSON. If the payload "
+                                         "is long, make it smaller: patch fewer lines "
+                                         "per call, or split a long script across "
+                                         "several calls."})})
+            continue
         # Terminal tool: check gate then break out.
         if target == "RETURN":
             if gate is not None and not gate():
