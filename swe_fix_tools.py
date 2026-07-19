@@ -197,7 +197,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "seen_red": False,         # a reproduction has failed (bug shown)
              "repro_green": False,      # registered script now exits 0
              "probe_script": None,      # LOCKED issue-invariant probe (immutable)
-             "probe_green": None}       # probe status after last verify
+             "probe_green": None,       # probe status after last verify
+             "rejected_repro_streak": 0}  # consecutive green-exit repro scripts
 
     def _run(cmd, timeout=300):
         env = os.environ.copy()
@@ -278,12 +279,20 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
+        if state.get("rejected_repro_streak", 0) >= 3 and state["seen_red"]:
+            return {"error": (
+                "reproduce PAUSED: your last 3 scripts all exited 0 while a "
+                "failing reproduction is ALREADY registered. Writing more "
+                "reproductions cannot advance the fix. Read fault_locations, "
+                "change the PATCH, then verify_fix. reproduce unlocks after "
+                "your next patch or read_range.")}
         r = _run(f'{env_dir}/bin/python -c {shlex.quote(script)}', timeout=180)
         registered = False
         if r.returncode != 0:
             state["repro_script"] = script
             state["seen_red"] = True
             state["repro_green"] = False
+            state["rejected_repro_streak"] = 0
             registered = True
             if state["baseline_pass"] is None:   # pre-patch: valid baseline
                 _hint_paths = [fl.split(":", 1)[0] for fl in
@@ -306,6 +315,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                               "an assert or uncaught exception) because of "
                               "the reported bug.")
         else:
+            state["rejected_repro_streak"] = state.get("rejected_repro_streak", 0) + 1
             # Rejected AFTER a red reproduction is already registered. This
             # branch used to attach NO note, so the model got a bare
             # registered_as_reproduction:False with nothing to act on and
@@ -378,6 +388,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return result
 
     def h_read_range(pcb, args):
+        state["rejected_repro_streak"] = 0
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
@@ -421,6 +432,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["fix_verified"] = False
         state["same_verify_count"] = 0
         state["last_verify_sig"] = None
+        state["rejected_repro_streak"] = 0
         return {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                 "delta_bytes": len(new) - len(old),
                 "match": _how, "note": "verification invalidated — run verify_fix"}

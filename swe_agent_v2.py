@@ -471,7 +471,22 @@ def score(inst, repo, env_vars, env_kind="uv"):
     res = _tr.run_tests(repo, env_kind, inst["FAIL_TO_PASS"],
                         env_vars=env_vars, repo=inst["repo"], timeout=600,
                         log_path=os.path.join(SCORE_LOGS, inst["instance_id"] + ".log"))
-    return res["ok"], len(diff), res["tail"]
+    return res["ok"], len(diff), _clean_tail(res["tail"])
+
+
+def _clean_tail(tail):
+    """End score_tail at the last real test-summary line; drop trailing
+    server-log noise (e.g. the local-httpbin flasgger warning) that otherwise
+    pollutes FN-triage telemetry."""
+    lines = (tail or "").splitlines()
+    pat = re.compile(r"(passed|failed|error|\bOK\b|FAILED|no tests ran|===)", re.I)
+    last = None
+    for i, ln in enumerate(lines):
+        if pat.search(ln):
+            last = i
+    if last is None:
+        return tail
+    return "\n".join(lines[:last + 1])
 
 
 def install_spec_extras(repo_dir, env_kind, env_vars, iid):
@@ -843,10 +858,16 @@ def run_one(inst):
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
     _tri, _inv = _triage(inst["problem_statement"], inst["repo"])
+    if not _tri:
+        print(" -- triage empty; retrying once", flush=True)
+        _tri, _inv = _triage(inst["problem_statement"], inst["repo"])
     if _tri:
         fix_goal += "\n\n" + _tri
         print(" -- triage: %s" % _tri.splitlines()[1].strip(), flush=True)
     _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])
+    if not _probe and _inv:
+        print(" -- probe empty; retrying once", flush=True)
+        _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])
     _probe_status = f_handlers["_lock_probe"](_probe) if _probe else "none"
     _atlas = _load_atlas(inst["repo"], exclude_iid=inst["instance_id"])
     if _atlas:
@@ -885,6 +906,8 @@ def run_one(inst):
                         "fix_state": f_state, "outcome": outcome})
     outcome["probe_status"] = _probe_status
     outcome["probe_green"] = f_state.get("probe_green")
+    outcome["repro_green"] = f_state.get("repro_green")
+    outcome["seen_red"] = f_state.get("seen_red")
     if outcome.get("resolved"):
         _atlas_learn(inst)   # learning is a side effect of running, not a chore
     return outcome
