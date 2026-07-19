@@ -1,25 +1,35 @@
-# Knowledge: pytest-dev/pytest
+# pytest-dev/pytest -- repo knowledge
 
-Accumulated notes for working on `pytest-dev/pytest`. Loaded whenever this repo is the 
-target. Append anything learned. Keep every entry GENERAL to the package —
-never an instance-specific fix (that would leak the answer).
+## PROTOCOL: import-machinery bugs have ONE canonical fix (use the import tool)
 
-_Seeded from 1 resolved run(s)._
+pytest bugs cluster in its IMPORT MACHINERY (`src/_pytest/pathlib.py`,
+`import_path`, importlib mode, namespace packages, rootdir/conftest
+collection). When the symptom is "the same module imported twice yields two
+different objects" / "state set during import is lost" / "module imported once
+under importlib appears twice":
 
-## Environment (what has worked)
+The fix is ALWAYS the same symbolic shape -- BEFORE constructing a fresh module
+object, check the cache and return the existing one:
 
-- Python seen working: 3.11
-- Backend: uv
-- Common installs: attrs, xmlschema, hypothesis
+    if mode is ImportMode.importlib:
+        module_name = module_name_from_path(path, root)
+        with contextlib.suppress(KeyError):        # <-- the fix
+            return sys.modules[module_name]
+        # ... only now build the module via meta_path / spec
 
+Equivalently `if module_name in sys.modules: return sys.modules[module_name]`.
+This is exactly what `import_tool.import_from_path` does (cache check first).
+Do not reason it out fresh -- MIRROR the import tool's contract: return the
+cached module; build once; cache before exec.
 
-## Fix landscape (orientation, NOT answers)
+VERIFICATION: this bug is INSIDE pytest's own collector -- it cannot be shown
+by a standalone `python -c` script. Reproduce with as_pytest=true (a pytest
+test that imports the same module two ways and asserts identity), so the
+reproduction runs through the framework that actually exhibits the bug. A
+standalone repro will stay red forever and hide a correct fix.
 
-Resolved fixes in this package have touched:
+Reference specimen: pytest-11148 (module imported twice under import-mode=
+importlib; two `pmxbot.logging` objects; class var `store` lost).
 
-- `src/_pytest/assertion/rewrite.py`
-
-## Gotchas
-
-- Import-machinery bugs (importlib import-mode) are PYTHON-VERSION SENSITIVE. Reproduce on the canonical interpreter (3.9 for the 8.x era) or the bug won't behave as reported.
-- Double-import under importlib mode -> two distinct module objects (`sys.modules[name] is mod` -> False), so state set on one copy is invisible on the other. The fix is a `sys.modules` cache-check in `import_path()`. COMMON MISS: patching a neighbor in `src/_pytest/pathlib.py` (e.g. `insert_missing_modules`) instead of `import_path` — right file, wrong function.
+## Environment
+- pytest 7.x/8.x era -> Python 3.9+. Tests: `pytest testing/`.
