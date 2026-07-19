@@ -255,6 +255,35 @@ def _format_lint(diff_text):
                                      ", ".join(a.title() for a in cands[:2])))
 
 
+def _coined_from_warning(warning):
+    """Labels _format_lint flagged as coined, recovered from its message."""
+    if not warning:
+        return []
+    head = str(warning).split("but reads")[0]
+    return re.findall(r"[\"\']([A-Za-z][A-Za-z]{1,18})[\"\']", head)
+
+
+def _format_objects_to_repro(state):
+    """True when the harness's own naming check objects to a label that the
+    LOCKED reproduction hard-codes as its acceptance criterion.
+
+    This is the one situation where the frozen verification target is itself
+    what the harness is complaining about: complying with the format check
+    necessarily turns the locked reproduction red, so the agent is pinned to
+    the flagged wording. Capped at one unlock per run -- the latch's whole
+    purpose is to stop reproduction thrash, and one rewrite is not thrash.
+    """
+    if state.get("format_unlocks", 0) >= 1:
+        return False
+    script = state.get("repro_script") or ""
+    if not script:
+        return False
+    for label in _coined_from_warning(state.get("format_warning")):
+        if label in script:
+            return True
+    return False
+
+
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -406,6 +435,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
+        if state.get("repro_locked") and _format_objects_to_repro(state):
+            # One narrow exemption to the latch. The harness's own format
+            # check has flagged a coined label, and that same label is the
+            # acceptance assertion of the frozen reproduction -- so the
+            # harness is simultaneously telling the agent to rename it and
+            # refusing to let it. Observed on pallets__flask-5063 iter5:
+            # three compliance attempts, three forced reverts, shipped the
+            # flagged label. Allow the target to be rewritten once.
+            state["repro_locked"] = False
+            state["format_unlocks"] = state.get("format_unlocks", 0) + 1
         if state.get("repro_locked"):
             # The registered reproduction has already gone RED -> GREEN under
             # verify_fix. It is the only artifact that can satisfy the submit
