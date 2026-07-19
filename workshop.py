@@ -1,0 +1,136 @@
+"""WORKSHOP MODE (Mikey, 2026-07-19): iterate on failures until they crack.
+
+"When these four are finished, start over again on the failures. Keep
+iterating over them until you fix them. Then move on to the next four. It's
+not a benchmark until we run it all at once."
+
+Protocol per iteration:
+  1. Read the current failset (runs/workshop/failset.json).
+  2. Run each still-failing instance once through the CURRENT harness (TTS-2,
+     best-by-form). Fresh process each iteration -> latest harness including
+     the worksheet is live.
+  3. Instances that resolve GRADUATE (removed from the failset, recorded in
+     graduated.json with the iteration number and what changed since last try).
+  4. STOP after one full pass. Analysis and harness fixes happen between
+     iterations -- that is the human+Claude part; this script only runs.
+
+Integrity rules (unchanged, absolute): fixes between iterations must be
+GENERAL -- scaffold/knowledge improvements, never instance-specific answers.
+Atlas leave-one-out stays on. The reported number only ever comes from a
+single-config full-300 run at the end.
+
+usage: workshop.py <iteration_number>
+writes runs/workshop/iter<N>.json + updates failset.json/graduated.json
+"""
+import json, os, sys, time, socket, subprocess
+
+WDIR = os.path.expanduser("~/swe/runs/workshop")
+os.makedirs(WDIR, exist_ok=True)
+ITER = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+FAILSET = os.path.join(WDIR, "failset.json")
+GRAD = os.path.join(WDIR, "graduated.json")
+OUT = os.path.join(WDIR, "iter%d.json" % ITER)
+MAX_ATTEMPTS = 2
+
+
+def busy():
+    pats = "[r]erun_failed4.py|[r]un300_v3.py|[t]riage_test.py|[a]tlas_test.py"
+    return bool(subprocess.run(["pgrep", "-f", pats],
+                               capture_output=True, text=True).stdout.strip())
+
+
+while busy():
+    print("busy: waiting", flush=True)
+    time.sleep(180)
+print("idle -> workshop iteration %d" % ITER, flush=True)
+time.sleep(15)
+
+sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
+os.environ.pop("DISABLE_KB", None)
+os.environ["USE_SPEC_ENV"] = "1"
+os.environ["TOOL_BUDGET_RECENT"] = "6000"
+os.environ["TOOL_BUDGET_OLD"] = "1200"
+os.environ["TOOL_RECENT_TURNS"] = "16"
+os.environ["TRIAGE"] = "1"
+os.environ["ATLAS_DIR"] = os.path.expanduser("~/swe/atlas")
+import swe_agent_v2 as A
+
+CANON = json.load(open(os.path.expanduser("~/swe/canonical_python.json")))
+insts = {i["instance_id"]: i
+         for i in json.load(open(os.path.expanduser("~/swe/instances_full300.json")))}
+failset = json.load(open(FAILSET))
+try:
+    grad = json.load(open(GRAD))
+except Exception:
+    grad = []
+try:
+    results = json.load(open(OUT))
+except Exception:
+    results = []
+done = {r["id"] for r in results}
+
+
+def self_verified(r):
+    return bool(r.get("fix_verified_by_model")) and (r.get("patch_bytes") or 0) > 0
+
+
+def form_rank(r):
+    return (int(bool(r.get("fix_verified_by_model"))) * 8
+            + int(bool(r.get("repro_green"))) * 4
+            + int(bool(r.get("probe_green"))) * 2
+            + int((r.get("patch_bytes") or 0) > 0))
+
+
+def wait_net():
+    while True:
+        try:
+            socket.create_connection(("pypi.org", 443), timeout=10).close()
+            return
+        except OSError:
+            time.sleep(60)
+
+
+print("failset: %s" % failset, flush=True)
+for iid in [i for i in failset if i not in done]:
+    inst = insts[iid]
+    pin = CANON.get(iid)
+    if pin:
+        os.environ["PIN_PYTHON"] = pin
+    else:
+        os.environ.pop("PIN_PYTHON", None)
+    if pin in ("3.6", "3.7"):
+        os.environ["PIN_BACKEND"] = "conda"
+    else:
+        os.environ.pop("PIN_BACKEND", None)
+    attempts = []
+    for k in range(MAX_ATTEMPTS):
+        wait_net()
+        t0 = time.time()
+        try:
+            r = A.run_one(inst)
+        except Exception as e:
+            r = {"id": iid, "resolved": False, "error": str(e)}
+        r["attempt"] = k + 1
+        r["attempt_secs"] = round(time.time() - t0)
+        attempts.append(r)
+        if self_verified(r):
+            break
+    chosen = dict(max(attempts, key=form_rank))
+    chosen["attempts_made"] = len(attempts)
+    chosen["iteration"] = ITER
+    results.append(chosen)
+    json.dump(results, open(OUT, "w"), indent=2)
+    if chosen.get("resolved"):
+        grad.append({"id": iid, "iteration": ITER, "ts": int(time.time())})
+        failset = [x for x in failset if x != iid]
+        json.dump(failset, open(FAILSET, "w"))
+        json.dump(grad, open(GRAD, "w"), indent=2)
+    print("[iter%d] %s %s (probe=%s ranks_max=%d)"
+          % (ITER, iid, "GRADUATED" if chosen.get("resolved") else "still failing",
+             chosen.get("probe_status"), form_rank(chosen)), flush=True)
+
+print("\nITERATION %d COMPLETE" % ITER, flush=True)
+print("graduated so far: %s" % [g["id"] for g in grad], flush=True)
+print("still failing: %s" % failset, flush=True)
+print("-> analyze traces, make GENERAL fixes, then run iteration %d" % (ITER + 1),
+      flush=True)
