@@ -64,7 +64,6 @@ def build(repo_dir, pkg=None):
     symbols = {}
     pseudo = {}
     files = 0
-    flows = []
     for dp, dns, fns in os.walk(root):
         # skip test trees, venvs and vendored deps: the map is the SOURCE's anatomy
         dns[:] = [d for d in dns if d not in
@@ -79,11 +78,6 @@ def build(repo_dir, pkg=None):
             except SyntaxError:
                 continue
             files += 1
-            try:
-                _rel = os.path.relpath(p, repo_dir)
-                flows.extend(_collect_flows(tree, _rel))
-            except Exception:
-                pass
             rel = os.path.relpath(p, repo_dir)
 
             def visit(node, prefix=""):
@@ -111,7 +105,7 @@ def build(repo_dir, pkg=None):
             visit(tree)
     os.makedirs(MAPDIR, exist_ok=True)
     blob = {"built": int(time.time()), "repo_dir": os.path.abspath(repo_dir),
-            "files": files, "symbols": symbols, "pseudo": pseudo, "flows": flows}
+            "files": files, "symbols": symbols, "pseudo": pseudo}
     json.dump(blob, open(_map_path(repo_dir), "w"))
     dt = time.time() - t0
     print("mapped %d files in %.1fs: %d names, %d pseudo entries -> %s"
@@ -148,151 +142,6 @@ def slice_module(repo_dir, prefix):
         print("%-32s %s%s" % (v["loc"], v["sig"],
                               ("  -- " + v["doc"]) if v["doc"] else ""))
     print("(%d entries in %s)" % (len(rows), prefix))
-
-
-
-TYPING_SUBSCRIPTS = {
-    "Dict", "List", "Set", "Tuple", "Optional", "Union", "Callable", "Type",
-    "Sequence", "Mapping", "MutableMapping", "Iterable", "Iterator", "FrozenSet",
-    "DefaultDict", "Deque", "Literal", "Annotated", "ClassVar", "Final",
-    "Awaitable", "Coroutine", "Generator", "AsyncGenerator", "ContextManager",
-    "typing.Dict", "typing.List", "typing.Optional", "typing.Union", "dict",
-    "list", "set", "tuple", "frozenset"}
-
-MUTATORS = {"append", "add", "update", "extend", "setdefault", "pop",
-            "insert", "remove", "discard", "clear"}
-
-
-def _src(node, cap=90):
-    try:
-        s = ast.unparse(node)
-    except Exception:
-        return "?"
-    s = " ".join(s.split())
-    return s[:cap]
-
-
-class _FlowCollector(ast.NodeVisitor):
-    """Every operation that puts a value into, or takes one out of, a named
-    container. The container is recorded by its SOURCE TEXT (`sys.modules`,
-    `self._cache`) so the same container is recognisable across files."""
-
-    def __init__(self, relpath):
-        self.rel = relpath
-        self.func = []
-        self.ops = []
-
-    def _where(self, node):
-        return ("%s:%d" % (self.rel, getattr(node, "lineno", 0)),
-                self.func[-1] if self.func else "(module)")
-
-    def visit_FunctionDef(self, node):
-        self.func.append(node.name)
-        self.generic_visit(node)
-        self.func.pop()
-    visit_AsyncFunctionDef = visit_FunctionDef
-
-    def _record(self, kind, container, key, value, node):
-        loc, fn = self._where(node)
-        self.ops.append({"kind": kind, "container": _src(container, 60),
-                         "key": _src(key, 60) if key is not None else None,
-                         "value": _src(value, 60) if value is not None else None,
-                         "loc": loc, "func": fn})
-
-    def visit_Assign(self, node):
-        for t in node.targets:
-            if (isinstance(t, ast.Subscript)
-                    and not isinstance(t.slice, ast.Slice)
-                    and _src(t.value, 40) not in TYPING_SUBSCRIPTS):
-                self._record("STORE", t.value, t.slice, node.value, node)
-            elif isinstance(t, ast.Attribute):
-                self._record("SETATTR", t.value, ast.Constant(t.attr),
-                             node.value, node)
-        self.generic_visit(node)
-
-    def visit_Subscript(self, node):
-        if (isinstance(node.ctx, ast.Load)
-                and not isinstance(node.slice, ast.Slice)      # x[:-1] is not a key
-                and _src(node.value, 40) not in TYPING_SUBSCRIPTS):
-            self._record("LOAD", node.value, node.slice, None, node)
-        self.generic_visit(node)
-
-    def visit_Call(self, node):
-        f = node.func
-        if isinstance(f, ast.Attribute) and f.attr in MUTATORS:
-            arg = node.args[0] if node.args else None
-            self._record("CALL:" + f.attr, f.value, None, arg, node)
-        self.generic_visit(node)
-
-
-def _collect_flows(tree, relpath):
-    c = _FlowCollector(relpath)
-    try:
-        c.visit(tree)
-    except Exception:
-        return []
-    return c.ops
-
-
-def flow_map(repo_dir, relfile, near_line=None, span=60, per_container=10):
-    """What the code around near_line DOES WITH VALUES: for every container
-    touched near the edit, every place in the whole package that stores into or
-    loads out of that same container. Returns data."""
-    try:
-        m = _load(repo_dir)
-    except Exception:
-        return None
-    flows = m.get("flows")
-    if not flows:
-        return None
-    local = [o for o in flows
-             if o["loc"].startswith(relfile + ":")
-             and (near_line is None
-                  or abs(int(o["loc"].rsplit(":", 1)[1]) - near_line) <= span)]
-    if not local:
-        return None
-    # containers worth reporting: skip bare locals that appear only once overall
-    names, seen = [], set()
-    for o in local:
-        c = o["container"]
-        if c in seen:
-            continue
-        seen.add(c)
-        names.append(c)
-    out = []
-    for c in names[:6]:
-        ops = [o for o in flows if o["container"] == c]
-        if len(ops) < 2:                     # a container touched once tells you nothing
-            continue
-        stores = [o for o in ops if o["kind"] != "LOAD"]
-        loads = [o for o in ops if o["kind"] == "LOAD"]
-        keys = {o["key"] for o in stores if o["key"]}
-        _keys = sorted(k for k in keys)
-        _finding = None
-        if len(stores) > 1 and len(_keys) > 1:
-            _finding = ("%d writers put values into `%s` under DIFFERENT key "
-                        "expressions (%s). If those are meant to name the same "
-                        "thing, they must agree -- otherwise one logical entry "
-                        "becomes two, and state written through one key is "
-                        "invisible through the other. Check whether they agree; "
-                        "do not assume."
-                        % (len(stores), c, ", ".join("`%s`" % k for k in _keys[:4])))
-        elif len(stores) > 1:
-            _finding = ("%d writers put values into `%s` under the same key "
-                        "expression -- confirm only one of them should run for "
-                        "a given value." % (len(stores), c))
-        out.append({"container": c, "finding": _finding,
-                    "writers": len(stores), "readers": len(loads),
-                    "distinct_key_exprs": _keys[:6],
-                    "ops": [("%-8s %-34s in %-28s %s"
-                             % (o["kind"], o["loc"], o["func"],
-                                ("[%s] = %s" % (o["key"], o["value"]))
-                                if o["kind"] == "STORE" else
-                                ("[%s]" % o["key"] if o["key"] else
-                                 "(%s)" % (o["value"] or ""))))
-                            for o in (stores + loads)[:per_container]]})
-    out.sort(key=lambda d: (d["finding"] is None, -d["writers"]))
-    return out or None
 
 
 def file_map(repo_dir, relfile, near_line=None, window=12, limit=28):

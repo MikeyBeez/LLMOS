@@ -151,14 +151,6 @@ def slice_module(repo_dir, prefix):
 
 
 
-TYPING_SUBSCRIPTS = {
-    "Dict", "List", "Set", "Tuple", "Optional", "Union", "Callable", "Type",
-    "Sequence", "Mapping", "MutableMapping", "Iterable", "Iterator", "FrozenSet",
-    "DefaultDict", "Deque", "Literal", "Annotated", "ClassVar", "Final",
-    "Awaitable", "Coroutine", "Generator", "AsyncGenerator", "ContextManager",
-    "typing.Dict", "typing.List", "typing.Optional", "typing.Union", "dict",
-    "list", "set", "tuple", "frozenset"}
-
 MUTATORS = {"append", "add", "update", "extend", "setdefault", "pop",
             "insert", "remove", "discard", "clear"}
 
@@ -201,9 +193,7 @@ class _FlowCollector(ast.NodeVisitor):
 
     def visit_Assign(self, node):
         for t in node.targets:
-            if (isinstance(t, ast.Subscript)
-                    and not isinstance(t.slice, ast.Slice)
-                    and _src(t.value, 40) not in TYPING_SUBSCRIPTS):
+            if isinstance(t, ast.Subscript):
                 self._record("STORE", t.value, t.slice, node.value, node)
             elif isinstance(t, ast.Attribute):
                 self._record("SETATTR", t.value, ast.Constant(t.attr),
@@ -211,9 +201,7 @@ class _FlowCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Subscript(self, node):
-        if (isinstance(node.ctx, ast.Load)
-                and not isinstance(node.slice, ast.Slice)      # x[:-1] is not a key
-                and _src(node.value, 40) not in TYPING_SUBSCRIPTS):
+        if isinstance(node.ctx, ast.Load):
             self._record("LOAD", node.value, node.slice, None, node)
         self.generic_visit(node)
 
@@ -260,30 +248,16 @@ def flow_map(repo_dir, relfile, near_line=None, span=60, per_container=10):
         seen.add(c)
         names.append(c)
     out = []
-    for c in names[:6]:
+    for c in names[:4]:
         ops = [o for o in flows if o["container"] == c]
         if len(ops) < 2:                     # a container touched once tells you nothing
             continue
         stores = [o for o in ops if o["kind"] != "LOAD"]
         loads = [o for o in ops if o["kind"] == "LOAD"]
         keys = {o["key"] for o in stores if o["key"]}
-        _keys = sorted(k for k in keys)
-        _finding = None
-        if len(stores) > 1 and len(_keys) > 1:
-            _finding = ("%d writers put values into `%s` under DIFFERENT key "
-                        "expressions (%s). If those are meant to name the same "
-                        "thing, they must agree -- otherwise one logical entry "
-                        "becomes two, and state written through one key is "
-                        "invisible through the other. Check whether they agree; "
-                        "do not assume."
-                        % (len(stores), c, ", ".join("`%s`" % k for k in _keys[:4])))
-        elif len(stores) > 1:
-            _finding = ("%d writers put values into `%s` under the same key "
-                        "expression -- confirm only one of them should run for "
-                        "a given value." % (len(stores), c))
-        out.append({"container": c, "finding": _finding,
+        out.append({"container": c,
                     "writers": len(stores), "readers": len(loads),
-                    "distinct_key_exprs": _keys[:6],
+                    "distinct_key_exprs": sorted(k for k in keys)[:6],
                     "ops": [("%-8s %-34s in %-28s %s"
                              % (o["kind"], o["loc"], o["func"],
                                 ("[%s] = %s" % (o["key"], o["value"]))
@@ -291,7 +265,6 @@ def flow_map(repo_dir, relfile, near_line=None, span=60, per_container=10):
                                 ("[%s]" % o["key"] if o["key"] else
                                  "(%s)" % (o["value"] or ""))))
                             for o in (stores + loads)[:per_container]]})
-    out.sort(key=lambda d: (d["finding"] is None, -d["writers"]))
     return out or None
 
 

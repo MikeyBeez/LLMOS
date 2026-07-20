@@ -678,12 +678,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                    "in this file? If your next move is another "
                                    "patch with no check in between, you are "
                                    "guessing." % path)}
-            # what the code DOES WITH THE VALUE: containers written/read near
-            # the edit, their key expressions, and whether the writers agree.
-            _fl = _sm.flow_map(repo_dir, path, near_line=_line)
-            if _fl:
-                out["value_flow"] = [
-                    {k: v for k, v in c.items() if v} for c in _fl[:2]]
         except Exception as _e:
             out["file_map_error"] = str(_e)[:120]
         return out
