@@ -795,17 +795,35 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return out
 
     def h_submit(pcb, args):
-        """Terminal call. Gate: RED seen, same reproduction now GREEN, and a
-        non-empty non-test diff."""
-        if not _gate():
-            return {"error": ("cannot submit: gate not satisfied — "
-                              f"seen_red={state['seen_red']}, "
-                              f"repro_green={state['repro_green']}, "
-                              f"diff_nonempty={_diff_nonempty()}. "
-                              "You need: reproduce() failing (RED), a patch, "
-                              "and verify_fix() passing (GREEN).")}
+        """Terminal call. HARD requirement: a real (non-test) diff. The internal
+        checks (reproduction red->green, invariant probe) are ADVISORY -- they
+        inform, they do not veto, because they are self-authored and a failing
+        self-check on a CORRECT patch would otherwise make the agent undo good
+        work (observed: an agent reverting to an empty diff after 73 turns)."""
+        verified = _gate()          # still computed + recorded for ranking
+        if not _diff_nonempty():
+            return {"error": ("cannot submit: there is no change to submit. "
+                              "The working tree has no non-test source diff. "
+                              "Patch the source, then submit.")}
+        unmet = []
+        if not state["seen_red"]:
+            unmet.append("no failing reproduction was ever registered")
+        elif not state["repro_green"]:
+            unmet.append("your reproduction is still red")
+        if state.get("probe_script") and not state.get("probe_green"):
+            unmet.append("the locked invariant probe is still red")
+        out = {"submitted": True, "summary": args.get("summary", ""),
+               "fix_verified": verified}
         state["submitted"] = True
-        return {"submitted": True, "summary": args.get("summary", "")}
+        if unmet:
+            out["submit_advice"] = (
+                "ACCEPTED with unmet internal checks: %s. These are advisory. "
+                "If your patch is correct but the self-check cannot be made to "
+                "pass (some bugs cannot be observed by a self-authored test), "
+                "submitting is right -- do NOT revert a patch you believe is "
+                "correct just to satisfy an internal check."
+                % "; ".join(unmet))
+        return out
 
     handlers = {
         "swe.reproduce":   h_reproduce,
@@ -929,8 +947,10 @@ FIX_SYSTEM_PROMPT = (
     "  5. verify_fix — reruns YOUR registered reproduction; it must now exit 0.\n"
     "  6. run_tests — run a nearby existing test file to check you broke nothing.\n"
     "  7. If verify_fix still fails, return to step 3 with the new evidence.\n"
-    "  8. submit — only accepted after RED (step 1) then GREEN (step 5) with a "
-    "real diff.\n\n"
+    "  8. submit — requires a real source diff. The reproduction/probe checks "
+    "are ADVISORY: if your patch is correct but the self-check cannot be "
+    "made to pass, submit anyway. NEVER revert a patch you believe is "
+    "correct in order to satisfy an internal check.\n\n"
     "NAMING: when your change produces user-facing text -- a column header, "
     "a label, a message, a key -- name it after the FIELD it displays, using "
     "the codebase's own vocabulary, NOT the issue reporter's wording. If a "
