@@ -17,7 +17,6 @@ usage:
     trace_diff.py --regressions              scan for solves that became misses
 """
 import json, os, sys, glob, collections
-import time
 
 TR = os.path.expanduser("~/swe/traces_v2")
 SNAP = os.path.expanduser("~/swe/traces_snapshots")
