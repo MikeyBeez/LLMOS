@@ -1080,84 +1080,6 @@ def run_one(inst):
     return outcome
 
 
-def _postmortem(inst, blob):
-    """Mechanical analysis of one run -> the research corpus. Counted, not judged."""
-    import collections
-    try:
-        ev = blob.get("phase2_events") or []
-        fs = blob.get("fix_state") or {}
-        oc = blob.get("outcome") or {}
-        names = [e.get("tool") or "" for e in ev]
-
-        def _args(e):
-            a = e.get("args")
-            if isinstance(a, str):
-                try:
-                    a = json.loads(a)
-                except Exception:
-                    a = {}
-            return a if isinstance(a, dict) else {}
-
-        pat = [e for e in ev if e.get("tool") == "patch"]
-        seen, repeats, failed = set(), 0, 0
-        line_mode = esc_tot = esc_fail = 0
-        for e in pat:
-            a = _args(e)
-            snip = str(a.get("old_snippet") or "")
-            key = " ".join(snip.split())[:300] or ("L%s" % a.get("start_line"))
-            if key in seen:
-                repeats += 1
-            seen.add(key)
-            if a.get("start_line") is not None:
-                line_mode += 1
-            has_bs = chr(92) in snip
-            if has_bs:
-                esc_tot += 1
-            if not e.get("ok"):
-                failed += 1
-                if has_bs:
-                    esc_fail += 1
-
-        errs = collections.Counter()
-        for e in ev:
-            er = e.get("error")
-            if er:
-                errs[" ".join(str(er).split())[:110]] += 1
-
-        OBS = {"reproduce", "verify_fix", "run_tests", "read_range",
-               "locate", "check"}
-        pidx = [i for i, n in enumerate(names) if n == "patch"]
-        unobs = sum(1 for a, b in zip(pidx, pidx[1:])
-                    if not any(names[i] in OBS for i in range(a + 1, b)))
-
-        rec = {"iid": inst.get("instance_id"), "repo": inst.get("repo"),
-               "ts": int(time.time()),
-               "resolved": bool(oc.get("resolved")),
-               "ended_by": oc.get("phase2_reason"),
-               "secs": oc.get("secs"), "turns": len(ev),
-               "tools": dict(collections.Counter(names)),
-               "patches": {"attempts": len(pat), "failed": failed,
-                           "distinct": len(seen), "repeated": repeats,
-                           "line_anchored": line_mode,
-                           "unobserved_gaps": unobs,
-                           "escape_anchors": esc_tot,
-                           "escape_anchors_failed": esc_fail},
-               "verification": {"seen_red": fs.get("seen_red"),
-                                "repro_green": fs.get("repro_green"),
-                                "probe_green": fs.get("probe_green"),
-                                "fix_verified": fs.get("fix_verified")},
-               "top_errors": errs.most_common(4)}
-        d = os.path.expanduser("~/swe/research/postmortem")
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "%s.jsonl" % inst.get("instance_id")),
-                  "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + chr(10))
-        return "%d turns, %d patches (%d failed, %d repeated)" % (
-            len(ev), len(pat), failed, repeats)
-    except Exception as e:
-        return "FAILED %s: %s" % (type(e).__name__, str(e)[:90])
-
-
 def _save_trace(inst, blob):
     os.makedirs(TRACES, exist_ok=True)
     # Clean completion supersedes the crash checkpoint.
@@ -1175,7 +1097,6 @@ def _save_trace(inst, blob):
         with open(p, "w") as f:
             json.dump(blob, f, indent=1, default=str)
         print(f" -- trace harvest: {summary}", flush=True)
-        print(" -- postmortem: %s" % _postmortem(inst, blob), flush=True)
     except Exception as e:
         print(f" -- trace harvest failed (trace still saved): {type(e).__name__}: {e}", flush=True)
 
