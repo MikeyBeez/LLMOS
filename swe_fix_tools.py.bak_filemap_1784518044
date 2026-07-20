@@ -651,36 +651,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["rejected_repro_streak"] = 0
         state["patch_history"].append(
             {"file": str(args.get("file", "?")), "verdict": "unverified"})
-        out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
-               "delta_bytes": len(new) - len(old),
-               "match": _how, "note": "verification invalidated — run verify_fix"}
-        # THE MAP, built right before/with every patch (Mikey): mechanical AST,
-        # cached per checkout, outside the repo tree. No choice point -- the
-        # agent cannot patch without receiving an observation of what it changed.
-        try:
-            _idx = text.find(old) if old else -1
-            _line = text[:_idx].count("\n") + 1 if _idx >= 0 else None
-            import symmap as _sm
-            _fm = _sm.file_map(repo_dir, path, near_line=_line)
-            if _fm:
-                _rows = ["%5d  %s%s" % (
-                    r["line"], r["sig"] or r["name"],
-                    ("  -- " + r["doc"]) if r["doc"] else "")
-                    for r in _fm["symbols"]]
-                out["file_map"] = {
-                    "you_edited_inside": _fm["enclosing"] or "(module level)",
-                    "at_line": _line,
-                    "anatomy": _rows,
-                    "how_to_use": ("This is %s, mechanically. Before you patch "
-                                   "again, use it: does the symbol you changed "
-                                   "actually do what you assumed, and is the "
-                                   "thing you are looking for defined elsewhere "
-                                   "in this file? If your next move is another "
-                                   "patch with no check in between, you are "
-                                   "guessing." % path)}
-        except Exception as _e:
-            out["file_map_error"] = str(_e)[:120]
-        return out
+        return {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
+                "delta_bytes": len(new) - len(old),
+                "match": _how, "note": "verification invalidated — run verify_fix"}
 
     def lock_probe(script):
         """Run the triage-written invariant probe once, pre-theory. RED (nonzero

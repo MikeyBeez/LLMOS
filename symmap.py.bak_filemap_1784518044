@@ -144,47 +144,6 @@ def slice_module(repo_dir, prefix):
     print("(%d entries in %s)" % (len(rows), prefix))
 
 
-def file_map(repo_dir, relfile, near_line=None, window=12, limit=28):
-    """Structured anatomy of ONE file: every def/class with signature and its
-    one-line docstring, in line order, windowed around near_line. Returns data;
-    the other entry points print. Used by the patch step."""
-    try:
-        m = _load(repo_dir)
-    except Exception:
-        return None
-    rows = []
-    for q, v in m.get("pseudo", {}).items():
-        loc = v.get("loc") or ""
-        path, _, ln = loc.rpartition(":")
-        if path != relfile:
-            continue
-        try:
-            ln = int(ln)
-        except ValueError:
-            continue
-        rows.append({"name": q, "line": ln, "sig": v.get("sig", ""),
-                     "doc": (v.get("doc") or "")[:110]})
-    if not rows:
-        return None
-    rows.sort(key=lambda r: r["line"])
-    enclosing = None
-    if near_line is not None:
-        for r in rows:
-            if r["line"] <= near_line:
-                enclosing = r["name"]
-            else:
-                break
-        keep = [r for r in rows if abs(r["line"] - near_line) <= 400]
-        rows = keep or rows
-    if len(rows) > limit:
-        if near_line is not None:
-            rows.sort(key=lambda r: abs(r["line"] - near_line))
-            rows = sorted(rows[:limit], key=lambda r: r["line"])
-        else:
-            rows = rows[:limit]
-    return {"file": relfile, "enclosing": enclosing, "symbols": rows}
-
-
 def schema(repo_dir, receiver):
     """Usage-derived object schema: every attribute the REPO ITSELF accesses
     on variables named <receiver>. No type inference -- the codebase's own
