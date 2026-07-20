@@ -255,35 +255,6 @@ def _format_lint(diff_text):
                                      ", ".join(a.title() for a in cands[:2])))
 
 
-def _coined_from_warning(warning):
-    """Labels _format_lint flagged as coined, recovered from its message."""
-    if not warning:
-        return []
-    head = str(warning).split("but reads")[0]
-    return re.findall(r"[\"\']([A-Za-z][A-Za-z]{1,18})[\"\']", head)
-
-
-def _format_objects_to_repro(state):
-    """True when the harness's own naming check objects to a label that the
-    LOCKED reproduction hard-codes as its acceptance criterion.
-
-    This is the one situation where the frozen verification target is itself
-    what the harness is complaining about: complying with the format check
-    necessarily turns the locked reproduction red, so the agent is pinned to
-    the flagged wording. Capped at one unlock per run -- the latch's whole
-    purpose is to stop reproduction thrash, and one rewrite is not thrash.
-    """
-    if state.get("format_unlocks", 0) >= 1:
-        return False
-    script = state.get("repro_script") or ""
-    if not script:
-        return False
-    for label in _coined_from_warning(state.get("format_warning")):
-        if label in script:
-            return True
-    return False
-
-
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -346,12 +317,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "baseline_pass": None,   # neighbor tests passing pre-patch
              "regressions": [],
              "repro_script": None,      # the registered failing script
-             "repro_mode": "script",    # "script" (python -c) or "pytest"
              "seen_red": False,         # a reproduction has failed (bug shown)
              "repro_green": False,      # registered script now exits 0
              "probe_script": None,      # LOCKED issue-invariant probe (immutable)
              "probe_green": None,       # probe status after last verify
-             "repro_locked": False,     # reproduction proven green: immutable
              "rejected_repro_streak": 0,  # consecutive green-exit repro scripts
              "patch_history": [],       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
@@ -432,59 +401,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["regressions"] = regressed
         return regressed
 
-    def _exec_repro(script, mode, timeout=300):
-        """Run the reproduction with the instrument its problem type needs.
-        Returns the completed process. mode=="pytest" runs it through the repo's
-        own framework via a temp file OUTSIDE the repo (so it never enters the
-        model's git diff). Nonzero exit = RED; for pytest, exit 5 (no tests)
-        is caller-checked as INVALID, not red."""
-        if mode == "pytest":
-            import tempfile
-            fd, tmp = tempfile.mkstemp(suffix="_llmos_repro.py", dir="/tmp")
-            os.close(fd)
-            open(tmp, "w").write(script)
-            try:
-                return _run(f"{env_dir}/bin/python -m pytest -x -q "
-                            f"{shlex.quote(tmp)}", timeout=timeout)
-            finally:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-        return _run(f"{env_dir}/bin/python -c {shlex.quote(script)}",
-                    timeout=timeout)
-
     def h_reproduce(pcb, args):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
-        if state.get("repro_locked") and _format_objects_to_repro(state):
-            # One narrow exemption to the latch. The harness's own format
-            # check has flagged a coined label, and that same label is the
-            # acceptance assertion of the frozen reproduction -- so the
-            # harness is simultaneously telling the agent to rename it and
-            # refusing to let it. Observed on pallets__flask-5063 iter5:
-            # three compliance attempts, three forced reverts, shipped the
-            # flagged label. Allow the target to be rewritten once.
-            state["repro_locked"] = False
-            state["format_unlocks"] = state.get("format_unlocks", 0) + 1
-        if state.get("repro_locked"):
-            # The registered reproduction has already gone RED -> GREEN under
-            # verify_fix. It is the only artifact that can satisfy the submit
-            # gate, so it is immutable from here on: a later script that
-            # happens to exit nonzero must not be allowed to overwrite it and
-            # reset repro_green (observed: an inverted "demonstrate the bug"
-            # script with an unconditional sys.exit(1) replaced a green
-            # reproduction, made verify_fix structurally unreachable, and burned
-            # the remaining budget to an empty diff).
-            return {"error": (
-                "reproduce LOCKED: the registered reproduction has already "
-                "passed verify_fix, so it is now the fixed verification "
-                "target and cannot be replaced. Writing another reproduction "
-                "cannot advance the fix and risks discarding a verified "
-                "state. If your patch is complete, call submit. If you changed "
-                "the source since the last check, call verify_fix — it reruns "
-                "the REGISTERED reproduction and is the only check that counts.")}
         if state.get("rejected_repro_streak", 0) >= 3 and state["seen_red"]:
             return {"error": (
                 "reproduce PAUSED: your last 3 scripts all exited 0 while a "
@@ -492,15 +412,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 "reproductions cannot advance the fix. Read fault_locations, "
                 "change the PATCH, then verify_fix. reproduce unlocks after "
                 "your next patch or read_range.")}
-        _mode = "pytest" if (args.get("as_pytest")
-                             or bool(re.search(r"^\s*def test_", script, re.M))
-                             ) else "script"
-        r = _exec_repro(script, _mode, timeout=180)
+        r = _run(f'{env_dir}/bin/python -c {shlex.quote(script)}', timeout=180)
         registered = False
-        _invalid_pytest = (_mode == "pytest" and r.returncode == 5)  # no tests
-        if r.returncode != 0 and not _invalid_pytest:
+        if r.returncode != 0:
             state["repro_script"] = script
-            state["repro_mode"] = _mode
             state["seen_red"] = True
             state["repro_green"] = False
             state["rejected_repro_streak"] = 0
@@ -679,14 +594,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "error": ("no registered reproduction — use reproduce() "
                               "with a script that fails because of the bug "
                               "BEFORE patching")}
-        r = _exec_repro(state["repro_script"],
-                        state.get("repro_mode", "script"), timeout=300)
-        # pytest exit 5 (no tests collected) is not a pass; only exit 0 is green.
-        green = (r.returncode == 0)
+        r = _run(f'{env_dir}/bin/python -c '
+                 f'{shlex.quote(state["repro_script"])}', timeout=300)
+        green = r.returncode == 0
         state["repro_green"] = green
-        if green:
-            # First red -> green transition freezes the target (see h_reproduce).
-            state["repro_locked"] = True
         if green and state.get("probe_script"):
             pr = _run(f"{env_dir}/bin/python -c "
                       f"{shlex.quote(state['probe_script'])}", timeout=180)
@@ -795,35 +706,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return out
 
     def h_submit(pcb, args):
-        """Terminal call. HARD requirement: a real (non-test) diff. The internal
-        checks (reproduction red->green, invariant probe) are ADVISORY -- they
-        inform, they do not veto, because they are self-authored and a failing
-        self-check on a CORRECT patch would otherwise make the agent undo good
-        work (observed: an agent reverting to an empty diff after 73 turns)."""
-        verified = _gate()          # still computed + recorded for ranking
-        if not _diff_nonempty():
-            return {"error": ("cannot submit: there is no change to submit. "
-                              "The working tree has no non-test source diff. "
-                              "Patch the source, then submit.")}
-        unmet = []
-        if not state["seen_red"]:
-            unmet.append("no failing reproduction was ever registered")
-        elif not state["repro_green"]:
-            unmet.append("your reproduction is still red")
-        if state.get("probe_script") and not state.get("probe_green"):
-            unmet.append("the locked invariant probe is still red")
-        out = {"submitted": True, "summary": args.get("summary", ""),
-               "fix_verified": verified}
+        """Terminal call. Gate: RED seen, same reproduction now GREEN, and a
+        non-empty non-test diff."""
+        if not _gate():
+            return {"error": ("cannot submit: gate not satisfied — "
+                              f"seen_red={state['seen_red']}, "
+                              f"repro_green={state['repro_green']}, "
+                              f"diff_nonempty={_diff_nonempty()}. "
+                              "You need: reproduce() failing (RED), a patch, "
+                              "and verify_fix() passing (GREEN).")}
         state["submitted"] = True
-        if unmet:
-            out["submit_advice"] = (
-                "ACCEPTED with unmet internal checks: %s. These are advisory. "
-                "If your patch is correct but the self-check cannot be made to "
-                "pass (some bugs cannot be observed by a self-authored test), "
-                "submitting is right -- do NOT revert a patch you believe is "
-                "correct just to satisfy an internal check."
-                % "; ".join(unmet))
-        return out
+        return {"submitted": True, "summary": args.get("summary", "")}
 
     handlers = {
         "swe.reproduce":   h_reproduce,
@@ -835,7 +728,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.submit":      h_submit,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
-    handlers["_diff_nonempty"] = _diff_nonempty  # runner-only; the fix-phase gate
     return handlers, state
 
 
@@ -843,24 +735,15 @@ FIX_TOOLS = [
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (
-            "Run a reproduction inside the (verified) venv that demonstrates the "
-            "bug by EXITING NONZERO. The last failing reproduction becomes the "
-            "registered one that verify_fix reruns after your patch. Do this "
-            "FIRST. TWO INSTRUMENTS — pick the one that can actually show THIS "
-            "bug: (a) default: a plain script (python -c) for crashes, wrong "
-            "return values, exceptions; (b) as_pytest=true: your script is a "
-            "PYTEST TEST FILE (define test_ functions), run through the project's "
-            "own framework. Use as_pytest for bugs that only manifest INSIDE the "
-            "framework — import machinery, collection, fixtures, plugin behavior, "
-            "test-runner semantics — which a standalone script cannot reproduce."),
+            "Run a small Python script inside the (verified) venv that demonstrates "
+            "the bug by EXITING NONZERO (uncaught exception or failed assert). The "
+            "last failing script becomes the registered reproduction that verify_fix "
+            "reruns after your patch. Do this FIRST — a fix without a failing "
+            "reproduction is guessing, and submit will be rejected without one."),
         "parameters": {"type": "object", "properties": {
             "python_script": {"type": "string",
-                              "description": "the reproduction: a script (default) "
-                                             "or a pytest test file (if as_pytest)"},
-            "as_pytest": {"type": "boolean",
-                          "description": "run the reproduction via `pytest` instead "
-                                         "of `python -c`; use for framework-internal "
-                                         "bugs (imports/collection/fixtures/plugins)"},
+                              "description": "script that raises/asserts on the buggy "
+                                             "behavior, exits 0 once fixed"},
         }, "required": ["python_script"]}}},
     {"type": "function", "function": {
         "name": "locate",
@@ -935,7 +818,7 @@ FIX_TOOL2SYS = {
 
 FIX_SYSTEM_PROMPT = (
     "The environment is verified and ready. Fix the bug using this loop:\n"
-    "  1. reproduce — write a reproduction that FAILS (nonzero exit: uncaught "
+    "  1. reproduce — write a script that FAILS (nonzero exit: uncaught "
     "exception or assert) because of the reported bug. This registers your "
     "reproduction. If your script exits 0, it does not demonstrate the bug — "
     "rewrite it.\n"
@@ -948,19 +831,14 @@ FIX_SYSTEM_PROMPT = (
     "  5. verify_fix — reruns YOUR registered reproduction; it must now exit 0.\n"
     "  6. run_tests — run a nearby existing test file to check you broke nothing.\n"
     "  7. If verify_fix still fails, return to step 3 with the new evidence.\n"
-    "  8. submit — requires a real source diff. The reproduction/probe checks "
-    "are ADVISORY: if your patch is correct but the self-check cannot be "
-    "made to pass, submit anyway. NEVER revert a patch you believe is "
-    "correct in order to satisfy an internal check.\n\n"
+    "  8. submit — only accepted after RED (step 1) then GREEN (step 5) with a "
+    "real diff.\n\n"
     "NAMING: when your change produces user-facing text -- a column header, "
     "a label, a message, a key -- name it after the FIELD it displays, using "
     "the codebase's own vocabulary, NOT the issue reporter's wording. If a "
     "column shows the value of `rule.subdomain`, its header is \"Subdomain\", "
-    "not a synonym you invented. When an object exposes ALTERNATIVE fields "
-    "for the same slot (e.g. `rule.host` vs `rule.subdomain`, chosen by a "
-    "mode flag), read the code to find EVERY such field and cover each with "
-    "its own field-derived label. The maintainers name things after their "
-    "own attributes.\n\n"
+    "not a synonym you invented. The maintainers name things after their own "
+    "attributes.\n\n"
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )

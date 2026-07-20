@@ -835,7 +835,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.submit":      h_submit,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
-    handlers["_diff_nonempty"] = _diff_nonempty  # runner-only; the fix-phase gate
     return handlers, state
 
 

@@ -795,35 +795,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return out
 
     def h_submit(pcb, args):
-        """Terminal call. HARD requirement: a real (non-test) diff. The internal
-        checks (reproduction red->green, invariant probe) are ADVISORY -- they
-        inform, they do not veto, because they are self-authored and a failing
-        self-check on a CORRECT patch would otherwise make the agent undo good
-        work (observed: an agent reverting to an empty diff after 73 turns)."""
-        verified = _gate()          # still computed + recorded for ranking
-        if not _diff_nonempty():
-            return {"error": ("cannot submit: there is no change to submit. "
-                              "The working tree has no non-test source diff. "
-                              "Patch the source, then submit.")}
-        unmet = []
-        if not state["seen_red"]:
-            unmet.append("no failing reproduction was ever registered")
-        elif not state["repro_green"]:
-            unmet.append("your reproduction is still red")
-        if state.get("probe_script") and not state.get("probe_green"):
-            unmet.append("the locked invariant probe is still red")
-        out = {"submitted": True, "summary": args.get("summary", ""),
-               "fix_verified": verified}
+        """Terminal call. Gate: RED seen, same reproduction now GREEN, and a
+        non-empty non-test diff."""
+        if not _gate():
+            return {"error": ("cannot submit: gate not satisfied — "
+                              f"seen_red={state['seen_red']}, "
+                              f"repro_green={state['repro_green']}, "
+                              f"diff_nonempty={_diff_nonempty()}. "
+                              "You need: reproduce() failing (RED), a patch, "
+                              "and verify_fix() passing (GREEN).")}
         state["submitted"] = True
-        if unmet:
-            out["submit_advice"] = (
-                "ACCEPTED with unmet internal checks: %s. These are advisory. "
-                "If your patch is correct but the self-check cannot be made to "
-                "pass (some bugs cannot be observed by a self-authored test), "
-                "submitting is right -- do NOT revert a patch you believe is "
-                "correct just to satisfy an internal check."
-                % "; ".join(unmet))
-        return out
+        return {"submitted": True, "summary": args.get("summary", "")}
 
     handlers = {
         "swe.reproduce":   h_reproduce,
@@ -835,7 +817,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.submit":      h_submit,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
-    handlers["_diff_nonempty"] = _diff_nonempty  # runner-only; the fix-phase gate
     return handlers, state
 
 
@@ -843,24 +824,15 @@ FIX_TOOLS = [
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (
-            "Run a reproduction inside the (verified) venv that demonstrates the "
-            "bug by EXITING NONZERO. The last failing reproduction becomes the "
-            "registered one that verify_fix reruns after your patch. Do this "
-            "FIRST. TWO INSTRUMENTS — pick the one that can actually show THIS "
-            "bug: (a) default: a plain script (python -c) for crashes, wrong "
-            "return values, exceptions; (b) as_pytest=true: your script is a "
-            "PYTEST TEST FILE (define test_ functions), run through the project's "
-            "own framework. Use as_pytest for bugs that only manifest INSIDE the "
-            "framework — import machinery, collection, fixtures, plugin behavior, "
-            "test-runner semantics — which a standalone script cannot reproduce."),
+            "Run a small Python script inside the (verified) venv that demonstrates "
+            "the bug by EXITING NONZERO (uncaught exception or failed assert). The "
+            "last failing script becomes the registered reproduction that verify_fix "
+            "reruns after your patch. Do this FIRST — a fix without a failing "
+            "reproduction is guessing, and submit will be rejected without one."),
         "parameters": {"type": "object", "properties": {
             "python_script": {"type": "string",
-                              "description": "the reproduction: a script (default) "
-                                             "or a pytest test file (if as_pytest)"},
-            "as_pytest": {"type": "boolean",
-                          "description": "run the reproduction via `pytest` instead "
-                                         "of `python -c`; use for framework-internal "
-                                         "bugs (imports/collection/fixtures/plugins)"},
+                              "description": "script that raises/asserts on the buggy "
+                                             "behavior, exits 0 once fixed"},
         }, "required": ["python_script"]}}},
     {"type": "function", "function": {
         "name": "locate",
@@ -935,7 +907,7 @@ FIX_TOOL2SYS = {
 
 FIX_SYSTEM_PROMPT = (
     "The environment is verified and ready. Fix the bug using this loop:\n"
-    "  1. reproduce — write a reproduction that FAILS (nonzero exit: uncaught "
+    "  1. reproduce — write a script that FAILS (nonzero exit: uncaught "
     "exception or assert) because of the reported bug. This registers your "
     "reproduction. If your script exits 0, it does not demonstrate the bug — "
     "rewrite it.\n"
@@ -948,10 +920,8 @@ FIX_SYSTEM_PROMPT = (
     "  5. verify_fix — reruns YOUR registered reproduction; it must now exit 0.\n"
     "  6. run_tests — run a nearby existing test file to check you broke nothing.\n"
     "  7. If verify_fix still fails, return to step 3 with the new evidence.\n"
-    "  8. submit — requires a real source diff. The reproduction/probe checks "
-    "are ADVISORY: if your patch is correct but the self-check cannot be "
-    "made to pass, submit anyway. NEVER revert a patch you believe is "
-    "correct in order to satisfy an internal check.\n\n"
+    "  8. submit — only accepted after RED (step 1) then GREEN (step 5) with a "
+    "real diff.\n\n"
     "NAMING: when your change produces user-facing text -- a column header, "
     "a label, a message, a key -- name it after the FIELD it displays, using "
     "the codebase's own vocabulary, NOT the issue reporter's wording. If a "

@@ -232,10 +232,9 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                   "tool_calls": [{"id": f"t{turn}", "type": "function",
                                                    "function": {"name": tool,
                                                                  "arguments": args}}]})
-                _gate_payload = {"error": getattr(gate, "reject_message", None)
-                                          or ("verification gate not passed; "
-                                              "run_sanity and run_smoke_test must "
-                                              "both return ok=true first")}
+                _gate_payload = {"error": "verification gate not passed; "
+                                          "run_sanity and run_smoke_test must "
+                                          "both return ok=true first"}
                 _detail = getattr(gate, "reject_detail", None)
                 if _detail:
                     _gate_payload["harness_check"] = _detail
@@ -954,32 +953,11 @@ def run_one(inst):
     if _kb:
         fix_goal += "\n\n" + _kb
     from swe_fix_tools import render_worksheet as _rw
-
-    def _fix_gate():
-        """Only the canonical hidden tests decide pass/fail (Mikey's ruling), so
-        the fix phase blocks submit on exactly ONE thing: is there a real change
-        to submit. The self-authored reproduction and the invariant probe are
-        still computed and still feed attempt ranking -- they inform, they never
-        veto. A blocking self-check makes the agent UNDO correct work: it cannot
-        tell 'my patch is wrong' from 'my test cannot observe this bug'."""
-        try:
-            ok = bool(f_handlers["_diff_nonempty"]())
-        except Exception:
-            ok = True          # never trap the agent on a harness error
-        if not ok:
-            _fix_gate.reject_message = (
-                "cannot submit: there is no change to submit -- the working tree "
-                "has no non-test source diff. Patch the source, then submit.")
-            _fix_gate.reject_detail = None
-        return ok
-    _fix_gate.reject_message = None
-    _fix_gate.reject_detail = None
-
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
                                           worksheet=lambda: _rw(f_state),
-                                          gate=_fix_gate,
+                                          gate=lambda: f_state["fix_verified"],
                                           checkpoint=ckpt)
     # Score with the exact SWE-bench recipe.
     resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],

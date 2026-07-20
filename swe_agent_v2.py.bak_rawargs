@@ -105,40 +105,6 @@ def _auto_verify_reject_detail(res):
             "harness pick a known-stable test.")
 
 
-
-def _parse_tool_args(s):
-    """Parse a tool-call `arguments` string tolerantly.
-
-    Returns (dict, None) on success or ({}, reason) on failure. Local models
-    routinely truncate long argument strings at the num_predict ceiling; those
-    are unrecoverable and must be reported back to the model rather than
-    dispatched to a handler that will misdiagnose the missing fields.
-    """
-    for kw in ({}, {"strict": False}):
-        try:
-            v = json.loads(s, **kw)
-            if isinstance(v, dict):
-                return v, None
-        except Exception:
-            pass
-    t = s.strip()
-    m = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```$", t, re.S)
-    if m:
-        t = m.group(1).strip()
-    i, j = t.find("{"), t.rfind("}")
-    if i != -1 and j > i:
-        blk = t[i:j + 1]
-        for kw in ({"strict": False}, {}):
-            try:
-                v = json.loads(blk, **kw)
-                if isinstance(v, dict):
-                    return v, None
-            except Exception:
-                pass
-    reason = ("truncated mid-JSON" if not t.rstrip().endswith("}")
-              else "malformed JSON")
-    return {}, reason
-
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, gate=None, log=print, checkpoint=None, worksheet=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
@@ -194,34 +160,11 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         fn = tc.get("function", {})
         tool = fn.get("name", "")
         args = fn.get("arguments") or {}
-        args_err = None
         if isinstance(args, str):
-            args, args_err = _parse_tool_args(args)
+            try: args = json.loads(args)
+            except Exception: args = {"_raw": args}
         target = tool2sys.get(tool, "")
         log(f"  [{turn:>2}] {tool}({str(args)[:80]}) -> ", end="", flush=True)
-        if args_err is not None:
-            # The argument string never parsed -- almost always because the
-            # generation was cut off at the num_predict ceiling. Dispatching
-            # a placeholder dict here makes the handler answer with a
-            # misleading error about the missing field, and the model, having
-            # no idea its JSON was truncated, re-sends the identical call.
-            # Nothing is executed; say what actually happened instead.
-            log(f"ARGS-UNPARSEABLE ({args_err})")
-            messages.append({"role": "assistant", "content": "",
-                             "tool_calls": [{"id": f"t{turn}", "type": "function",
-                                             "function": {"name": tool,
-                                                          "arguments": "{}"}}]})
-            messages.append({"role": "tool", "tool_call_id": f"t{turn}",
-                             "content": json.dumps({
-                                 "error": "your tool-call arguments were not valid "
-                                          f"JSON ({args_err}); NOTHING was executed",
-                                 "hint": "The argument string ended early, so this "
-                                         "call never ran. Re-send the same tool call "
-                                         "with complete, valid JSON. If the payload "
-                                         "is long, make it smaller: patch fewer lines "
-                                         "per call, or split a long script across "
-                                         "several calls."})})
-            continue
         # Terminal tool: check gate then break out.
         if target == "RETURN":
             if gate is not None and not gate():
@@ -232,10 +175,9 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                   "tool_calls": [{"id": f"t{turn}", "type": "function",
                                                    "function": {"name": tool,
                                                                  "arguments": args}}]})
-                _gate_payload = {"error": getattr(gate, "reject_message", None)
-                                          or ("verification gate not passed; "
-                                              "run_sanity and run_smoke_test must "
-                                              "both return ok=true first")}
+                _gate_payload = {"error": "verification gate not passed; "
+                                          "run_sanity and run_smoke_test must "
+                                          "both return ok=true first"}
                 _detail = getattr(gate, "reject_detail", None)
                 if _detail:
                     _gate_payload["harness_check"] = _detail
@@ -954,32 +896,11 @@ def run_one(inst):
     if _kb:
         fix_goal += "\n\n" + _kb
     from swe_fix_tools import render_worksheet as _rw
-
-    def _fix_gate():
-        """Only the canonical hidden tests decide pass/fail (Mikey's ruling), so
-        the fix phase blocks submit on exactly ONE thing: is there a real change
-        to submit. The self-authored reproduction and the invariant probe are
-        still computed and still feed attempt ranking -- they inform, they never
-        veto. A blocking self-check makes the agent UNDO correct work: it cannot
-        tell 'my patch is wrong' from 'my test cannot observe this bug'."""
-        try:
-            ok = bool(f_handlers["_diff_nonempty"]())
-        except Exception:
-            ok = True          # never trap the agent on a harness error
-        if not ok:
-            _fix_gate.reject_message = (
-                "cannot submit: there is no change to submit -- the working tree "
-                "has no non-test source diff. Patch the source, then submit.")
-            _fix_gate.reject_detail = None
-        return ok
-    _fix_gate.reject_message = None
-    _fix_gate.reject_detail = None
-
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
                                           worksheet=lambda: _rw(f_state),
-                                          gate=_fix_gate,
+                                          gate=lambda: f_state["fix_verified"],
                                           checkpoint=ckpt)
     # Score with the exact SWE-bench recipe.
     resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],
