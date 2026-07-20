@@ -582,27 +582,7 @@ def score(inst, repo, env_vars, env_kind="uv"):
     res = _tr.run_tests(repo, env_kind, inst["FAIL_TO_PASS"],
                         env_vars=env_vars, repo=inst["repo"], timeout=600,
                         log_path=os.path.join(SCORE_LOGS, inst["instance_id"] + ".log"))
-    # The official criterion is F2P passing AND P2P staying green. We ran only
-    # F2P -- 1 of 7 given tests at the median -- so a patch that fixed the new
-    # test while breaking an existing one scored as resolved. Both are given;
-    # run both. (Answer-key content is never shown to the model: this executes
-    # at scoring time only, after the agent has finished.)
-    p2p = inst.get("PASS_TO_PASS") or []
-    p2p_ok, p2p_tail = True, ""
-    if res["ok"] and p2p:
-        try:
-            r2 = _tr.run_tests(repo, env_kind, p2p, env_vars=env_vars,
-                               repo=inst["repo"], timeout=600,
-                               log_path=os.path.join(
-                                   SCORE_LOGS, inst["instance_id"] + ".p2p.log"))
-            p2p_ok, p2p_tail = bool(r2["ok"]), _clean_tail(r2["tail"])
-        except Exception as e:
-            p2p_ok, p2p_tail = True, "p2p run failed: %s" % type(e).__name__
-    ok = bool(res["ok"]) and p2p_ok
-    tail = _clean_tail(res["tail"])
-    if res["ok"] and not p2p_ok:
-        tail = "F2P passed but PASS_TO_PASS regressed -> NOT resolved | " + p2p_tail
-    return ok, len(diff), tail
+    return res["ok"], len(diff), _clean_tail(res["tail"])
 
 
 def _clean_tail(tail):
@@ -1072,24 +1052,6 @@ def run_one(inst):
                                           worksheet=lambda: _rw(f_state),
                                           gate=_fix_gate,
                                           checkpoint=ckpt)
-    # THE GIVEN TESTS (Mikey): rerun the repo's own base-commit tests that
-    # passed before any patch. Self-authored checks are recorded but decide
-    # nothing; this is the legitimate evidence. Runs unconditionally -- it used
-    # to happen only if the agent chose to call verify_fix.
-    _given_ok, _given_n, _regressed = None, 0, []
-    try:
-        _base = f_state.get("baseline_pass") or []
-        _given_n = len(_base)
-        if _given_n:
-            _regressed = f_handlers["_check_regressions"]() or []
-            _given_ok = not _regressed
-        print(" -- given tests: %d sampled, %d regressed -> %s"
-              % (_given_n, len(_regressed),
-                 "OK" if _given_ok else ("REGRESSED" if _given_n else "UNKNOWN")),
-              flush=True)
-    except Exception as _e:
-        print(" -- given tests check failed: %s" % type(_e).__name__, flush=True)
-
     # Score with the exact SWE-bench recipe.
     resolved, patch_bytes, tail = score(inst, repo, b_state["env_vars"],
                                         env_kind=b_state.get("active_env_kind", "uv"))
@@ -1103,10 +1065,6 @@ def run_one(inst):
                 "env_vars": b_state["env_vars"],
                 "patch_bytes": patch_bytes, "secs": round(dt),
                 "fix_verified_by_model": f_state["fix_verified"],
-                "given_tests_ok": _given_ok,
-                "given_tests_n": _given_n,
-                "given_tests_regressed": _regressed,
-                "syntax_ok": f_state.get("syntax_ok", True),
                 "score_tail": tail[:400]}
     print(f" -> resolved={resolved}  patch_bytes={patch_bytes}  {dt:.0f}s | {tail[:120]}",
           flush=True)

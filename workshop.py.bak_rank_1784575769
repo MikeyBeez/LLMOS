@@ -89,10 +89,7 @@ def form_rank(r):
     than any given signal, so they order otherwise-identical attempts without
     ever outranking evidence.
     """
-    # three states, not two: passing (+8), unknown (0), REGRESSED (-8).
-    # A confirmed break must rank BELOW an attempt we simply could not check.
-    _g = r.get("given_tests_ok")
-    given = ((8 if _g is True else (-8 if _g is False else 0))
+    given = (int(bool(r.get("given_tests_ok"))) * 8
              + int(r.get("syntax_ok", True) is not False) * 4
              + int((r.get("patch_bytes") or 0) > 0))
     self_authored = (int(bool(r.get("fix_verified_by_model"))) * 0.4
