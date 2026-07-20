@@ -103,14 +103,8 @@ for iid in [i for i in failset if i not in done]:
     else:
         os.environ.pop("PIN_BACKEND", None)
     attempts = []
-    _base_budget = A.FIX_BUDGET
     for k in range(MAX_ATTEMPTS):
         wait_net()
-        # attempt 1 unchanged; retries get more room (see RETRY_FIX_BUDGET)
-        A.FIX_BUDGET = _base_budget if k == 0 else A.RETRY_FIX_BUDGET
-        if k:
-            print("   retry %d: fix budget %d turns" % (k + 1, A.FIX_BUDGET),
-                  flush=True)
         t0 = time.time()
         try:
             r = A.run_one(inst)
@@ -121,7 +115,6 @@ for iid in [i for i in failset if i not in done]:
         attempts.append(r)
         if self_verified(r):
             break
-    A.FIX_BUDGET = _base_budget
     chosen = dict(max(attempts, key=form_rank))
     chosen["attempts_made"] = len(attempts)
     chosen["iteration"] = ITER

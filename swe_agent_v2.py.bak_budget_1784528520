@@ -40,13 +40,8 @@ HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
 MODEL = "ornith:35b"
 NUMCTX = 131072
 NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "2048"))
-BOOTSTRAP_BUDGET = int(os.environ.get("BOOTSTRAP_BUDGET", "50"))
-FIX_BUDGET       = int(os.environ.get("FIX_BUDGET", "80"))
-# Attempt 2+ gets more room: 26 of 49 misses ended by exhausting the
-# budget, and above the median a long run is no more likely to be lost
-# than won (p90 turns: 74 resolved vs 74 missed). Retries only happen
-# after a failure, so the extra time is spent where the wall bound.
-RETRY_FIX_BUDGET = int(os.environ.get("RETRY_FIX_BUDGET", "120"))
+BOOTSTRAP_BUDGET = 50     # bumped for recursive install (each install_package is 1 turn)
+FIX_BUDGET      = 80
 WORK = os.path.expanduser("~/swe/work")
 import spec_env
 
