@@ -321,39 +321,6 @@ def _anchor_record(state):
             for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
 
 
-def _syntax_check(full_path, rel):
-    """Does this file still parse? Definitive, no style opinions. Returns None
-    when fine, else a dict naming the line and what broke."""
-    if not full_path.endswith(".py"):
-        return None
-    try:
-        import ast
-        with open(full_path, encoding="utf-8", errors="ignore") as f:
-            src = f.read()
-        ast.parse(src)
-        return None
-    except SyntaxError as e:
-        line = e.lineno or 0
-        ctx = []
-        try:
-            lines = src.splitlines()
-            for i in range(max(0, line - 3), min(len(lines), line + 2)):
-                ctx.append("%s%5d  %s" % (">>" if i + 1 == line else "  ",
-                                          i + 1, lines[i][:110]))
-        except Exception:
-            pass
-        return {"broke_the_file": True,
-                "error": "%s at line %s" % (e.msg, line),
-                "context": ctx,
-                "what_to_do": ("Your patch left %s unparseable, so nothing "
-                               "downstream can run. Fix THIS before anything "
-                               "else -- usually indentation, an unclosed "
-                               "bracket or quote, or a line that was replaced "
-                               "without its continuation." % rel)}
-    except Exception:
-        return None
-
-
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -758,7 +725,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["must_observe"] = False
             state["patch_attempts"] = state.get("patch_attempts", 0) + 1
             state["patch_history"].append({"file": path, "verdict": "unverified"})
-            _syn = _syntax_check(full, path)
             out = {"edited": path, "mode": "line_anchored",
                    "lines": "%d-%d" % (_sl, _el),
                    "you_replaced_exactly": _replaced,
@@ -766,8 +732,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             "you_replaced_exactly: if that is not the text you "
                             "meant to change, read_range again and re-patch the "
                             "correct lines.")}
-            if _syn:
-                out["syntax"] = _syn
             try:
                 import symmap as _sm
                 _fm = _sm.file_map(repo_dir, path, near_line=_sl)
@@ -827,12 +791,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["patch_attempts"] = state.get("patch_attempts", 0) + 1
         state["patch_history"].append(
             {"file": str(args.get("file", "?")), "verdict": "unverified"})
-        _syn = _syntax_check(full, path)
         out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                "delta_bytes": len(new) - len(old),
                "match": _how, "note": "verification invalidated — run verify_fix"}
-        if _syn:
-            out["syntax"] = _syn
         # THE MAP, built right before/with every patch (Mikey): mechanical AST,
         # cached per checkout, outside the repo tree. No choice point -- the
         # agent cannot patch without receiving an observation of what it changed.
