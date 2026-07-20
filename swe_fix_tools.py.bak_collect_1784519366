@@ -284,37 +284,6 @@ def _format_objects_to_repro(state):
     return False
 
 
-def _research_maps(repo_dir, relfile, line, fmap, flow):
-    """Append every generated map to the research corpus, for cross-instance
-    analysis later (Mikey: collecting them makes the general principle visible).
-
-    RESEARCH ZONE ONLY. The runtime never reads ~/swe/research/. This is an
-    export, not a channel -- nothing written here re-enters any run.
-    """
-    import json as _j, time as _t
-    try:
-        d = os.path.expanduser("~/swe/research/maps")
-        os.makedirs(d, exist_ok=True)
-        iid = os.path.basename(os.path.abspath(repo_dir))
-        rec = {"iid": iid, "file": relfile, "line": line, "ts": int(_t.time()),
-               "enclosing": (fmap or {}).get("enclosing"),
-               "n_symbols": len((fmap or {}).get("symbols") or []),
-               "containers": [{"container": c.get("container"),
-                               "writers": c.get("writers"),
-                               "readers": c.get("readers"),
-                               "keys": c.get("distinct_key_exprs"),
-                               "finding": bool(c.get("finding"))}
-                              for c in (flow or [])]}
-        with open(os.path.join(d, iid + ".jsonl"), "a", encoding="utf-8") as f:
-            f.write(_j.dumps(rec) + "\n")
-        return None
-    except Exception as e:
-        # never break a run -- but never fail silently either. A swallowed
-        # collector is indistinguishable from a working one, which is how the
-        # disabled probe stayed hidden for a whole run.
-        return "%s: %s" % (type(e).__name__, str(e)[:80])
-
-
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -715,9 +684,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             if _fl:
                 out["value_flow"] = [
                     {k: v for k, v in c.items() if v} for c in _fl[:2]]
-            _cerr = _research_maps(repo_dir, path, _line, _fm, _fl)
-            if _cerr:
-                out["map_collection_error"] = _cerr
         except Exception as _e:
             out["file_map_error"] = str(_e)[:120]
         return out

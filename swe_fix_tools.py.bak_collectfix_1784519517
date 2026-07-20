@@ -291,12 +291,12 @@ def _research_maps(repo_dir, relfile, line, fmap, flow):
     RESEARCH ZONE ONLY. The runtime never reads ~/swe/research/. This is an
     export, not a channel -- nothing written here re-enters any run.
     """
-    import json as _j, time as _t
+    import json as _j
     try:
         d = os.path.expanduser("~/swe/research/maps")
         os.makedirs(d, exist_ok=True)
         iid = os.path.basename(os.path.abspath(repo_dir))
-        rec = {"iid": iid, "file": relfile, "line": line, "ts": int(_t.time()),
+        rec = {"iid": iid, "file": relfile, "line": line, "ts": int(time.time()),
                "enclosing": (fmap or {}).get("enclosing"),
                "n_symbols": len((fmap or {}).get("symbols") or []),
                "containers": [{"container": c.get("container"),
@@ -307,12 +307,8 @@ def _research_maps(repo_dir, relfile, line, fmap, flow):
                               for c in (flow or [])]}
         with open(os.path.join(d, iid + ".jsonl"), "a", encoding="utf-8") as f:
             f.write(_j.dumps(rec) + "\n")
-        return None
-    except Exception as e:
-        # never break a run -- but never fail silently either. A swallowed
-        # collector is indistinguishable from a working one, which is how the
-        # disabled probe stayed hidden for a whole run.
-        return "%s: %s" % (type(e).__name__, str(e)[:80])
+    except Exception:
+        pass          # collection must never break a run
 
 
 def render_worksheet(state):
@@ -715,9 +711,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             if _fl:
                 out["value_flow"] = [
                     {k: v for k, v in c.items() if v} for c in _fl[:2]]
-            _cerr = _research_maps(repo_dir, path, _line, _fm, _fl)
-            if _cerr:
-                out["map_collection_error"] = _cerr
+            _research_maps(repo_dir, path, _line, _fm, _fl)
         except Exception as _e:
             out["file_map_error"] = str(_e)[:120]
         return out
