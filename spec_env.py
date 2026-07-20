@@ -87,70 +87,6 @@ def _is_safe(cmd):
     return False
 
 
-# --------------------------------------------------------------------------
-# Env-layer edit bookkeeping.
-#
-# The pre_install seds below rewrite TRACKED build-config files (setup.py,
-# pyproject.toml, ...) in the working tree before the fix phase starts. An
-# unfiltered `git diff` at scoring time would ship those harness-authored edits
-# as part of the model's patch. Record exactly which files we dirtied and the
-# content we left behind, so the scorer can restore them -- and only them, and
-# only if the fix phase never touched them afterwards.
-# --------------------------------------------------------------------------
-ENV_TOUCHED_NAME = "llmos_env_touched.json"
-
-
-def _sha(path):
-    import hashlib
-    try:
-        with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
-    except Exception:
-        return None
-
-
-def _dirty_files(repo_dir):
-    """Tracked files with uncommitted modifications. [] on any failure."""
-    try:
-        r = subprocess.run("git diff --name-only", shell=True, cwd=repo_dir,
-                           capture_output=True, text=True, timeout=60)
-        return [l.strip() for l in (r.stdout or "").splitlines() if l.strip()]
-    except Exception:
-        return []
-
-
-def env_touched_path(repo_dir):
-    return os.path.join(repo_dir, ".git", ENV_TOUCHED_NAME)
-
-
-def _record_env_touched(repo_dir, before):
-    """Persist {path: sha256} for files this env layer newly dirtied.
-
-    Written inside .git/ so the marker itself can never appear in a diff or
-    collide with the official test patch. Never raises.
-    """
-    try:
-        newly = [f for f in _dirty_files(repo_dir) if f not in set(before or [])]
-        if not newly:
-            return []
-        rec = {}
-        for f in newly:
-            h = _sha(os.path.join(repo_dir, f))
-            if h:
-                rec[f] = h
-        if not rec:
-            return []
-        gitdir = os.path.join(repo_dir, ".git")
-        if not os.path.isdir(gitdir):
-            return []
-        with open(os.path.join(gitdir, ENV_TOUCHED_NAME), "w") as fh:
-            json.dump(rec, fh)
-        return sorted(rec)
-    except Exception as e:
-        print(" -- env-touched bookkeeping failed (harmless):", e, flush=True)
-        return []
-
-
 def apply_pre_install(repo_dir, iid, repo):
     """Run the official spec's pre_install dep-pin edits in repo_dir.
 
@@ -163,7 +99,6 @@ def apply_pre_install(repo_dir, iid, repo):
         out["version"] = v
         if not spec:
             return out
-        _before = _dirty_files(repo_dir)
         out["pip_pins"] = [p for p in (spec.get("pip_packages") or []) if "==" in p or "<" in p]
         for cmd in (spec.get("pre_install") or []):
             if not _is_safe(cmd):
@@ -172,7 +107,6 @@ def apply_pre_install(repo_dir, iid, repo):
             r = subprocess.run(cmd, shell=True, cwd=repo_dir, capture_output=True,
                                text=True, timeout=60)
             (out["applied"] if r.returncode == 0 else out["skipped"]).append(cmd)
-        out["touched"] = _record_env_touched(repo_dir, _before)
         out["ok"] = bool(out["applied"])
     except Exception as e:
         out["error"] = "%s: %s" % (type(e).__name__, e)
