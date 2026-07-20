@@ -1,6 +1,36 @@
 # pytest-dev/pytest -- repo knowledge
 
-## PROTOCOL: import-machinery bugs -- one canonical registry, one canonical key
+## PROTOCOL: don't import the same thing twice unless there is a reason
+
+If it has already been loaded and is still valid, reuse it. Only build a
+fresh one when something genuinely requires that, and be able to say why.
+Two copies of one logical thing means state set on one is invisible on the
+other -- a bug that looks like magic. Before constructing, check whether it
+already exists, in the place the system tracks it, under the same name
+everyone else uses.
+
+### How to test it
+
+Get the thing TWO WAYS and assert they are the SAME OBJECT -- identity
+(`is`), not equality (`==`); two fresh copies usually compare equal, which
+is exactly how this bug hides.
+
+  1. obtain it the way the subsystem under test obtains it
+  2. obtain it the way ordinary code obtains it
+  3. assert step 1 `is` step 2
+
+Both paths are required. A test that obtains it twice through the SAME
+path only proves that path agrees with itself: it goes green while the
+real bug survives, which is the classic false verification here.
+
+Stronger form: set a marker (an attribute, a class variable) on the first
+copy, then read it back through the second. Missing marker means two
+objects, whatever the names say.
+
+Run the test where the duplication actually happens. If the duplicating
+machinery belongs to the framework, the test must run UNDER that framework
+(reproduce with as_pytest=true); a standalone script cannot exercise it and
+will stay red forever even after a correct fix.
 
 pytest bugs cluster in its IMPORT MACHINERY (`src/_pytest/pathlib.py`,
 `import_path`, the `--import-mode` variants, namespace packages,
