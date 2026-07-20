@@ -327,11 +327,6 @@ def render_worksheet(state):
         lines.append("  trying to get : %s" % state["triage_goal"][:200])
     if state.get("triage_repro"):
         lines.append("  valid repro   : %s" % state["triage_repro"][:200])
-    if state.get("chain_mechanism"):
-        lines.append("  must be true  : %s   <- check() this DIRECTLY"
-                     % state["chain_mechanism"][:200])
-    if state.get("chain_change"):
-        lines.append("  so change     : %s" % state["chain_change"][:200])
     lines.append("  repro status  : %s" % repro)
     lines.append("  probe status  : %s" % probe)
     lines.append("  patches tried : %s" % pline)
@@ -808,10 +803,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         r = _run("%s/bin/python -c %s" % (env_dir, shlex.quote(snippet)),
                  timeout=60)
         state["checks_run"] = state.get("checks_run", 0) + 1
-        out = {"exit": r.returncode,
-               "stdout": (r.stdout or "")[-2000:],
-               "stderr": (r.stderr or "")[-800:]}
-        if not (r.stdout or "").strip() and r.returncode == 0:
+        out = {"exit": r.get("exit"), "stdout": _clip_result(r.get("stdout", "")),
+               "stderr": _clip_result(r.get("stderr", ""))[-800:]}
+        if not (r.get("stdout") or "").strip() and r.get("exit") == 0:
             out["note"] = ("ran clean but printed nothing -- a check is only "
                            "useful if it PRINTS the fact. Add a print().")
         return out

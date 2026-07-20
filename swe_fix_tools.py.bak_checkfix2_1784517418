@@ -809,8 +809,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                  timeout=60)
         state["checks_run"] = state.get("checks_run", 0) + 1
         out = {"exit": r.returncode,
-               "stdout": (r.stdout or "")[-2000:],
-               "stderr": (r.stderr or "")[-800:]}
+               "stdout": _clip_result(r.stdout or ""),
+               "stderr": _clip_result(r.stderr or "")[-800:]}
         if not (r.stdout or "").strip() and r.returncode == 0:
             out["note"] = ("ran clean but printed nothing -- a check is only "
                            "useful if it PRINTS the fact. Add a print().")

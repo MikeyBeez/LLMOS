@@ -607,13 +607,6 @@ def _triage(problem, repo):
                 'Return JSON: {"kind": "...", "subsystem": "...", '
                 '"repro_criteria": "what a failing script must demonstrate", '
                 '"done_criteria": "what change in behavior proves the fix", '
-    '"produced_by": "WORK BACKWARD one step: what mechanism inside the code '
-    'must be correct for done_criteria to hold? Name the actual thing -- the '
-    'key something is stored under, the value a flag takes, the order two '
-    'calls happen in, the source a field is read from. NOT a restatement of '
-    'done_criteria in other words.", '
-    '"change_site": "work backward once more: what must change for that '
-    'mechanism to be right? Name the behavior to change, not a guessed path.", '
                 '"needs": ["resources to gather FIRST: docs to web-search '
                 '(e.g. an installation or API guide), packages, reference '
                 'pages -- empty list if none"], '
@@ -643,20 +636,6 @@ def _triage(problem, repo):
         out += "\n  gather first: %s" % "; ".join(str(x) for x in needs[:4])
     if dont:
         out += "\n  must keep working: %s" % "; ".join(str(x) for x in dont[:4])
-    _pb, _cs = t.get("produced_by"), t.get("change_site")
-    if _pb:
-        out += ("\n  BACKWARD CHAIN (each link must hold; they get harder to "
-                "observe going down):"
-                "\n    1. observable : %s"
-                "\n    2. produced by: %s" % (t.get("done_criteria"), _pb))
-        if _cs:
-            out += "\n    3. so change  : %s" % _cs
-        out += ("\n  Use check() on link 2 DIRECTLY -- several small checks "
-                "until you KNOW, before you patch. Do not infer link 2 from "
-                "link 1, and do not re-run the whole reproduction to guess at "
-                "it. If a link involves an operation with one known-correct "
-                "form (importing, caching, identity comparison), route it "
-                "through the tool that does it correctly.")
     if t.get("invariant"):
         out += "\n  the issue states this checkable property: %s" % t["invariant"]
     out += "\n  plan: %s" % "; ".join(str(s) for s in steps[:5])
@@ -956,10 +935,6 @@ def run_one(inst):
                 f_state["triage_goal"] = _ln.split("when:", 1)[1].strip()
             if "reproduction must show:" in _ln:
                 f_state["triage_repro"] = _ln.split("show:", 1)[1].strip()
-            if "2. produced by:" in _ln:
-                f_state["chain_mechanism"] = _ln.split("produced by:", 1)[1].strip()
-            if "3. so change  :" in _ln:
-                f_state["chain_change"] = _ln.split("so change  :", 1)[1].strip()
     except Exception:
         pass
     _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])

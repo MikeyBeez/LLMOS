@@ -327,11 +327,6 @@ def render_worksheet(state):
         lines.append("  trying to get : %s" % state["triage_goal"][:200])
     if state.get("triage_repro"):
         lines.append("  valid repro   : %s" % state["triage_repro"][:200])
-    if state.get("chain_mechanism"):
-        lines.append("  must be true  : %s   <- check() this DIRECTLY"
-                     % state["chain_mechanism"][:200])
-    if state.get("chain_change"):
-        lines.append("  so change     : %s" % state["chain_change"][:200])
     lines.append("  repro status  : %s" % repro)
     lines.append("  probe status  : %s" % probe)
     lines.append("  patches tried : %s" % pline)
@@ -799,23 +794,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             out["diagnosis"] = res["diagnosis"]
         return out
 
-    def h_check(pcb, args):
-        """Answer ONE small question. Registers nothing, gates nothing."""
-        snippet = args.get("snippet") or args.get("python") or ""
-        if not snippet.strip():
-            return {"error": "check needs a `snippet`: a few lines of python "
-                             "that PRINT the one fact you want to know."}
-        r = _run("%s/bin/python -c %s" % (env_dir, shlex.quote(snippet)),
-                 timeout=60)
-        state["checks_run"] = state.get("checks_run", 0) + 1
-        out = {"exit": r.returncode,
-               "stdout": (r.stdout or "")[-2000:],
-               "stderr": (r.stderr or "")[-800:]}
-        if not (r.stdout or "").strip() and r.returncode == 0:
-            out["note"] = ("ran clean but printed nothing -- a check is only "
-                           "useful if it PRINTS the fact. Add a print().")
-        return out
-
     def h_submit(pcb, args):
         """Terminal call. HARD requirement: a real (non-test) diff. The internal
         checks (reproduction red->green, invariant probe) are ADVISORY -- they
@@ -854,7 +832,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.patch":       h_patch,
         "swe.verify_fix":  h_verify_fix,
         "swe.run_tests":   h_run_tests,
-        "swe.check":       h_check,
         "swe.submit":      h_submit,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
@@ -863,25 +840,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
 
 
 FIX_TOOLS = [
-    {"type": "function", "function": {
-        "name": "check",
-        "description": (
-            "Answer ONE small question about the code, right now, cheaply. Runs "
-            "a few lines of python in the venv and gives you back what they "
-            "PRINT. Registers nothing and verifies nothing -- it cannot help or "
-            "hurt your reproduction, so use it freely. THIS IS THE TOOL FOR "
-            "CHECKING A MECHANISM: is this object the same object as that one "
-            "(use `is`, print the ids); which branch does this flag actually "
-            "take; what key is this really stored under; what does this "
-            "attribute contain before and after. Run several small checks until "
-            "you KNOW what is wrong -- do not run the whole reproduction "
-            "repeatedly hoping to infer it. Cheap and specific beats expensive "
-            "and vague."),
-        "parameters": {"type": "object", "properties": {
-            "snippet": {"type": "string", "description": (
-                "A few lines of python that PRINT the fact you want. Keep it "
-                "under ~15 lines and print explicitly.")}},
-            "required": ["snippet"]}}},
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (
@@ -965,7 +923,6 @@ FIX_TOOLS = [
 
 
 FIX_TOOL2SYS = {
-    "check": "swe.check",
     "reproduce":   "swe.reproduce",
     "locate":      "swe.locate",
     "read_range":  "swe.read_range",
