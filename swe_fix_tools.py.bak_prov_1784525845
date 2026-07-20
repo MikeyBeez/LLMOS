@@ -357,15 +357,13 @@ def render_worksheet(state):
                "under-constrained: the same concept usually lives at more than "
                "one place in the code. If the variant fails, patch again. "
                "Then run_tests on the neighborhood and submit.")
-    lines = ["WORKSHEET (maintained by the harness; observed unless marked [assumed]):"]
+    lines = ["WORKSHEET (maintained by the harness; facts, not suggestions):"]
     if state.get("triage_goal"):
-        lines.append("  trying to get : %s   [assumed at turn 0]"
-                     % state["triage_goal"][:200])
+        lines.append("  trying to get : %s" % state["triage_goal"][:200])
     if state.get("triage_repro"):
-        lines.append("  valid repro   : %s   [assumed at turn 0]"
-                     % state["triage_repro"][:200])
+        lines.append("  valid repro   : %s" % state["triage_repro"][:200])
     if state.get("chain_mechanism"):
-        lines.append("  must be true  : %s   [assumed at turn 0 -- check() it]"
+        lines.append("  must be true  : %s   <- check() this DIRECTLY"
                      % state["chain_mechanism"][:200])
     if state.get("chain_change"):
         lines.append("  so change     : %s" % state["chain_change"][:200])
@@ -375,13 +373,6 @@ def render_worksheet(state):
     if state.get("format_warning"):
         lines.append("  format check  : %s" % state["format_warning"][:220])
     lines.append("  next          : %s" % nxt)
-    if state.get("triage_goal") or state.get("chain_mechanism"):
-        lines.append("  --")
-        lines.append("  [assumed] lines were written before anything was read. "
-                     "Everything else was observed by running something. If "
-                     "what you observe contradicts an assumed line, the "
-                     "ASSUMPTION is what is wrong -- say so and correct it. "
-                     "Do not bend the evidence to fit it.")
     return "\n".join(lines)
 
 
