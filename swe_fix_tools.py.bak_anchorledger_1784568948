@@ -311,16 +311,6 @@ def _research_maps(repo_dir, relfile, line, fmap, flow):
         return "%s: %s" % (type(e).__name__, str(e)[:80])
 
 
-def _anchor_record(state):
-    """What was tried and why it failed -- so the next attempt is informed by
-    the failures rather than being another draw from the same wrong picture."""
-    fa = state.get("failed_anchors") or {}
-    if not fa:
-        return []
-    return ["turn %s  %s  |%s|  -> %s" % (v["turn"], v["file"], v["head"], v["why"])
-            for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
-
-
 def render_worksheet(state):
     """Deterministic worksheet from the fix-state ledger. Fixed template, no
     sampled prose (pattern #33): equal state -> byte-identical worksheet."""
@@ -412,9 +402,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "probe_green": None,       # probe status after last verify
              "repro_locked": False,     # reproduction proven green: immutable
              "rejected_repro_streak": 0,  # consecutive green-exit repro scripts
-             "patch_history": [],
-        "failed_anchors": {},
-        "must_observe": False,       # [{file, verdict}] verdict set by next verify
+             "patch_history": [],       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
              "triage_repro": ""}        # repro_criteria from the understanding pass
 
@@ -610,7 +598,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return result
 
     def h_locate(pcb, args):
-        state["must_observe"] = False
         """grep for a pattern, then ask the LLM which hit is most likely the
         actual site to investigate."""
         pat = str(args.get("pattern", ""))
@@ -661,7 +648,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return result
 
     def h_read_range(pcb, args):
-        state["must_observe"] = False
         state["rejected_repro_streak"] = 0
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
@@ -697,39 +683,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 text = f.read()
         except OSError as e:
             return {"error": str(e)}
-        _key = " ".join(old.split())[:400]
-        _prior = state["failed_anchors"].get(_key)
-        if _prior:
-            state["must_observe"] = True     # the repeat IS the trigger
-            return {"error": ("you already sent this exact snippet at turn %s "
-                              "and it did not match. Sending it again cannot "
-                              "work -- the file is not what you think it is."
-                              % _prior["turn"]),
-                    "already_tried": _anchor_record(state),
-                    "do_this_instead": (
-                        "STOP patching and go look. read_range the region "
-                        "again (the file has changed if any earlier patch "
-                        "landed), or check() to print the exact lines from "
-                        "disk. Compare what you get against the snippet above "
-                        "character by character -- the difference is usually "
-                        "whitespace. Only patch once you have SEEN the real "
-                        "text.")}
-        if state.get("must_observe"):
-            return {"error": ("a previous anchor was refused as a repeat and "
-                              "nothing has been observed since."),
-                    "already_tried": _anchor_record(state),
-                    "do_this_instead": ("read_range or check() first, then "
-                                        "patch. One observation is enough.")}
         new_text, _how = _apply_edit(text, old, new)
         if new_text is None:
-            state["patch_attempts"] = state.get("patch_attempts", 0) + 1
-            state["failed_anchors"][_key] = {
-                "turn": state["patch_attempts"],
-                "file": path, "head": old.strip().splitlines()[0][:90]
-                        if old.strip() else "", "why": str(_how)[:120]}
-            if len(state["failed_anchors"]) > 1:
-                state["must_observe"] = True
-            return {"error": _how, "already_tried": _anchor_record(state)}
+            return {"error": _how}
         with open(full, "w", encoding="utf-8") as f:
             f.write(new_text)
         state["repro_green"] = False
@@ -737,7 +693,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["same_verify_count"] = 0
         state["last_verify_sig"] = None
         state["rejected_repro_streak"] = 0
-        state["patch_attempts"] = state.get("patch_attempts", 0) + 1
         state["patch_history"].append(
             {"file": str(args.get("file", "?")), "verdict": "unverified"})
         out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
@@ -925,7 +880,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return out
 
     def h_check(pcb, args):
-        state["must_observe"] = False
         """Answer ONE small question. Registers nothing, gates nothing."""
         snippet = args.get("snippet") or args.get("python") or ""
         if not snippet.strip():

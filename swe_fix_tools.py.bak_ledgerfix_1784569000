@@ -700,7 +700,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _key = " ".join(old.split())[:400]
         _prior = state["failed_anchors"].get(_key)
         if _prior:
-            state["must_observe"] = True     # the repeat IS the trigger
             return {"error": ("you already sent this exact snippet at turn %s "
                               "and it did not match. Sending it again cannot "
                               "work -- the file is not what you think it is."
@@ -722,9 +721,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                         "patch. One observation is enough.")}
         new_text, _how = _apply_edit(text, old, new)
         if new_text is None:
-            state["patch_attempts"] = state.get("patch_attempts", 0) + 1
             state["failed_anchors"][_key] = {
-                "turn": state["patch_attempts"],
+                "turn": len(state.get("patch_history") or []) + 1,
                 "file": path, "head": old.strip().splitlines()[0][:90]
                         if old.strip() else "", "why": str(_how)[:120]}
             if len(state["failed_anchors"]) > 1:
@@ -737,7 +735,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["same_verify_count"] = 0
         state["last_verify_sig"] = None
         state["rejected_repro_streak"] = 0
-        state["patch_attempts"] = state.get("patch_attempts", 0) + 1
         state["patch_history"].append(
             {"file": str(args.get("file", "?")), "verdict": "unverified"})
         out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),

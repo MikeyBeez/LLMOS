@@ -20,7 +20,7 @@ Scoring:
 Reads ~/swe/instances.json (from swe_lite_select.py), writes
 ~/swe/results_v2.json and a trace per instance.
 """
-import json, os, re, shlex, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from tool_call_cpu import ToolCallCPU
@@ -516,91 +516,6 @@ def ensure_local_httpbin(repo_dir, repo_name, env_kind="uv", env_vars=None):
         return False
 
 
-# Deliverable-boundary enforcement of the no-test-edit policy.
-# swe_fix_tools.h_patch refuses test-path edits and _diff_nonempty ignores
-# them, but check()/reproduce()/run_sanity() run arbitrary python with
-# cwd=repo and can rewrite a test file behind that guard. An unfiltered
-# `git diff` then carries the edit into the submitted patch, `git apply`
-# of the official test_patch collides with it, and the run is voided on a
-# mechanical technicality instead of being scored on its source fix.
-# Kept byte-identical to swe_fix_tools._TEST_PATH_RE on purpose.
-_TEST_PATH_RE = re.compile(
-    r"(^|/)(tests?|testing)/|(^|/)test_|_test\.py$|(^|/)conftest\.py$")
-
-
-def revert_test_paths(repo):
-    """Restore every modified test-path file in `repo` before the deliverable
-    diff is taken. Returns the list of reverted paths (telemetry). Never
-    raises: a failure here must not turn a scoreable run into a crash."""
-    try:
-        r = sh("git -C %s diff --name-only" % repo, timeout=60)
-        files = [f.strip() for f in (r.stdout or "").splitlines() if f.strip()]
-        bad = [f for f in files if _TEST_PATH_RE.search(f)]
-        if not bad:
-            return []
-        for f in bad:
-            sh("git -C %s checkout -- %s" % (repo, shlex.quote(f)), timeout=60)
-        still = sh("git -C %s diff --name-only" % repo, timeout=60)
-        left = [f.strip() for f in (still.stdout or "").splitlines()
-                if f.strip() and _TEST_PATH_RE.search(f.strip())]
-        print(" -- reverted %d test-path file(s) before scoring: %s%s"
-              % (len(bad), ", ".join(bad[:6]),
-                 ("  [STILL DIRTY: %s]" % ", ".join(left)) if left else ""),
-              flush=True)
-        return bad
-    except Exception as e:
-        print(" -- test-path revert failed (scoring continues):", e, flush=True)
-        return []
-
-
-# Deliverable-boundary enforcement for HARNESS-authored env edits.
-# spec_env.apply_pre_install runs the official spec's pre_install seds against
-# the working tree BEFORE phase 2 begins -- e.g. astropy 5.1 pins
-# `setuptools==68.0.0` in pyproject.toml. Those are environment fidelity, not
-# the model's fix, but an unfiltered `git diff` shipped them inside the
-# deliverable patch on astropy-14365 for three iterations running.
-# The content-hash guard is what makes this safe rather than heuristic: a file
-# is restored ONLY if its bytes are still exactly what the env layer left, so a
-# build-config file the FIX phase legitimately edited is never touched.
-def revert_env_pre_install_paths(repo):
-    """Restore build-config files dirtied by the env layer and untouched since.
-
-    Returns the list of reverted paths (telemetry). Never raises: a failure
-    here must not turn a scoreable run into a crash.
-    """
-    try:
-        import hashlib
-        marker = os.path.join(repo, ".git", "llmos_env_touched.json")
-        if not os.path.exists(marker):
-            return []
-        rec = json.load(open(marker))
-        if not isinstance(rec, dict) or not rec:
-            return []
-        reverted, kept = [], []
-        for f, want in rec.items():
-            p = os.path.join(repo, f)
-            if not os.path.exists(p):
-                continue
-            try:
-                got = hashlib.sha256(open(p, "rb").read()).hexdigest()
-            except Exception:
-                continue
-            if got != want:
-                kept.append(f)          # fix phase edited it -> it is the model's
-                continue
-            sh("git -C %s checkout -- %s" % (repo, shlex.quote(f)), timeout=60)
-            reverted.append(f)
-        if reverted or kept:
-            print(" -- env-layer edits at deliverable boundary: reverted %d (%s)%s"
-                  % (len(reverted), ", ".join(reverted[:6]) or "-",
-                     ("  [kept, modified by fix phase: %s]" % ", ".join(kept)) if kept else ""),
-                  flush=True)
-        return reverted
-    except Exception as e:
-        print(" -- env-edit revert failed (scoring continues):", e, flush=True)
-        return []
-
-
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
@@ -610,13 +525,6 @@ def score(inst, repo, env_vars, env_kind="uv"):
     # Warnings-as-errors repos: pin era-compatible pure-python deps so an
     # unrelated DeprecationWarning cannot turn collection into a false negative.
     pin_warn_as_error_deps(repo, inst["repo"], env_kind, env_vars)
-    # A test-file edit is never part of a fix (h_patch refuses one outright);
-    # enforce that at the deliverable boundary too, so a scratch script that
-    # wrote into tests/ cannot void an otherwise scoreable source patch.
-    revert_test_paths(repo)
-    # The env layer (spec_env pre_install) rewrites build config in the working
-    # tree before the fix phase; that is environment fidelity, not the answer.
-    revert_env_pre_install_paths(repo)
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
