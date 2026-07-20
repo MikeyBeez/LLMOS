@@ -106,33 +106,6 @@ def _stack_snapshot(state):
 
 # ---- handlers ---------------------------------------------------------
 
-def _net_shaped(text):
-    """Does this failure look like the network went away, rather than the
-    package being wrong? Only these get a retry."""
-    t = (text or "").lower()
-    return any(s in t for s in (
-        "temporary failure in name resolution", "could not resolve host",
-        "network is unreachable", "no route to host", "connection reset",
-        "connection timed out", "read timed out", "connection aborted",
-        "failed to establish a new connection", "max retries exceeded",
-        "proxy", "ssl: wrong_version_number", "eof occurred in violation",
-        "newconnectionerror", "timed out. (connect timeout"))
-
-
-def _wait_for_net(max_wait=1200):
-    """Block until PyPI answers again, or give up after max_wait seconds."""
-    import socket as _s
-    waited = 0
-    while waited < max_wait:
-        try:
-            _s.create_connection(("pypi.org", 443), timeout=10).close()
-            return True
-        except OSError:
-            time.sleep(30)
-            waited += 30
-    return False
-
-
 def make_install_handlers(repo_dir, base_env_vars=None):
     """Handlers for the install primitives. Returns (handlers, state).
 
@@ -229,17 +202,6 @@ def make_install_handlers(repo_dir, base_env_vars=None):
             cmd = f'{UV} pip install {py}{iso_flag} {pkg}'
         r = _run(cmd, repo_dir, env_vars=state["env_vars"], timeout=900,
                  active_env_kind=active)
-        # A network drop mid-bootstrap must not be recorded as a dependency
-        # failure: it produces a false miss that looks exactly like a real one.
-        # Retry ONLY network-shaped failures; a genuine version/build error
-        # still fails immediately.
-        if r.returncode != 0 and _net_shaped(r.stderr or ""):
-            print("   -- install failed on a NETWORK error; waiting for the "
-                  "network, then retrying once", flush=True)
-            if _wait_for_net():
-                r = _run(cmd, repo_dir, env_vars=state["env_vars"], timeout=900,
-                         active_env_kind=active)
-                state["net_retries"] = state.get("net_retries", 0) + 1
         ok = r.returncode == 0
         entry = {"name": name, "version_spec": vspec, "backend": backend,
                  "no_build_isolation": no_iso, "ok": ok}
