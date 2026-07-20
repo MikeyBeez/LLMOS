@@ -348,7 +348,15 @@ def render_worksheet(state):
         nxt = ("repro passes but the locked probe does not - your fix answers "
                "your theory, not the issue; re-read the issue and patch again")
     else:
-        nxt = "run_tests on the neighborhood, then submit"
+        nxt = ("repro and probe are green. BEFORE submitting, state in one "
+               "sentence the INVARIANT your patch establishes, then run ONE "
+               "VARIANT of your reproduction that differs along the dimension "
+               "the issue names (other casing, equal-vs-unequal lengths, other "
+               "type, the other branch, a second call site of the same rule). "
+               "A patch that only passes the exact script you wrote is "
+               "under-constrained: the same concept usually lives at more than "
+               "one place in the code. If the variant fails, patch again. "
+               "Then run_tests on the neighborhood and submit.")
     lines = ["WORKSHEET (maintained by the harness; facts, not suggestions):"]
     if state.get("triage_goal"):
         lines.append("  trying to get : %s" % state["triage_goal"][:200])
