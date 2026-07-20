@@ -20,7 +20,7 @@ Scoring:
 Reads ~/swe/instances.json (from swe_lite_select.py), writes
 ~/swe/results_v2.json and a trace per instance.
 """
-import json, os, re, shutil, subprocess, sys, tempfile, time
+import json, os, re, shlex, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.expanduser("~/Code/LLMOS"))
 from tool_call_cpu import ToolCallCPU
@@ -516,6 +516,43 @@ def ensure_local_httpbin(repo_dir, repo_name, env_kind="uv", env_vars=None):
         return False
 
 
+# Deliverable-boundary enforcement of the no-test-edit policy.
+# swe_fix_tools.h_patch refuses test-path edits and _diff_nonempty ignores
+# them, but check()/reproduce()/run_sanity() run arbitrary python with
+# cwd=repo and can rewrite a test file behind that guard. An unfiltered
+# `git diff` then carries the edit into the submitted patch, `git apply`
+# of the official test_patch collides with it, and the run is voided on a
+# mechanical technicality instead of being scored on its source fix.
+# Kept byte-identical to swe_fix_tools._TEST_PATH_RE on purpose.
+_TEST_PATH_RE = re.compile(
+    r"(^|/)(tests?|testing)/|(^|/)test_|_test\.py$|(^|/)conftest\.py$")
+
+
+def revert_test_paths(repo):
+    """Restore every modified test-path file in `repo` before the deliverable
+    diff is taken. Returns the list of reverted paths (telemetry). Never
+    raises: a failure here must not turn a scoreable run into a crash."""
+    try:
+        r = sh("git -C %s diff --name-only" % repo, timeout=60)
+        files = [f.strip() for f in (r.stdout or "").splitlines() if f.strip()]
+        bad = [f for f in files if _TEST_PATH_RE.search(f)]
+        if not bad:
+            return []
+        for f in bad:
+            sh("git -C %s checkout -- %s" % (repo, shlex.quote(f)), timeout=60)
+        still = sh("git -C %s diff --name-only" % repo, timeout=60)
+        left = [f.strip() for f in (still.stdout or "").splitlines()
+                if f.strip() and _TEST_PATH_RE.search(f.strip())]
+        print(" -- reverted %d test-path file(s) before scoring: %s%s"
+              % (len(bad), ", ".join(bad[:6]),
+                 ("  [STILL DIRTY: %s]" % ", ".join(left)) if left else ""),
+              flush=True)
+        return bad
+    except Exception as e:
+        print(" -- test-path revert failed (scoring continues):", e, flush=True)
+        return []
+
+
 def score(inst, repo, env_vars, env_kind="uv"):
     """Apply the model's diff + the test patch, run FAIL_TO_PASS."""
     # .hypothesis dirs left by phase-1 test runs turn a UserWarning into a
@@ -525,6 +562,10 @@ def score(inst, repo, env_vars, env_kind="uv"):
     # Warnings-as-errors repos: pin era-compatible pure-python deps so an
     # unrelated DeprecationWarning cannot turn collection into a false negative.
     pin_warn_as_error_deps(repo, inst["repo"], env_kind, env_vars)
+    # A test-file edit is never part of a fix (h_patch refuses one outright);
+    # enforce that at the deliverable boundary too, so a scratch script that
+    # wrote into tests/ cannot void an otherwise scoreable source patch.
+    revert_test_paths(repo)
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
