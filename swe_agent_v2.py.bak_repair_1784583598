@@ -660,26 +660,6 @@ def _load_repo_knowledge(repo):
     return "PACKAGE KNOWLEDGE BASE for %s (accumulated, general; consult before guessing):\n%s" % (repo, txt[:2600])
 
 
-TRIAGE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {"type": "string",
-                 "enum": ["crash", "wrong_value", "perf", "api", "format",
-                          "regression", "compat", "other"]},
-        "subsystem":      {"type": "string"},
-        "repro_criteria": {"type": "string"},
-        "done_criteria":  {"type": "string"},
-        "produced_by":    {"type": "string"},
-        "change_site":    {"type": "string"},
-        "invariant":      {"type": "string"},
-        "needs":       {"type": "array", "items": {"type": "string"}},
-        "dont_break":  {"type": "array", "items": {"type": "string"}},
-        "steps":       {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["kind", "subsystem", "done_criteria", "invariant"],
-}
-
-
 def _triage(problem, repo):
     """One structured understanding pass before any tool is touched."""
     if not os.environ.get("TRIAGE"):
@@ -713,16 +693,6 @@ def _triage(problem, repo):
                 % (repo, problem[:2500])),
         max_tokens=8000, format_json=True)
     t = _extract_json(raw) or {}
-    if not t.get("kind"):
-        # Thinking produced something unparseable (7% of runs). Do NOT re-reason
-        # with thinking off -- that degrades the judgement (a parser bug got
-        # classified kind="perf"). Reformat what this call already said, with
-        # the schema enforced at the token level.
-        from repo_bootstrap_tools import reshape_json
-        _rep = reshape_json(raw, TRIAGE_SCHEMA)
-        if _rep.get("kind"):
-            print(" -- triage JSON repaired via strict schema", flush=True)
-            t = _rep
     if not t.get("kind"):
         return None, ""
     steps = t.get("steps") or []

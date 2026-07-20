@@ -20,28 +20,10 @@ from install_tools import (INSTALL_TOOLS, INSTALL_TOOL2SYS,
 
 
 # ---------- LLM helper: tools can call the model ------------------------
-def reshape_json(raw, schema, host="http://127.0.0.1:8080"):
-    """Repair stage: take prose a THINKING call already produced and force it
-    into `schema`. Does not re-reason -- it only reformats, so the judgement
-    from the first call survives while the format becomes guaranteed."""
-    if not (raw or "").strip():
-        return {}
-    try:
-        out = llm_call(
-            system=("You convert text into JSON matching a schema. Extract "
-                    "what is present; do not invent, do not reason further."),
-            prompt="Text:\n%s\n\nReturn it as JSON matching the schema." % raw[:6000],
-            max_tokens=1200, strict_schema=schema, host=host)
-        import json as _j
-        return _j.loads(out) if out.strip() else {}
-    except Exception:
-        return {}
-
-
 def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
              model="ornith:35b", host="http://127.0.0.1:8080",
              temperature=0.3, max_tokens=1600, timeout=300,
-             format_json=False, num_ctx=131072, strict_schema=None):
+             format_json=False, num_ctx=131072):
     """Synchronous chat with the same ornith model the top-level agent uses.
     max_tokens defaulted UP to 1600 because thinking-mode's preamble was
     eating the whole budget before JSON emission. Pass format_json=True to
@@ -57,18 +39,7 @@ def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
         "temperature": temperature, "top_p": 0.95, "top_k": 20,
         "max_tokens": max_tokens,
     }
-    if strict_schema:
-        # Schema-enforced decoding. Requires thinking OFF: with the think block
-        # enabled the grammar is applied to a stream the model is still using
-        # to reason, and content comes back empty. Costs judgement -- use only
-        # where the output is a lookup or a reformat, never where the model
-        # must decide something.
-        body["response_format"] = {"type": "json_schema",
-                                   "json_schema": {"name": "out",
-                                                   "schema": strict_schema,
-                                                   "strict": True}}
-        body["chat_template_kwargs"] = {"enable_thinking": False}
-    elif format_json:
+    if format_json:
         body["response_format"] = {"type": "json_object"}
     data = json.dumps(body).encode()
     try:
