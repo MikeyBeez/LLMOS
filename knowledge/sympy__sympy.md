@@ -132,3 +132,27 @@ Render both forms and compare, rather than reasoning about the string:
 
 If the wrapped form contains a nested `\left` inside another `\left`, it is
 wrong regardless of what the surrounding methods do.
+
+### The exp= trap: the crash is the symptom, not the specification
+
+Printer methods are called with `exp=<power>` when their object is raised to a
+power. A method that lacks the parameter CRASHES with "unexpected keyword
+argument" -- and that crash is only the SYMPTOM. Adding `exp=None` to the
+signature makes the crash disappear, which makes a crash-based reproduction go
+green, which proves nothing about the OUTPUT.
+
+The real specification is the delimiter-sizing rule above, because attaching an
+exponent IS the "wrap an already-delimited expression" case:
+
+  - the wrapped form uses PLAIN delimiters inside the wrapper (the unwrapped
+    form keeps its auto-sized ones -- the two forms differ on purpose)
+  - the group is braced so the exponent binds to all of it
+
+Do NOT copy the wrapper from neighbouring methods: most of them contain no
+inner delimiters, so their pattern never exercised this rule and silently
+violates it for methods that do.
+
+Verify by RENDERING, never by absence-of-crash: print `latex(obj)` and
+`latex(obj**3)` and check the wrapped form -- no `\left` nested inside another
+`\left`, and the exponent attached to a braced group. A reproduction that only
+demonstrates the TypeError will pass on a wrong fix.
