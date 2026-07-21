@@ -779,21 +779,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 if _fl:
                     out["value_flow"] = [{k: v for k, v in c.items() if v}
                                          for c in _fl[:2]]
-                # COMPOSITION MAP: for code that BUILDS output, whether it composes
-                # blocks or splices strings is decisive and STATIC. A function that
-                # concatenates rendered text has already discarded the alignment
-                # information it needs, and looking at the result never reveals that.
-                _enc = (_fm or {}).get("enclosing")
-                if _enc and any(w in (_enc or "").lower() or w in path.lower()
-                                for w in ("print", "repr", "render", "format",
-                                          "pretty", "latex", "str")):
-                    try:
-                        import compose_map as _cm
-                        _cr = _cm.compose_map(full, _enc)
-                        if _cr and _cr.get("verdict") and not _cr.get("error"):
-                            out["composition"] = {k: v for k, v in _cr.items() if v}
-                    except Exception:
-                        pass
                 _research_maps(repo_dir, path, _sl, _fm, _fl)
             except Exception as _e:
                 out["file_map_error"] = str(_e)[:120]
@@ -878,21 +863,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             if _fl:
                 out["value_flow"] = [
                     {k: v for k, v in c.items() if v} for c in _fl[:2]]
-            # COMPOSITION MAP: for code that BUILDS output, whether it composes
-            # blocks or splices strings is decisive and STATIC. A function that
-            # concatenates rendered text has already discarded the alignment
-            # information it needs, and looking at the result never reveals that.
-            _enc = (_fm or {}).get("enclosing")
-            if _enc and any(w in (_enc or "").lower() or w in path.lower()
-                            for w in ("print", "repr", "render", "format",
-                                      "pretty", "latex", "str")):
-                try:
-                    import compose_map as _cm
-                    _cr = _cm.compose_map(full, _enc)
-                    if _cr and _cr.get("verdict") and not _cr.get("error"):
-                        out["composition"] = {k: v for k, v in _cr.items() if v}
-                except Exception:
-                    pass
             _cerr = _research_maps(repo_dir, path, _line, _fm, _fl)
             if _cerr:
                 out["map_collection_error"] = _cerr

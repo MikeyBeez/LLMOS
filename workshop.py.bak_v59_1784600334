@@ -139,13 +139,7 @@ for iid in [i for i in failset if i not in done]:
         r["attempt"] = k + 1
         r["attempt_secs"] = round(time.time() - t0)
         attempts.append(r)
-        # Do NOT stop early on the agent's own check: measured 30% false
-        # positive / 33% false negative, and nothing available at runtime
-        # proves success (the canonical test is off limits). Take the second
-        # draw at temperature 1.0 and let form_rank -- which ranks on GIVEN
-        # evidence -- choose. Stopping early on noise threw away a real attempt
-        # roughly a third of the time.
-        if r.get("resolved"):
+        if self_verified(r):
             break
     A.FIX_BUDGET = _base_budget
     chosen = dict(max(attempts, key=form_rank))
@@ -156,17 +150,7 @@ for iid in [i for i in failset if i not in done]:
     if chosen.get("resolved"):
         grad.append({"id": iid, "iteration": ITER, "ts": int(time.time())})
         failset = [x for x in failset if x != iid]
-        # Re-read before writing: two workshop processes overlapped once and
-        # the exiting one stomped the new list with its stale in-memory copy.
-        try:
-            on_disk = json.load(open(FAILSET))
-        except Exception:
-            on_disk = failset
-        merged = [x for x in on_disk if x != iid]
-        for x in failset:
-            if x not in merged:
-                merged.append(x)
-        json.dump(merged, open(FAILSET, "w"))
+        json.dump(failset, open(FAILSET, "w"))
         json.dump(grad, open(GRAD, "w"), indent=2)
     print("[iter%d] %s %s (probe=%s ranks_max=%d)"
           % (ITER, iid, "GRADUATED" if chosen.get("resolved") else "still failing",
