@@ -322,21 +322,6 @@ def _fired(state, feature):
         pass
 
 
-def _seen_before(state, path, new_text):
-    """Would this edit RESTORE a file state we have already been in?
-    Returns the index of the prior visit, or None. Records nothing."""
-    import hashlib
-    h = hashlib.md5(new_text.encode("utf-8", "ignore")).hexdigest()
-    hist = state.setdefault("state_history", {}).setdefault(path, [])
-    return (hist.index(h) if h in hist else None), h, hist
-
-
-def _remember_state(state, path, text):
-    import hashlib
-    h = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
-    state.setdefault("state_history", {}).setdefault(path, []).append(h)
-
-
 def _anchor_record(state):
     """What was tried and why it failed -- so the next attempt is informed by
     the failures rather than being another draw from the same wrong picture."""
@@ -474,7 +459,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "patch_history": [],
         "failed_anchors": {},
         "features_fired": {},
-        "state_history": {},   # file -> [content hashes seen]
         "must_observe": False,       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
              "triage_repro": ""}        # repro_criteria from the understanding pass
@@ -776,25 +760,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             _nl = chr(10)
             _ins = new if (not new or new.endswith(_nl)) else new + _nl
             _newtext = "".join(_lines[:_sl - 1]) + _ins + "".join(_lines[_el:])
-            _prior, _h, _hist = _seen_before(state, path, _newtext)
-            if _prior is not None and _hist and _h != _hist[-1]:
-                _fired(state, "undo_refused")
-                return {"error": (
-                    "REFUSED: this patch would RETURN %s to a state it was "
-                    "already in (visit %d of this run). The failure CHANGED "
-                    "when you moved past that state -- which proves your edit "
-                    "does something necessary. Undoing it reverses known "
-                    "progress and re-creates the OLD failure. Your edit is "
-                    "NECESSARY BUT NOT SUFFICIENT: keep it, and ALSO fix what "
-                    "is still wrong. If a rule arrived with an earlier patch "
-                    "result (applies_here), implement THAT construction now."
-                    % (path, _prior + 1)),
-                "already_tried": _anchor_record(state)}
-            if not _hist:
-                _remember_state(state, path, text)   # the pre-edit baseline
             with open(full, "w", encoding="utf-8") as f:
                 f.write(_newtext)
-            _remember_state(state, path, _newtext)
             state["repro_green"] = False
             state["fix_verified"] = False
             state["same_verify_count"] = 0
@@ -884,21 +851,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "do_this_instead": ("read_range or check() first, then "
                                         "patch. One observation is enough.")}
         new_text, _how = _apply_edit(text, old, new)
-        if new_text is not None:
-            _prior, _h, _hist = _seen_before(state, path, new_text)
-            if _prior is not None and _hist and _h != _hist[-1]:
-                _fired(state, "undo_refused")
-                return {"error": (
-                    "REFUSED: this patch would RETURN %s to a state it was "
-                    "already in (visit %d of this run). The failure CHANGED "
-                    "when you moved past that state -- which proves your edit "
-                    "does something necessary. Undoing it reverses known "
-                    "progress and re-creates the OLD failure. Your edit is "
-                    "NECESSARY BUT NOT SUFFICIENT: keep it, and ALSO fix what "
-                    "is still wrong. If a rule arrived with an earlier patch "
-                    "result (applies_here), implement THAT construction now."
-                    % (path, _prior + 1)),
-                "already_tried": _anchor_record(state)}
         if new_text is None:
             state["patch_attempts"] = state.get("patch_attempts", 0) + 1
             state["failed_anchors"][_key] = {
@@ -908,11 +860,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             if len(state["failed_anchors"]) > 1:
                 state["must_observe"] = True
             return {"error": _how, "already_tried": _anchor_record(state)}
-        if not state.get("state_history", {}).get(path):
-            _remember_state(state, path, text)   # pre-edit baseline
         with open(full, "w", encoding="utf-8") as f:
             f.write(new_text)
-        _remember_state(state, path, new_text)
         state["repro_green"] = False
         state["fix_verified"] = False
         state["same_verify_count"] = 0
