@@ -808,19 +808,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
                     except Exception:
                         pass
-                # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
-                # match on repo/path/function/argument -- so the rule arrives WITH the
-                # action instead of decaying in a turn-0 wall of text.
-                try:
-                    import swe_triggers as _tg
-                    _rules = _tg.fire(repo or "", "patch", path,
-                                      (_fm or {}).get("enclosing") or "",
-                                      (old or "") + " " + (new or ""))
-                    if _rules:
-                        _fired(state, "knowledge_trigger")
-                        out["applies_here"] = _rules
-                except Exception:
-                    pass
                 _research_maps(repo_dir, path, _sl, _fm, _fl)
             except Exception as _e:
                 out["file_map_error"] = str(_e)[:120]
@@ -921,19 +908,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
                 except Exception:
                     pass
-            # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
-            # match on repo/path/function/argument -- so the rule arrives WITH the
-            # action instead of decaying in a turn-0 wall of text.
-            try:
-                import swe_triggers as _tg
-                _rules = _tg.fire(repo or "", "patch", path,
-                                  (_fm or {}).get("enclosing") or "",
-                                  (old or "") + " " + (new or ""))
-                if _rules:
-                    _fired(state, "knowledge_trigger")
-                    out["applies_here"] = _rules
-            except Exception:
-                pass
             _cerr = _research_maps(repo_dir, path, _line, _fm, _fl)
             if _cerr:
                 out["map_collection_error"] = _cerr
