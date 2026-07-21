@@ -1066,41 +1066,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if not snippet.strip():
             return {"error": "check needs a `snippet`: a few lines of python "
                              "that PRINT the one fact you want to know."}
-        _pre = _run("git status --porcelain", timeout=30).stdout or ""
         r = _run("%s/bin/python -c %s" % (env_dir, shlex.quote(snippet)),
                  timeout=60)
         state["checks_run"] = state.get("checks_run", 0) + 1
-        _post = _run("git status --porcelain", timeout=30).stdout or ""
         out = {"exit": r.returncode,
                "stdout": (r.stdout or "")[-2000:],
                "stderr": (r.stderr or "")[-800:]}
         if not (r.stdout or "").strip() and r.returncode == 0:
             out["note"] = ("ran clean but printed nothing -- a check is only "
                            "useful if it PRINTS the fact. Add a print().")
-        if _post != _pre:
-            # the snippet MUTATED the repository -- check is for reading, and
-            # edits through it bypass every safeguard patch provides.
-            _fired(state, "check_modified_repo")
-            _changed = sorted({ln[3:].strip() for ln in _post.splitlines()}
-                              - {ln[3:].strip() for ln in _pre.splitlines()})
-            _tests = [f for f in _changed if _is_test_path(f)]
-            if _tests:
-                for f in _tests:
-                    _run("git checkout -- %s" % shlex.quote(f), timeout=30)
-                out["repo_mutation"] = (
-                    "your snippet EDITED TEST FILES (%s). Those changes were "
-                    "REVERTED: the scorer strips all test edits before running "
-                    "the hidden tests, so a test you write can never count. "
-                    "Fix the SOURCE." % ", ".join(_tests[:3]))
-            else:
-                out["repo_mutation"] = (
-                    "your snippet MODIFIED the repository (%s). check() is for "
-                    "READING; edits made here bypass syntax checking, the maps "
-                    "and the anchor record. Use patch for changes. If you just "
-                    "REVERTED your own patch: that is the known losing move -- "
-                    "a correct patch with a red self-check scores as a WIN, a "
-                    "reverted one scores as nothing."
-                    % ", ".join(_changed[:4] or ["files changed"]))
         return out
 
     def h_submit(pcb, args):
