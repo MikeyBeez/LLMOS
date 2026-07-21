@@ -11,6 +11,43 @@ evidence was. A finding without its evidence is a rumour.
 
 ---
 
+## 2026-07-21
+
+### Knowledge tied to the tool converts where every other delivery failed
+
+sympy-21171: nine misses across every configuration -- turn-0 KB injection,
+act-time repetition (the rule arrived 17 times in one run and was never used),
+a broken oscillation loop. Then the rule was attached to the TOOL: fired by
+symbolic match (repo + path + enclosing function + argument content) and
+returned inside the patch result itself. First iteration with that wiring:
+RESOLVED, canonical test passed, trigger fired 3 times in the winning attempt.
+
+One draw at temperature 1.0 -- but an instance that was 0-for-eleven converting
+in the first tool-tied iteration is the strongest single data point this
+workshop has produced. Mikey's design sentence: "the triggers have to be tied
+to the tools."
+
+The delivery hierarchy, as measured on this one instance:
+  turn-0 wall of text        -> decayed by the time it mattered (9 misses)
+  act-time, in-result, 17x   -> present but not used (the revert reflex won)
+  tool-tied + undo refused   -> converted
+
+Attribution caveat recorded honestly: the undo guard never fired in the winning
+run (undo_refused=0), so loop-breaking and trigger-delivery cannot be cleanly
+separated. What is clean: everything before v6.5/v6.6 failed eleven times, and
+the first run after them passed.
+
+### The revert reflex
+
+From 21171's 95-turn trace: the model oscillated add/remove/add/remove on the
+same edit (14 patches, 2 states) because "still red after my change" reads to
+it as "my change was wrong". It cannot hold NECESSARY BUT NOT SUFFICIENT. The
+harness now holds it instead: a patch that would restore any previously-visited
+file state is refused with the instruction to EXTEND (undo guard, mirror of the
+anchor ledger). Every new state remains accepted, so there is no trap.
+
+---
+
 ## 2026-07-20
 
 ### A map is a translation layer between abstractions
