@@ -119,17 +119,8 @@ def form_map(path, func_name, limit=10):
             "WRONG FORM for some input, the fault is in one of these CONDITIONS "
             "-- a predicate admitting an input it should not, or missing one it "
             "should -- not in the form templates. Trace YOUR input through the "
-            "conditions with check(). AND: a predicate and the branch it "
-            "selects are ONE CONTRACT. Changing WHO gets a form changes what "
-            "must be handled in BOTH directions -- inputs you newly exclude "
-            "fall through to another branch (is their output there right?), "
-            "and inputs you newly admit reach this renderer (can it draw "
-            "them?). The reported input is one point in the space. After "
-            "editing a condition, enumerate the input classes on each side and "
-            "render ONE SPECIMEN of each through the real code with check(). "
-            "A selector fix that only tests the reported input is half a fix "
-            "-- sometimes the RENDERER must change too, so it can handle "
-            "everything the corrected predicate sends it.")
+            "conditions with check(): evaluate each predicate on the failing "
+            "input and find the branch it takes.")
     return {"function": leaf, "branches": branches[:limit], "note": note}
 
 
