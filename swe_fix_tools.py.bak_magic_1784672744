@@ -812,17 +812,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             "you_replaced_exactly: if that is not the text you "
                             "meant to change, read_range again and re-patch the "
                             "correct lines.")}
-            # MAGIC-STRING CHECK (Mikey) -- before the maps. A string written in a
-            # discriminator position must AGREE with the package; measured fail
-            # rate when a fix involves one: 75% vs 51%.
-            try:
-                import magic_tool as _mg
-                _ms = _mg.check_snippet(repo_dir, new or "")
-                if _ms:
-                    _fired(state, "magic_string_check")
-                    out["magic_strings"] = _ms
-            except Exception:
-                pass
             if _syn:
                 out["syntax"] = _syn
             try:
@@ -954,17 +943,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                "match": _how, "note": "verification invalidated — run verify_fix"}
         if _syn:
             out["syntax"] = _syn
-        # MAGIC-STRING CHECK (Mikey) -- before the maps. A string written in a
-        # discriminator position must AGREE with the package; measured fail
-        # rate when a fix involves one: 75% vs 51%.
-        try:
-            import magic_tool as _mg
-            _ms = _mg.check_snippet(repo_dir, new or "")
-            if _ms:
-                _fired(state, "magic_string_check")
-                out["magic_strings"] = _ms
-        except Exception:
-            pass
         # THE MAP, built right before/with every patch (Mikey): mechanical AST,
         # cached per checkout, outside the repo tree. No choice point -- the
         # agent cannot patch without receiving an observation of what it changed.
