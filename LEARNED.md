@@ -152,7 +152,7 @@ corpus carries its own control group.
 Six times in one session I asserted a field or function name from memory and was
 wrong: `h_submit` being on the dispatch path (it isn't — `submit` maps to
 `RETURN` and the handler never runs), `_run` returning a dict (it returns
-`CompletedProcess`), `_clip_result` (never existed), events carrying
+`CompletedProcess`), `_clip_result` (which DOES exist as `ToolCallCPU._clip_result` -- the name was right and merely out of scope in that closure; a different bug than the one I first recorded, and the name expert is what caught it), events carrying
 `result`/`exit` (they carry `ok`), "we never ran a full pass" (161 instances at
 40.4% were on disk), `inst["patch"]` (the field is `gold_patch`).
 
@@ -164,6 +164,19 @@ Countermeasure: `schema.py` — one canonical space for all four data shapes, wi
 string key is an unvalidated boundary crossing, the same hazard as the agent's
 `old_snippet`, and the same fix applies: make the boundary explicit rather than
 reasoning harder about it.
+
+### A name that fails is not necessarily a name that is wrong
+
+`_clip_result` raised NameError and I recorded "invented from a stale note".
+The name expert (`names.py`) says it exists: `ToolCallCPU._clip_result`,
+tool_call_cpu.py:114. It was OUT OF SCOPE, not imaginary -- a different bug with
+a different fix.
+
+Distinguishing "no such name" from "exists elsewhere" needs a registry, not
+recall. `names.py` indexes every def/class from AST and resolves any form --
+leaf, `Class.method`, `module.Class.method` -- raising with a did-you-mean.
+It also crosses the qualified/leaf boundary in ONE place, which is the crossing
+that silently disabled the composition map.
 
 ### Silent failure is worse than loud failure
 
