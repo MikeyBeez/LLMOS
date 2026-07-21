@@ -80,6 +80,20 @@ TRIGGERS = [
                "get away with violations their inputs never exercise. Check "
                "the bare AND the nested/wrapped case: this bug class only "
                "appears when the construct nests inside its own kind.")),
+    # ---- any repo: generated build artifacts are not source ---------------
+    dict(repo=None, tool="patch",
+         path=r"(_antlr/|_pb2\.py|_generated|/generated/|\.tab\.py|lex\.yy|"
+              r"parser\.out|_grammar\.py|\.g4\.py)",
+         enclosing=None, args=None,
+         rule=("GENERATED FILE: this path is a BUILD ARTIFACT, not source. "
+               "Hand-editing it is not a fix -- it is produced from a grammar/"
+               "schema by a generator whose toolchain and runtime version are "
+               "usually absent here, and edits to serialized tables are "
+               "unreviewable and will not survive. Do NOT try to regenerate it "
+               "and do NOT chase runtime-version mismatches; that is a rabbit "
+               "hole, not the bug. STOP and re-localize into hand-written "
+               "source -- most often the code that CONSUMES this artifact, or "
+               "the printer/serializer that renders its output.")),
 ]
 
 
