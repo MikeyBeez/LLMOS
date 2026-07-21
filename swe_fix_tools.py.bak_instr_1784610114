@@ -311,17 +311,6 @@ def _research_maps(repo_dir, relfile, line, fmap, flow):
         return "%s: %s" % (type(e).__name__, str(e)[:80])
 
 
-def _fired(state, feature):
-    """Mark that a feature actually ran. Counted in fix_state, which IS
-    serialised -- unlike tool results, which are budget-truncated out of the
-    stored conversation and cannot be recovered afterwards."""
-    try:
-        f = state.setdefault("features_fired", {})
-        f[feature] = f.get(feature, 0) + 1
-    except Exception:
-        pass
-
-
 def _anchor_record(state):
     """What was tried and why it failed -- so the next attempt is informed by
     the failures rather than being another draw from the same wrong picture."""
@@ -458,7 +447,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "rejected_repro_streak": 0,  # consecutive green-exit repro scripts
              "patch_history": [],
         "failed_anchors": {},
-        "features_fired": {},
         "must_observe": False,       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
              "triage_repro": ""}        # repro_criteria from the understanding pass
@@ -771,7 +759,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["patch_attempts"] = state.get("patch_attempts", 0) + 1
             state["patch_history"].append({"file": path, "verdict": "unverified"})
             _syn = _syntax_check(full, path)
-            _fired(state, "patch_line_anchored")
             out = {"edited": path, "mode": "line_anchored",
                    "lines": "%d-%d" % (_sl, _el),
                    "you_replaced_exactly": _replaced,
@@ -785,13 +772,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 import symmap as _sm
                 _fm = _sm.file_map(repo_dir, path, near_line=_sl)
                 if _fm:
-                    _fired(state, "map_anatomy")
                     out["file_map"] = {"you_edited_inside":
                                        _fm["enclosing"] or "(module level)",
                                        "at_line": _sl}
                 _fl = _sm.flow_map(repo_dir, path, near_line=_sl)
                 if _fl:
-                    _fired(state, "map_value_flow"); out["value_flow"] = [{k: v for k, v in c.items() if v}
+                    out["value_flow"] = [{k: v for k, v in c.items() if v}
                                          for c in _fl[:2]]
                 # COMPOSITION MAP: for code that BUILDS output, whether it composes
                 # blocks or splices strings is decisive and STATIC. A function that
@@ -805,7 +791,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         import compose_map as _cm
                         _cr = _cm.compose_map(full, _enc)
                         if _cr and _cr.get("verdict") and not _cr.get("error"):
-                            _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
+                            out["composition"] = {k: v for k, v in _cr.items() if v}
                     except Exception:
                         pass
                 _research_maps(repo_dir, path, _sl, _fm, _fl)
@@ -816,7 +802,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _key = " ".join(old.split())[:400]
         _prior = state["failed_anchors"].get(_key)
         if _prior:
-            _fired(state, "anchor_repeat_refused")
             state["must_observe"] = True     # the repeat IS the trigger
             return {"error": ("you already sent this exact snippet at turn %s "
                               "and it did not match. Sending it again cannot "
@@ -891,7 +876,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             # the edit, their key expressions, and whether the writers agree.
             _fl = _sm.flow_map(repo_dir, path, near_line=_line)
             if _fl:
-                _fired(state, "map_value_flow"); out["value_flow"] = [
+                out["value_flow"] = [
                     {k: v for k, v in c.items() if v} for c in _fl[:2]]
             # COMPOSITION MAP: for code that BUILDS output, whether it composes
             # blocks or splices strings is decisive and STATIC. A function that
@@ -905,7 +890,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     import compose_map as _cm
                     _cr = _cm.compose_map(full, _enc)
                     if _cr and _cr.get("verdict") and not _cr.get("error"):
-                        _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
+                        out["composition"] = {k: v for k, v in _cr.items() if v}
                 except Exception:
                     pass
             _cerr = _research_maps(repo_dir, path, _line, _fm, _fl)

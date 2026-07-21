@@ -1220,7 +1220,6 @@ def _postmortem(inst, blob):
                                 "repro_green": fs.get("repro_green"),
                                 "probe_green": fs.get("probe_green"),
                                 "fix_verified": fs.get("fix_verified")},
-               "features": dict(fs.get("features_fired") or {}),
                "top_errors": errs.most_common(4)}
         d = os.path.expanduser("~/swe/research/postmortem")
         os.makedirs(d, exist_ok=True)
