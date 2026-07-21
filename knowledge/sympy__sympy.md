@@ -89,3 +89,46 @@ on trailing whitespace. Assert on the STRUCTURE instead --
   - that unrelated expressions still render exactly as before (a printer change
     that fixes one form and shifts another is a regression, and the repo's own
     printing tests are the given evidence for that)
+
+## EXTERNAL STANDARDS this package implements
+
+sympy emits LaTeX. Correct LaTeX output is governed by conventions documented by
+the AMS, NOT by anything in this repository -- so you cannot recover them by
+reading neighbouring code, and the neighbours may not follow them. Where a
+typesetting rule and local habit disagree, the typesetting rule is why the
+output is judged wrong.
+
+Sources: amsmath User's Guide (ams.org/arc/tex/amsmath/amsldoc.pdf);
+Short Math Guide for LaTeX (Downes, AMS).
+
+### Delimiter sizing -- the rule that most often bites
+
+`\left` and `\right` size themselves to their content. AMS states plainly that
+this "usually turn[s] out larger than necessary", and the effect COMPOUNDS when
+nested: a `\left\langle ... \right\rangle` placed inside a `\left( ... \right)`
+forces the outer parentheses to grow around already-enlarged inner delimiters.
+
+So when you wrap an expression that ALREADY CONTAINS auto-sized delimiters:
+
+  - do not leave the inner delimiters auto-sized. Use the plain form
+    (`\langle`, `(`, `|`) or an explicit size (`\bigl`, `\Bigl`) inside the
+    wrapper. Only the OUTERMOST pair should auto-size.
+  - brace the wrapped group -- `{\left( ... \right)}^{n}` -- so an exponent
+    binds to the whole group rather than to the closing delimiter.
+
+This applies to any printer method that wraps its own output to attach an
+exponent or an index, not to one particular function. A sibling method that
+gets away with nesting usually contains no inner delimiters, so it never
+exercises the case.
+
+### How to check it
+
+Render both forms and compare, rather than reasoning about the string:
+
+    from sympy import latex
+    print(latex(expr))        # plain
+    print(latex(expr**3))     # wrapped -- inner delimiters must NOT be
+                              # \left/\right, and the group must be braced
+
+If the wrapped form contains a nested `\left` inside another `\left`, it is
+wrong regardless of what the surrounding methods do.
