@@ -839,14 +839,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         _cr = _cm.compose_map(full, _enc)
                         if _cr and _cr.get("verdict") and not _cr.get("error"):
                             _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
-                            # FORM-SELECTION MAP (Mikey): which forms can this function produce
-                            # and what CONDITION selects each. Wrong-form bugs live in the
-                            # predicate, not the template.
-                            import form_map as _fmap
-                            _fr = _fmap.form_map(full, _enc)
-                            if _fr and not _fr.get("error") and _fr.get("branches"):
-                                _fired(state, "map_form_selection")
-                                out["form_selection"] = _fr
                     except Exception:
                         pass
                 # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
@@ -978,14 +970,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     _cr = _cm.compose_map(full, _enc)
                     if _cr and _cr.get("verdict") and not _cr.get("error"):
                         _fired(state, "map_composition"); out["composition"] = {k: v for k, v in _cr.items() if v}
-                        # FORM-SELECTION MAP (Mikey): which forms can this function produce
-                        # and what CONDITION selects each. Wrong-form bugs live in the
-                        # predicate, not the template.
-                        import form_map as _fmap
-                        _fr = _fmap.form_map(full, _enc)
-                        if _fr and not _fr.get("error") and _fr.get("branches"):
-                            _fired(state, "map_form_selection")
-                            out["form_selection"] = _fr
                 except Exception:
                     pass
             # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
