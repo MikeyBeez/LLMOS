@@ -1,0 +1,121 @@
+"""Caller map: who calls the function you are editing, and how.
+
+Targets the WORST measured category: signature/API-lag fails 80% (by gold-patch
+shape, n=5 never-resolved vs 1 solved). Those bugs are a function out of step
+with its callers' expectations -- and the agent looks at the function, never at
+the family calling it. The `exp=` convention was invisible for exactly this
+reason: the knowledge lived at the CALL SITES.
+
+For the edited function, every call site in the package: file:line, the
+enclosing function, and the call as written -- arguments visible, so calling
+conventions (extra kwargs, unpacking, how the result is consumed) are on the
+table at patch time.
+
+Index built once per checkout from AST (same discipline as symmap), cached in
+~/swe/callmaps/ OUTSIDE the repo tree so it can never enter a diff.
+"""
+import ast, os, json, time, glob, sys
+
+CACHE = os.path.expanduser("~/swe/callmaps")
+
+
+def _cache_path(repo_dir):
+    return os.path.join(CACHE, os.path.basename(os.path.abspath(repo_dir)) + ".json")
+
+
+def _src(node, cap=110):
+    try:
+        return " ".join(ast.unparse(node).split())[:cap]
+    except Exception:
+        return "?"
+
+
+def build(repo_dir, pkg=None):
+    """Index every call site in the package: callee leaf -> sites."""
+    t0 = time.time()
+    root = os.path.join(repo_dir, pkg) if pkg else repo_dir
+    sites = {}
+    files = 0
+    for dp, dns, fns in os.walk(root):
+        dns[:] = [d for d in dns if d not in
+                  (".git", ".venv", ".condaenv", "node_modules", "__pycache__")
+                  and not d.startswith("test")]
+        for fn in fns:
+            if not fn.endswith(".py") or fn.startswith("test_"):
+                continue
+            p = os.path.join(dp, fn)
+            rel = os.path.relpath(p, repo_dir)
+            try:
+                tree = ast.parse(open(p, encoding="utf-8", errors="ignore").read())
+            except Exception:
+                continue
+            files += 1
+            enclosing = [None]
+
+            def walk(node):
+                for ch in ast.iter_child_nodes(node):
+                    if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        enclosing.append(ch.name)
+                        walk(ch)
+                        enclosing.pop()
+                    else:
+                        if isinstance(ch, ast.Call):
+                            f = ch.func
+                            leaf = (f.id if isinstance(f, ast.Name)
+                                    else f.attr if isinstance(f, ast.Attribute)
+                                    else None)
+                            if leaf:
+                                sites.setdefault(leaf, []).append(
+                                    {"loc": "%s:%d" % (rel, ch.lineno),
+                                     "in": enclosing[-1] or "(module)",
+                                     "call": _src(ch)})
+                        walk(ch)
+
+            walk(tree)
+    os.makedirs(CACHE, exist_ok=True)
+    blob = {"built": int(time.time()), "files": files, "sites": sites}
+    json.dump(blob, open(_cache_path(repo_dir), "w"))
+    print("caller index: %d files, %d distinct callees in %.1fs"
+          % (files, len(sites), time.time() - t0))
+    return blob
+
+
+def _load(repo_dir):
+    p = _cache_path(repo_dir)
+    if os.path.isfile(p):
+        try:
+            return json.load(open(p))
+        except Exception:
+            pass
+    # detect the package dir the way symmap callers do: prefer src/ or the repo
+    pkg = "src" if os.path.isdir(os.path.join(repo_dir, "src")) else None
+    return build(repo_dir, pkg)
+
+
+def caller_map(repo_dir, func_name, limit=8):
+    """Everyone who calls `func_name` (by leaf), with the call as written."""
+    leaf = (func_name or "").split(".")[-1]
+    if not leaf:
+        return None
+    m = _load(repo_dir)
+    hits = (m.get("sites") or {}).get(leaf)
+    if not hits:
+        return None
+    note = ("These are the CALL SITES of the function you are editing -- the "
+            "contract you must not break, and often the convention you must "
+            "match. Look at the ARGUMENTS each caller passes (an extra keyword "
+            "here is a calling convention your signature must accept) and at "
+            "how the result is used. A signature change is judged by its "
+            "callers, not by the function body.")
+    return {"function": leaf, "caller_count": len(hits),
+            "callers": hits[:limit], "note": note}
+
+
+if __name__ == "__main__":
+    r = caller_map(sys.argv[1], sys.argv[2])
+    if not r:
+        print("(no callers found)")
+    else:
+        print("CALLERS of %s (%d):" % (r["function"], r["caller_count"]))
+        for c in r["callers"]:
+            print("  %-34s in %-22s %s" % (c["loc"], c["in"], c["call"][:70]))

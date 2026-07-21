@@ -109,25 +109,3 @@ def sget(d, key, default=None, shape=None):
     raise KeyError("%r is not a field of any known shape.%s"
                    % (key, (" Did you mean %s?" % " or ".join(repr(n) for n in near))
                       if near else ""))
-
-# ---- map result shapes (cross-module contracts; producers in *_map.py) ----
-
-MAP_ANATOMY = Shape("map_anatomy", required=("file", "enclosing", "symbols"))
-MAP_FLOW_ENTRY = Shape("map_flow_entry",
-                       required=("container", "writers", "readers", "ops"),
-                       optional=("finding", "distinct_key_exprs"))
-MAP_COMPOSITION = Shape("map_composition",
-                        required=("function", "verdict"),
-                        optional=("block_ops", "string_ops", "literal_concats",
-                                  "line_assignments", "note", "error"))
-MAP_FORM = Shape("map_form", required=("function", "branches", "note"),
-                 optional=("error",))
-MAP_FORM_BRANCH = Shape("map_form_branch",
-                        required=("condition", "selects", "depth"))
-MAP_CALLERS = Shape("map_callers",
-                    required=("function", "caller_count", "callers", "note"))
-MAP_CALLER_SITE = Shape("map_caller_site", required=("loc", "in", "call"))
-
-for _s in (MAP_ANATOMY, MAP_FLOW_ENTRY, MAP_COMPOSITION, MAP_FORM,
-           MAP_FORM_BRANCH, MAP_CALLERS, MAP_CALLER_SITE):
-    SHAPES[_s.name] = _s

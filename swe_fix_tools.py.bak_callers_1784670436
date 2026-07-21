@@ -847,14 +847,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             if _fr and not _fr.get("error") and _fr.get("branches"):
                                 _fired(state, "map_form_selection")
                                 out["form_selection"] = _fr
-                            # CALLER MAP (Mikey): who calls the function you are editing, and
-                            # how. A signature change is judged by its callers; the calling
-                            # convention usually lives at the call sites, not in the body.
-                            import caller_map as _cmap
-                            _cl = _cmap.caller_map(repo_dir, _enc)
-                            if _cl and _cl.get("callers"):
-                                _fired(state, "map_callers")
-                                out["callers"] = _cl
                     except Exception:
                         pass
                 # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
@@ -994,14 +986,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         if _fr and not _fr.get("error") and _fr.get("branches"):
                             _fired(state, "map_form_selection")
                             out["form_selection"] = _fr
-                        # CALLER MAP (Mikey): who calls the function you are editing, and
-                        # how. A signature change is judged by its callers; the calling
-                        # convention usually lives at the call sites, not in the body.
-                        import caller_map as _cmap
-                        _cl = _cmap.caller_map(repo_dir, _enc)
-                        if _cl and _cl.get("callers"):
-                            _fired(state, "map_callers")
-                            out["callers"] = _cl
                 except Exception:
                     pass
             # KNOWLEDGE TRIGGERS (Mikey): rules tied to the TOOL, fired by symbolic
