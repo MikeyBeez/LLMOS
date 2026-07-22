@@ -614,7 +614,7 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
                     "stderr": (r_t.stderr or "")[-1500:],
                     "goal_stack": _stack_snapshot(state)}
         r_collect = _run(
-            f'{bin_}/python -m pytest --collect-only -q {extra_args}',
+            f'{bin_}/python -m pytest --collect-only -q {extra_args} "{test_id}"',
             repo_dir, env_vars=state["env_vars"], timeout=180,
             active_env_kind=active)
         r_test = _run(
