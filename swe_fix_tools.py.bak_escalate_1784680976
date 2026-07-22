@@ -475,7 +475,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "failed_anchors": {},
         "features_fired": {},
         "state_history": {},   # file -> [content hashes seen]
-        "func_edits": {},      # enclosing function -> edit count
         "must_observe": False,       # [{file, verdict}] verdict set by next verify
              "triage_goal": "",         # done_criteria from the understanding pass
              "triage_repro": ""}        # repro_criteria from the understanding pass
@@ -859,31 +858,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             if _fr and not _fr.get("error") and _fr.get("branches"):
                                 _fired(state, "map_form_selection")
                                 out["form_selection"] = _fr
-                            # PREDICATE-CHURN ESCALATION: repeated edits to the same SELECTOR
-                            # with failing verification mean no predicate alone can satisfy the
-                            # requirement -- one of the routed-to branches must change as well.
-                            _fe = state.setdefault("func_edits", {})
-                            _fe[_enc] = _fe.get(_enc, 0) + 1
-                            if _fe[_enc] >= 3 and _fr and _fr.get("branches"):
-                                _fired(state, "escalation_two_site")
-                                _targets = sorted({b.get("selects", "")[:60]
-                                                   for b in _fr["branches"]
-                                                   if "returns" in (b.get("selects") or "")})[:4]
-                                out["escalation"] = {
-                                    "situation": ("You have edited the conditions of this "
-                                                  "form-selecting function %d times and verification "
-                                                  "still fails. When each predicate edit fixes one "
-                                                  "case and breaks another, NO predicate alone can "
-                                                  "work: the partition you need does not exist while "
-                                                  "the branches stay as they are." % _fe[_enc]),
-                                    "do_this": ("WIDEN THE EDIT to two sites. Decide which inputs "
-                                                "belong in which form, write the predicate for THAT "
-                                                "partition, and then MODIFY THE BRANCH whose renderer "
-                                                "cannot yet handle the inputs your predicate routes "
-                                                "to it. The branch targets are listed in "
-                                                "form_selection above -- the second edit belongs in "
-                                                "one of them."),
-                                    "branch_targets": _targets}
                             # CALLER MAP (Mikey): who calls the function you are editing, and
                             # how. A signature change is judged by its callers; the calling
                             # convention usually lives at the call sites, not in the body.
@@ -1042,31 +1016,6 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         if _fr and not _fr.get("error") and _fr.get("branches"):
                             _fired(state, "map_form_selection")
                             out["form_selection"] = _fr
-                        # PREDICATE-CHURN ESCALATION: repeated edits to the same SELECTOR
-                        # with failing verification mean no predicate alone can satisfy the
-                        # requirement -- one of the routed-to branches must change as well.
-                        _fe = state.setdefault("func_edits", {})
-                        _fe[_enc] = _fe.get(_enc, 0) + 1
-                        if _fe[_enc] >= 3 and _fr and _fr.get("branches"):
-                            _fired(state, "escalation_two_site")
-                            _targets = sorted({b.get("selects", "")[:60]
-                                               for b in _fr["branches"]
-                                               if "returns" in (b.get("selects") or "")})[:4]
-                            out["escalation"] = {
-                                "situation": ("You have edited the conditions of this "
-                                              "form-selecting function %d times and verification "
-                                              "still fails. When each predicate edit fixes one "
-                                              "case and breaks another, NO predicate alone can "
-                                              "work: the partition you need does not exist while "
-                                              "the branches stay as they are." % _fe[_enc]),
-                                "do_this": ("WIDEN THE EDIT to two sites. Decide which inputs "
-                                            "belong in which form, write the predicate for THAT "
-                                            "partition, and then MODIFY THE BRANCH whose renderer "
-                                            "cannot yet handle the inputs your predicate routes "
-                                            "to it. The branch targets are listed in "
-                                            "form_selection above -- the second edit belongs in "
-                                            "one of them."),
-                                "branch_targets": _targets}
                         # CALLER MAP (Mikey): who calls the function you are editing, and
                         # how. A signature change is judged by its callers; the calling
                         # convention usually lives at the call sites, not in the body.
