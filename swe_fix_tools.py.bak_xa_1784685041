@@ -433,9 +433,6 @@ def render_worksheet(state):
     if state.get("triage_repro"):
         lines.append("  valid repro   : %s   [assumed at turn 0]"
                      % state["triage_repro"][:200])
-    if state.get("prior_attempts_note"):
-        lines.append("  prior attempts: %s   [observed]"
-                     % state["prior_attempts_note"][:220])
     if state.get("chain_mechanism"):
         lines.append("  must be true  : %s   [assumed at turn 0 -- check() it]"
                      % state["chain_mechanism"][:200])

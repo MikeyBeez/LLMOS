@@ -1058,9 +1058,6 @@ def run_one(inst):
                 f_state["chain_change"] = _ln.split("so change  :", 1)[1].strip()
     except Exception:
         pass
-    _pn = _seed_churn(inst["instance_id"], f_state)
-    if _pn:
-        print(" -- prior attempts: %s" % _pn[:110], flush=True)
     _probe = _write_probe(inst["problem_statement"], _inv, inst["repo"])
     if not _probe and _inv:
         print(" -- probe empty; retrying once", flush=True)
@@ -1157,54 +1154,6 @@ def run_one(inst):
     return outcome
 
 
-def _seed_churn(iid, f_state):
-    """Seed the per-attempt selector-edit counter from this instance's OWN
-    archived attempts (runtime-owned traces; our failures, not gold data).
-    Returns a prior-attempts note for the worksheet, or ""."""
-    import glob as _g
-    seeded = {}
-    misses = 0
-    files_hit = {}
-    for f in _g.glob(os.path.join(TRACES, "archive", iid + "__*.trace.json")):
-        try:
-            t = json.load(open(f))
-        except Exception:
-            continue
-        oc = t.get("outcome") or {}
-        if oc.get("resolved"):
-            continue
-        misses += 1
-        fs = t.get("fix_state") or {}
-        for fn, n in (fs.get("func_edits") or {}).items():
-            seeded[fn] = seeded.get(fn, 0) + n
-        for e in (t.get("phase2_events") or []):
-            if e.get("tool") == "patch" and e.get("ok"):
-                a = e.get("args")
-                if isinstance(a, str):
-                    try:
-                        a = json.loads(a)
-                    except Exception:
-                        a = {}
-                fpath = (a or {}).get("file") if isinstance(a, dict) else None
-                if fpath:
-                    files_hit[fpath] = files_hit.get(fpath, 0) + 1
-    if seeded:
-        f_state.setdefault("func_edits", {}).update(seeded)
-    if misses >= 2:
-        top = max(files_hit, key=files_hit.get) if files_hit else "?"
-        note = ("%d prior FAILED attempts on this instance; their patches "
-                "went to %s (%d edits)" % (misses, top, files_hit.get(top, 0)))
-        if seeded:
-            fn = max(seeded, key=seeded.get)
-            note += (". The function %s has been condition-edited %d time(s) "
-                     "across attempts -- if your plan is another edit to its "
-                     "conditions, that move is EXHAUSTED: widen the fix to "
-                     "the branch it routes to." % (fn, seeded[fn]))
-        f_state["prior_attempts_note"] = note
-        return note
-    return ""
-
-
 def _postmortem(inst, blob):
     """Mechanical analysis of one run -> the research corpus. Counted, not judged."""
     import collections
@@ -1272,7 +1221,6 @@ def _postmortem(inst, blob):
                                 "probe_green": fs.get("probe_green"),
                                 "fix_verified": fs.get("fix_verified")},
                "features": dict(fs.get("features_fired") or {}),
-               "funcs_edited": dict(fs.get("func_edits") or {}),
                "top_errors": errs.most_common(4)}
         d = os.path.expanduser("~/swe/research/postmortem")
         os.makedirs(d, exist_ok=True)
