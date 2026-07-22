@@ -24,7 +24,7 @@ The gate is now red -> green on the agent's OWN reproduction:
      (seen RED), (b) the same script now passes (GREEN), and (c) the
      git diff of non-test source files is non-empty.
 """
-import fnmatch, os, re, shlex, shutil, subprocess, time
+import fnmatch, os, re, shlex, shutil, signal, subprocess, time
 
 from repo_bootstrap_tools import llm_call, _extract_json
 
@@ -492,8 +492,25 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             env["CONDA_PREFIX"] = os.path.join(repo_dir, env_dir)
         else:
             env["VIRTUAL_ENV"] = os.path.join(repo_dir, env_dir)
-        return subprocess.run(cmd, shell=True, cwd=repo_dir, capture_output=True,
-                              text=True, timeout=timeout, env=env)
+        proc = subprocess.Popen(cmd, shell=True, cwd=repo_dir,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # shell=True forks /bin/sh which can fork the probe as a grandchild;
+            # killing only the direct child (subprocess.run's behaviour) orphans
+            # it to PPID=1 where it can spin at 100% CPU forever. Kill the group.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
     def _diff_nonempty():
         # Gate helper: the working tree must contain at least one changed
