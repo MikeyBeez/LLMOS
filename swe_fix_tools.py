@@ -1521,6 +1521,9 @@ FIX_SYSTEM_PROMPT = (
 To localize any of these: reproduce, read the fault_locations, and find the SINGLE decision -- a comparison, an isinstance, a branch, a parenthesization -- whose boundary is wrong, and in which direction. Change that boundary, not the surrounding logic. If you cannot say in one sentence which decision is wrong and which way it should move, you have not localized yet.
 
 """
+    """MINIMAL FIRST -- before anything fancier, your first verified candidate MUST be the bare fix: the single smallest edit that addresses the reported behavior, with NOTHING added -- no extra branch, no defensive case, no refactor, no rename. Run verify_fix on that bare edit. If it passes, submit it AS-IS: do NOT improve, generalize, or harden a fix that already verifies. Only if the bare edit demonstrably fails may you extend it, one element at a time, re-verifying after each.
+
+"""
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )
