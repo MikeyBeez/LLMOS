@@ -1512,6 +1512,15 @@ FIX_SYSTEM_PROMPT = (
     "control, add a boolean named for the property -- do not add a string "
     "mode borrowed from a builtin just because the reporter wrote it that "
     "way. Match the type, shape and naming style of what is already there.\n\n"
+    """BUG SHAPE -- before you patch, name which of these the defect is. Most bugs are ONE decision with its boundary in the wrong place, and the shape tells you what to change:
+  - guard too loose: a check accepts a case it should reject -- returns a value where it should raise, or applies a rewrite that is not always valid. Fix: ADD the clause that excludes the bad case.
+  - guard too tight: a check rejects a case it should accept -- crashes on valid input, or a character, type or branch is not handled. Fix: WIDEN the check or add the missing branch.
+  - wrong branch / fall-through: an operation returns an identity or default (1, 0, None, or the input unchanged) because it took a default path. Fix: find the dispatch (an __mul__, an isinstance chain) and repair the branch for this operand.
+  - lost grouping / precedence: a built result drops parentheses it needed, so it means something else (a/b/c instead of a/(b/c)). Fix: parenthesize the sub-expression the construction rule left unwrapped.
+  - mode divergence: the same input gives different results down two paths (evaluate=True vs False, two entry points, two orders). Fix: find the rule that fires on only one path and make both paths agree.
+To localize any of these: reproduce, read the fault_locations, and find the SINGLE decision -- a comparison, an isinstance, a branch, a parenthesization -- whose boundary is wrong, and in which direction. Change that boundary, not the surrounding logic. If you cannot say in one sentence which decision is wrong and which way it should move, you have not localized yet.
+
+"""
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )
