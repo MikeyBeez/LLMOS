@@ -101,6 +101,34 @@ def form_rank(r):
     return given + self_authored
 
 
+def wait_backend(host=None, max_wait=1200):
+    """Block until the inference backend answers /health, so a transient
+    backend outage never silently burns instances as cpu_error. iter28 lost
+    all four failset instances to <urlopen error 111 Connection refused> to
+    llama-server (0 turns each). General robustness -- mirrors wait_net() but
+    gates on the local model server rather than the internet. If the backend
+    stays down past max_wait, exit cleanly (0) so NO instance is consumed and
+    the scheduler can retry later."""
+    import urllib.request
+    host = host or os.environ.get("LLM_HOST", "http://127.0.0.1:8080")
+    url = host.rstrip("/") + "/health"
+    waited = 0
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                if getattr(resp, "status", 200) == 200:
+                    return
+        except Exception:
+            pass
+        if waited >= max_wait:
+            print("backend DOWN >%ds (%s) -- exiting cleanly, no instance "
+                  "consumed; scheduler will retry" % (max_wait, url), flush=True)
+            sys.exit(0)
+        print("backend not ready (%s): waiting" % url, flush=True)
+        time.sleep(60)
+        waited += 60
+
+
 def wait_net():
     while True:
         try:
@@ -126,6 +154,7 @@ for iid in [i for i in failset if i not in done]:
     _base_budget = A.FIX_BUDGET
     for k in range(MAX_ATTEMPTS):
         wait_net()
+        wait_backend()
         # attempt 1 unchanged; retries get more room (see RETRY_FIX_BUDGET)
         A.FIX_BUDGET = _base_budget if k == 0 else A.RETRY_FIX_BUDGET
         if k:
