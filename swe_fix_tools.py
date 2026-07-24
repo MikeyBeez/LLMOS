@@ -1269,6 +1269,20 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {"error": "check needs a `snippet`: a few lines of python "
                              "that PRINT the one fact you want to know."}
         _pre = _run("git status --porcelain", timeout=30).stdout or ""
+        # check() is READ-ONLY by contract. Snapshot the agent's in-progress
+        # source patch so a snippet that reverts/overwrites it (e.g. a
+        # `git checkout <file>` inside the check -- the known losing move,
+        # observed looping scikit-learn-25638 to patch_bytes=0) is undone
+        # automatically instead of silently wiping the WIP patch.
+        _wip_snap = {}
+        for _ln in _pre.splitlines():
+            _f = _ln[3:].strip()
+            if _f and not _is_test_path(_f):
+                try:
+                    with open(os.path.join(repo_dir, _f), "rb") as _fh:
+                        _wip_snap[_f] = _fh.read()
+                except OSError:
+                    pass
         r = _run("%s/bin/python -c %s" % (env_dir, shlex.quote(snippet)),
                  timeout=60)
         state["checks_run"] = state.get("checks_run", 0) + 1
@@ -1283,6 +1297,27 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             # the snippet MUTATED the repository -- check is for reading, and
             # edits through it bypass every safeguard patch provides.
             _fired(state, "check_modified_repo")
+            # a read-only check must not be able to destroy the WIP patch:
+            # restore the exact pre-check bytes of any source file it altered.
+            _restored = []
+            for _f, _blob in _wip_snap.items():
+                _fp = os.path.join(repo_dir, _f)
+                try:
+                    with open(_fp, "rb") as _fh:
+                        _cur = _fh.read()
+                    if _cur != _blob:
+                        with open(_fp, "wb") as _fh:
+                            _fh.write(_blob)
+                        _restored.append(_f)
+                except OSError:
+                    pass
+            if _restored:
+                out["patch_restored"] = (
+                    "your check ALTERED source you had already patched (%s) -- "
+                    "check() is read-only, so your in-progress patch was "
+                    "automatically RESTORED. Never `git checkout`/revert your "
+                    "own patch inside a check; use patch to change code."
+                    % ", ".join(_restored[:4]))
             _changed = sorted({ln[3:].strip() for ln in _post.splitlines()}
                               - {ln[3:].strip() for ln in _pre.splitlines()})
             _tests = [f for f in _changed if _is_test_path(f)]
