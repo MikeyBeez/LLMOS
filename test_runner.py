@@ -352,10 +352,19 @@ def _django_label(node_id, repo_dir=None):
     the test's docstring first line (unittest prints the docstring when one
     exists) -- resolve those by locating the docstring in tests/. Fallback:
     pytest path form."""
+    # Precedence fix (2026-07-27): the paren-capture used to accept ANY
+    # parenthetical, so a docstring like "A cached sitemap index can be
+    # rendered (#2713)." yielded the label "#2713"; and the path branch fired
+    # on any "/", so "...alternate/hreflang links..." became a bogus module.
+    # Both then reached django as unimportable labels -> ERROR -> the instance
+    # was scored PASS_TO_PASS-regressed even when the patch was correct.
+    # Only accept a parenthetical that actually looks like a dotted path, and
+    # only treat as a path when there is no prose whitespace.
+    _DOTTED = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$"
     m = re.search(r"\(([^)]+)\)", node_id)
-    if m:
+    if m and re.match(_DOTTED, m.group(1).strip()):
         return m.group(1).strip()
-    if "::" in node_id or "/" in node_id:
+    if "::" in node_id or ("/" in node_id and " " not in node_id):
         part = node_id.split("::")
         mod = part[0]
         mod = mod[6:] if mod.startswith("tests/") else mod
@@ -367,6 +376,65 @@ def _django_label(node_id, repo_dir=None):
         if lab:
             return lab
     return node_id
+
+
+def _class_bases(lines):
+    """{class_name: [base names]} for top-level classes in a test module."""
+    out = {}
+    for ln in lines:
+        m = re.match(r"class (\w+)\s*(?:\(([^)]*)\))?\s*:", ln)
+        if m:
+            bases = [b.strip().split(".")[-1]
+                     for b in (m.group(2) or "").split(",") if b.strip()]
+            out.setdefault(m.group(1), bases)
+    return out
+
+
+def _concrete_test_class(lines, cls):
+    """Given the class that DEFINES a test method, return a class unittest can
+    actually instantiate. django mixes shared test bodies into abstract mixins
+    (BaseCacheTests, BaseMemcachedTests) that carry no TestCase base; only the
+    concrete subclasses are runnable. Returns `cls` unchanged when it is
+    already runnable or when no subclass is found (caller behaves as before).
+    Preference: plain `TestCase` subclasses before TransactionTestCase and
+    friends, then source order -- picks LocMemCacheTests over the DB/memcached/
+    redis variants that need an external service."""
+    bases = _class_bases(lines)
+    if cls not in bases:
+        return cls
+
+    def runnable(name, seen=None):
+        seen = seen or set()
+        if name in seen:
+            return False
+        seen.add(name)
+        for b in bases.get(name, []):
+            if b.endswith("TestCase"):
+                return True
+            if runnable(b, seen):
+                return True
+        return False
+
+    if runnable(cls):
+        return cls
+
+    def inherits(name, target, seen=None):
+        seen = seen or set()
+        if name in seen:
+            return False
+        seen.add(name)
+        for b in bases.get(name, []):
+            if b == target or inherits(b, target, seen):
+                return True
+        return False
+
+    order = list(bases)
+    cands = [c for c in order if c != cls and inherits(c, cls) and runnable(c)]
+    if not cands:
+        return cls
+    cands.sort(key=lambda c: (0 if "TestCase" in bases.get(c, []) else 1,
+                              order.index(c)))
+    return cands[0]
 
 
 def _django_docstring_label(repo_dir, text):
@@ -401,5 +469,12 @@ def _django_docstring_label(repo_dir, text):
                     mod = path[6:] if path.startswith("tests/") else path
                     mod = mod.replace("/", ".")
                     mod = mod[:-3] if mod.endswith(".py") else mod
-                    return "%s.%s.%s" % (mod, mc.group(1), meth)
+                    # A docstring lives on the DEFINING class, which in django
+                    # is often an abstract mixin (e.g. `class BaseCacheTests:`
+                    # with no TestCase base). Running that label directly gives
+                    # "TypeError: test_x() missing 1 required positional
+                    # argument: 'self'", which the harness then scored as a
+                    # PASS_TO_PASS regression. Resolve to a runnable subclass.
+                    return "%s.%s.%s" % (
+                        mod, _concrete_test_class(lines, mc.group(1)), meth)
     return None

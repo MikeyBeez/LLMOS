@@ -41,7 +41,8 @@ MODEL = "ornith:35b"
 NUMCTX = 131072
 NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "2048"))
 BOOTSTRAP_BUDGET = int(os.environ.get("BOOTSTRAP_BUDGET", "50"))
-FIX_BUDGET       = int(os.environ.get("FIX_BUDGET", "80"))
+FIX_BUDGET       = int(os.environ.get("FIX_BUDGET", "200"))
+FIX_STALL        = int(os.environ.get("FIX_STALL", "25"))  # no-progress watchdog: stop the fix phase after this many turns with <=2 novel results; 0 disables
 # Attempt 2+ gets more room: 26 of 49 misses ended by exhausting the
 # budget, and above the median a long run is no more likely to be lost
 # than won (p90 turns: 74 resolved vs 74 missed). Retries only happen
@@ -60,6 +61,55 @@ def sh(cmd, cwd=None, timeout=300):
 
 
 MIRRORS = os.path.expanduser("~/swe/mirrors")
+
+# --- live event bus (2026-07-25): append-only JSONL of everything a run does,
+# tailed live by the monitor on :8899. Best-effort: never raises, never blocks
+# a run. Path from $LLMOS_EVENTS, else a single shared stream under runs/live/.
+import threading as _threading
+EVENTS_PATH = (os.environ.get("LLMOS_EVENTS")
+               or os.path.expanduser("~/swe/runs/live/events.jsonl"))
+_events_lock = _threading.Lock()
+_events_seq = [0]
+
+
+def _cap_ev(v, n=20000):
+    """Bound one field so a huge result/generation can't bloat the line. The
+    complete output is still in the trace; this stream is for watching."""
+    if isinstance(v, str):
+        return v if len(v) <= n else v[:n] + " \u2026[+%d chars]" % (len(v) - n)
+    try:
+        s = json.dumps(v, default=str)
+    except Exception:
+        s = str(v)
+    if len(s) <= n:
+        return v
+    return s[:n] + " \u2026[+%d chars]" % (len(s) - n)
+
+
+def make_emitter(instance_id, phase, run_id=None):
+    """Return emit(ev_type, fields) appending one JSON line to EVENTS_PATH."""
+    def emit(ev_type, fields=None):
+        try:
+            with _events_lock:
+                _events_seq[0] += 1
+                seq = _events_seq[0]
+            rec = {"seq": seq, "ts": time.time(), "type": ev_type,
+                   "instance_id": instance_id, "phase": phase}
+            if run_id:
+                rec["run_id"] = run_id
+            if fields:
+                for k, v in fields.items():
+                    rec[k] = _cap_ev(v)
+            line = json.dumps(rec, default=str)
+            d = os.path.dirname(EVENTS_PATH)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with open(EVENTS_PATH, "a") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
+    return emit
+
 
 
 def clone(inst):
@@ -144,8 +194,93 @@ def _parse_tool_args(s):
               else "malformed JSON")
     return {}, reason
 
+_IMPORTANT_RE = re.compile(
+    r"(FAIL|ERROR|error|Exception|Traceback|assert|!=|"
+    r"Successfully installed|No module named|not found|not exist|DOES NOT EXIST|"
+    r"SyntaxError|NameError|ImportError|ModuleNotFound|AttributeError|TypeError|"
+    r"ValueError|KeyError|IndexError|RuntimeError|Ran [0-9]+ test|"
+    r"^E |hint)", re.I | re.M)
+
+
+def _extract_important(text, max_chars):
+    """Keep the lines that carry the diagnosis, drop the noise, preserve order.
+    A head+tail plus every line matching an error/result signature."""
+    if len(text) <= max_chars:
+        return text
+    lines = text.split("\n")
+    n = len(lines)
+    keep = set(range(min(4, n))) | set(range(max(0, n - 6), n))
+    for i, ln in enumerate(lines):
+        if _IMPORTANT_RE.search(ln):
+            keep.add(i)
+    out, last = [], None
+    for i in sorted(keep):
+        if last is not None and i > last + 1:
+            out.append("      ...")
+        out.append(lines[i])
+        last = i
+    s = "\n".join(out)
+    if len(s) > max_chars:            # important lines alone still too big
+        s = s[:max_chars // 4] + "\n      ...\n" + s[-(3 * max_chars // 4):]
+    return s
+
+
+def smart_summarize(result, max_chars, ref):
+    """Summarize a tool result to fit max_chars WITHOUT losing the diagnostic
+    content. Big string fields are reduced extractively; small fields pass
+    through untouched. The full result stays retrievable via recall(ref)."""
+    full = json.dumps(result, default=str)
+    if len(full) <= max_chars:
+        return full
+    if isinstance(result, dict):
+        big = [k for k, v in result.items()
+               if isinstance(v, str) and len(v) > 400]
+        per = max(400, (max_chars - 220) // max(1, len(big)))
+        red = {}
+        for k, v in result.items():
+            if isinstance(v, str) and len(v) > per:
+                red[k] = _extract_important(v, per)
+            else:
+                red[k] = v
+        red["_recall"] = ref
+        red["_note"] = ("output summarized to fit; nothing discarded. call "
+                        "recall(ref=%r) for the complete original output." % ref)
+        out = json.dumps(red, default=str)
+        if len(out) <= int(max_chars * 1.6):
+            return out
+        full = out
+    return (_extract_important(full, max_chars)
+            + ('\n[full output stored as %r -- call recall to see all of it]' % ref))
+
+
+def _result_sig(tool, result):
+    """A stable signature of a tool OUTCOME, for the no-progress watchdog.
+    Keys off content: re-running the same failing check or re-applying a patch
+    that lands the file in a seen state looks identical, while a genuinely new
+    edit or a new error looks different."""
+    try:
+        if isinstance(result, dict):
+            for k in ("error", "stderr"):
+                if result.get(k):
+                    return tool + "|E|" + error_signature(str(result[k]))[:160]
+            parts = [tool]
+            for k in ("edited", "mode", "new_bytes", "delta_bytes",
+                      "ok", "exit", "match", "match_count"):
+                if k in result:
+                    parts.append("%s=%s" % (k, result[k]))
+            for k in ("stdout", "test_tail", "score_tail", "content"):
+                if result.get(k):
+                    parts.append(error_signature(str(result[k]))[:120])
+                    break
+            return "|".join(str(p) for p in parts)[:220]
+        return tool + "|" + str(result)[:200]
+    except Exception:
+        return tool + "|?"
+
+
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
-              budget, gate=None, log=print, checkpoint=None, worksheet=None):
+              budget, gate=None, log=print, checkpoint=None, worksheet=None,
+              emit=None, stall_window=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -158,6 +293,9 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     ]
     meta_log = []
     searched_sigs = {}   # error signature -> turn first searched
+    _catalog = {}        # out<turn> -> full tool result, recall()-able
+    _seen_sigs = set()   # result signatures seen so far (no-progress watchdog)
+    _novel_hist = []     # per-turn: 1 if the result was new, else 0
     for turn in range(budget):
         if worksheet is not None:
             # the state object, written down and re-shown EVERY turn: the model
@@ -179,6 +317,15 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         meta_log.append({"turn": turn,
                           "prompt_tokens": meta.get("prompt_tokens"),
                           "eval_tokens":   meta.get("eval_tokens")})
+        if emit:
+            emit("generation", {"turn": turn,
+                                "content": msg.get("content") or "",
+                                "reasoning": (msg.get("reasoning_content")
+                                              or msg.get("thinking") or ""),
+                                "eval_tokens": meta.get("eval_tokens"),
+                                "prompt_tokens": meta.get("prompt_tokens"),
+                                "finish_reason": meta.get("finish_reason"),
+                                "trunc_grow": meta.get("trunc_grow")})
         if checkpoint:
             try:
                 tmp = checkpoint + ".tmp"
@@ -190,7 +337,8 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 pass
         tcs = msg.get("tool_calls") or []
         if not tcs:
-            content = (msg.get("content") or msg.get("thinking") or "")[:400]
+            content = (msg.get("content") or msg.get("reasoning_content")
+                       or msg.get("thinking") or "")[:400]
             messages.append({"role": "assistant", "content": content or "..."})
             messages.append({"role": "user",
                               "content": "Call one of the provided tools now."})
@@ -204,6 +352,10 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
             args, args_err = _parse_tool_args(args)
         target = tool2sys.get(tool, "")
         log(f"  [{turn:>2}] {tool}({str(args)[:80]}) -> ", end="", flush=True)
+        if emit:
+            emit("tool_call", {"turn": turn, "tool": tool,
+                               "function": target, "args": args,
+                               "args_error": args_err})
         if args_err is not None:
             # The argument string never parsed -- almost always because the
             # generation was cut off at the num_predict ceiling. Dispatching
@@ -227,12 +379,30 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                          "per call, or split a long script across "
                                          "several calls."})})
             continue
+        # Recall: hand back the FULL, un-summarized output of an earlier call.
+        if tool == "recall":
+            _r = str((args or {}).get("ref", "")).strip()
+            _stored = _catalog.get(_r)
+            log("RECALL %s -> %s" % (_r, "hit" if _stored is not None else "miss"))
+            messages.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"id": f"t{turn}", "type": "function",
+                                             "function": {"name": tool,
+                                                          "arguments": args}}]})
+            _body = (json.dumps(_stored, default=str) if _stored is not None
+                     else json.dumps({"error": "no stored output %r; ids look "
+                                      "like out<turn> and appear in summary notes"
+                                      % _r}))
+            messages.append({"role": "tool", "tool_call_id": f"t{turn}",
+                             "content": _body[:16000]})
+            continue
         # Terminal tool: check gate then break out.
         if target == "RETURN":
             if gate is not None and not gate():
                 # Model tried to declare done but the gate says no. Feed back
                 # the reason and continue.
                 log("GATE-REJECTED")
+                if emit:
+                    emit("gate", {"turn": turn, "decision": "rejected"})
                 messages.append({"role": "assistant", "content": "",
                                   "tool_calls": [{"id": f"t{turn}", "type": "function",
                                                    "function": {"name": tool,
@@ -248,6 +418,8 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                   "content": json.dumps(_gate_payload)})
                 continue
             log(f"DECLARED {tool}")
+            if emit:
+                emit("declared", {"turn": turn, "tool": tool})
             return "declared", messages + [
                 {"role": "assistant", "content": "", "tool_calls": [tc]},
             ], meta_log
@@ -260,7 +432,36 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 result = h(None, args)
             except Exception as e:
                 result = {"error": f"handler crashed: {type(e).__name__}: {e}"}
+        if (os.environ.get("NEIGHBOR_INJECT") == "1" and tool == "patch"
+                and isinstance(result, dict) and "edited" in result):
+            try:
+                _nb = handlers["swe.neighbor_tests"](None, {})
+            except Exception as _e:
+                _nb = {"error": "inject handler crashed: %s: %s" % (type(_e).__name__, _e)}
+            log("NEIGHBOR_INJECT probe -> " + str(_nb)[:400])
+            _rg = _nb.get("regressed") if isinstance(_nb, dict) else None
+            if _rg and _rg != 0:
+                result["blast_radius"] = _nb.get("note") or "patch broke a neighbor test; keep your fix and repair it before submitting."
+                if _nb.get("which"):
+                    result["blast_radius_broke"] = _nb["which"]
+                log("NEIGHBOR_INJECT FIRED regressed=%s which=%s" % (_rg, _nb.get("which")))
+            else:
+                log("NEIGHBOR_INJECT NO-FIRE regressed=%r error=%r" % (
+                    _rg, (_nb.get("error") if isinstance(_nb, dict) else None)))
         log(str(result)[:120])
+        if emit:
+            emit("tool_result", {"turn": turn, "tool": tool, "result": result})
+        if stall_window:
+            _sig = _result_sig(tool, result)
+            _novel_hist.append(0 if _sig in _seen_sigs else 1)
+            _seen_sigs.add(_sig)
+            if (len(_novel_hist) >= stall_window
+                    and sum(_novel_hist[-stall_window:]) <= 2):
+                log("STALLED: only %d novel results in the last %d turns"
+                    % (sum(_novel_hist[-stall_window:]), stall_window))
+                if emit:
+                    emit("stalled", {"turn": turn, "window": stall_window})
+                return "stalled", messages, meta_log
         # Human reflex: see an error -> search the web for it -> THEN act.
         failed = isinstance(result, dict) and (
             result.get("ok") is False or "error" in result)
@@ -287,8 +488,12 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         messages.append({"role": "assistant", "content": "",
                          "tool_calls": [{"id": f"t{turn}", "type": "function",
                                           "function": {"name": tool, "arguments": args}}]})
+        _ref = "out%d" % turn
+        _catalog[_ref] = result
+        _full = json.dumps(result, default=str)
+        _content = _full if len(_full) <= 4800 else smart_summarize(result, 4800, _ref)
         messages.append({"role": "tool", "tool_call_id": f"t{turn}",
-                         "content": json.dumps(result, default=str)[:4800]})
+                         "content": _content})
         # Mid-run critic: every 8 turns a detached reviewer scans the recent
         # trace (and web-searches the latest error) for loops/drift/self-harm.
         if turn % 8 == 7:
@@ -298,6 +503,8 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 advice = ""
             if advice:
                 log(f"  [critic] {advice[:100]}")
+                if emit:
+                    emit("critic", {"turn": turn, "advice": advice})
                 messages.append({"role": "user",
                                  "content": f"[HARNESS CRITIC] {advice}"})
     return "budget", messages, meta_log
@@ -962,6 +1169,8 @@ def run_one(inst):
         goal += "\n\n" + _kb
         print(f" -- injected package knowledge base for {inst['repo']}", flush=True)
     print(" -- phase 1: bootstrap --", flush=True)
+    _emit1 = make_emitter(inst["instance_id"], "bootstrap")
+    _emit1("phase_start", {"budget": BOOTSTRAP_BUDGET, "repo": inst["repo"]})
     ckpt = os.path.join(TRACES, inst["instance_id"] + ".partial.json")
     def _boot_gate():
         # On declare: if the package imports but smoke hasn't run, the harness
@@ -983,8 +1192,9 @@ def run_one(inst):
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
                                           goal, BOOTSTRAP_BUDGET,
                                           gate=_boot_gate,
-                                          checkpoint=ckpt)
+                                          checkpoint=ckpt, emit=_emit1)
     env_ok = env_ready(b_state)
+    _emit1("phase_end", {"reason": b_reason, "env_ok": env_ok})
     if not env_ok and b_state.get("sanity_ok"):
         # LAST-RESORT env check (general robustness): the model exhausted the
         # BOOTSTRAP_BUDGET without landing a passing smoke test, but the env may
@@ -1099,12 +1309,15 @@ def run_one(inst):
     _fix_gate.reject_message = None
     _fix_gate.reject_detail = None
 
+    _emit2 = make_emitter(inst["instance_id"], "fix")
+    _emit2("phase_start", {"budget": FIX_BUDGET, "repo": inst["repo"]})
     f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                           f_handlers, FIX_SYSTEM_PROMPT,
                                           fix_goal, FIX_BUDGET,
                                           worksheet=lambda: _rw(f_state),
                                           gate=_fix_gate,
-                                          checkpoint=ckpt)
+                                          checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL)
+    _emit2("phase_end", {"reason": f_reason})
     # THE GIVEN TESTS (Mikey): rerun the repo's own base-commit tests that
     # passed before any patch. Self-authored checks are recorded but decide
     # nothing; this is the legitimate evidence. Runs unconditionally -- it used

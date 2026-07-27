@@ -116,22 +116,49 @@ def _repo_frames(stderr, repo_dir):
     return out[-3:]
 
 
+_PROX_GENERIC = {"", "py", "tests", "test", "django", "src", "lib", "__init__",
+                 "backends", "contrib", "core", "base", "common", "utils", "main",
+                 "models", "db", "backend"}
+
+
+def _prox_tokens(path):
+    """Distinctive path tokens (dirs + file), minus generic scaffolding words.
+    'django/contrib/sitemaps/__init__.py' -> {'sitemaps'};
+    'tests/sitemaps_tests/test_http.py'   -> {'sitemaps', 'http'}."""
+    out = set()
+    for seg in path.split("/"):
+        for t in re.split(r"[_.]", seg):
+            if t and t not in _PROX_GENERIC:
+                out.add(t)
+    return out
+
+
 def _fault_proximity(test_file, hint_paths):
     """Closeness score between a test file and the fault/source hint paths
-    (repo-relative). Higher = nearer. Returns 0 when there are no hints, so
-    ranking becomes a no-op and selection stays identical to collection order."""
+    (repo-relative). Higher = nearer. Returns 0 with no hints so ranking is a
+    no-op (selection stays in collection order).
+
+    Two signals, so it works for BOTH repo layouts:
+      - shared leading path segments / same dir  (sympy-style: source and tests
+        share a prefix, sympy/parsing/... <-> sympy/parsing/tests/...);
+      - distinctive NAME-TOKEN overlap  (django-style: source under django/... and
+        tests under tests/<app>_tests/... share no prefix, but the app name --
+        'sitemaps', 'cache' -- appears in both). An exact app-dir match
+        (tests/<app>/ or tests/<app>_tests/) is the strongest signal, so a cache
+        BACKEND change lands on tests/cache/ rather than a template {% cache %}
+        test that merely mentions the word.
+    Repo-agnostic and pure: no gold/test-patch data, no I/O."""
     if not hint_paths:
         return 0
     tsegs = test_file.split("/")
     tdir = "/".join(tsegs[:-1])
-    tbase = tsegs[-1]
+    ttoks = _prox_tokens(test_file)
     best = 0
     for h in hint_paths:
         if not h:
             continue
         hsegs = h.split("/")
         hdir = "/".join(hsegs[:-1])
-        hbase = hsegs[-1]
         common = 0
         for a, b in zip(tsegs[:-1], hsegs[:-1]):
             if a == b:
@@ -141,9 +168,13 @@ def _fault_proximity(test_file, hint_paths):
         score = common
         if tdir and tdir == hdir:
             score += 5
-        hmod = hbase[:-3] if hbase.endswith(".py") else hbase
-        if hmod and hmod in tbase:
-            score += 3
+        score += 4 * len(ttoks & _prox_tokens(h))
+        hdir_toks = [s for s in hsegs[:-1] if s not in _PROX_GENERIC]
+        for hs in hdir_toks:
+            for ts in tsegs[:-1]:
+                if ts == hs or ts == hs + "_tests" or ts == "test_" + hs:
+                    score += 6
+                    break
         if score > best:
             best = score
     return best
@@ -457,6 +488,38 @@ def render_worksheet(state):
     return "\n".join(lines)
 
 
+def _missing_file_hint(path, repo_dir):
+    """A redirecting error for a path that is not a real repo file. The top
+    miss cause is the model reading/patching a path it invented -- its inline
+    reproduction script, an absolute /work path, or a guessed test file. A bare
+    'file not found' does not correct the false belief, so it loops."""
+    p = str(path)
+    if ("_reproduction" in p or "/work/" in p or p.startswith("/")
+            or ".." in p.split("/")):
+        return ("not a repo file: %r. reproduction/check scripts run inline -- "
+                "they are NOT saved files you can read or patch. Only real "
+                "source files under the repo root can be read/edited (e.g. "
+                "'django/...', 'src/...'). Use locate(pattern=...) to find the "
+                "real path; never guess or invent file paths." % p)
+    hint = ("file not found: %r. Do NOT guess file paths -- use "
+            "locate(pattern=...) to find the real location, then read_range / "
+            "patch that exact path." % p)
+    try:
+        base = os.path.basename(p)
+        if base:
+            for root, dirs, files in os.walk(repo_dir):
+                dirs[:] = [d for d in dirs if d not in
+                           (".git", ".venv", ".condaenv", "node_modules",
+                            "__pycache__")]
+                if base in files:
+                    rel = os.path.relpath(os.path.join(root, base), repo_dir)
+                    hint += " (a file named %r exists at %r)" % (base, rel)
+                    break
+    except OSError:
+        pass
+    return hint
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -480,6 +543,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "state_history": {},   # file -> [content hashes seen]
         "func_edits": {},      # enclosing function -> edit count
         "must_observe": False,       # [{file, verdict}] verdict set by next verify
+        "stuck": 0,                  # STUCK_ESCALATE: consecutive non-progress patches
              "triage_goal": "",         # done_criteria from the understanding pass
              "triage_repro": ""}        # repro_criteria from the understanding pass
 
@@ -545,9 +609,24 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 seen.add(f)
                 per_file.append((f, nid))
         spread = _rank_test_files(per_file, hint_paths, limit=6)
+        # BLAST_RADIUS: pull the FULL nearest test file(s) (all their tests), not
+        # just one id per file, so the neighbor-test baseline covers the module the
+        # change touches. Base status is genuine (pre-patch); FAIL_TO_PASS fails
+        # pre-patch so it never enters baseline_pass (no leak).
+        check = list(spread)
+        if (os.environ.get("BLAST_RADIUS") == "1"
+                or os.environ.get("NEIGHBOR_INJECT") == "1") and spread:
+            top_files = []
+            for _nid in spread[:2]:
+                _f = _nid.split("::", 1)[0]
+                if _f not in top_files:
+                    top_files.append(_f)
+            extra = [nid for nid in ids
+                     if nid.split("::", 1)[0] in top_files and nid not in check]
+            check += extra[:30]
         passing = []
         import test_runner as _tr
-        for nid in spread:
+        for nid in check:
             try:
                 r = _tr.run_tests(repo_dir, env_kind, [nid], env_vars=env_vars,
                                   repo=repo, timeout=120)
@@ -601,6 +680,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
+        state["stuck"] = 0   # a probe ran -> unstick
         if state.get("repro_locked") and _format_objects_to_repro(state):
             # One narrow exemption to the latch. The harness's own format
             # check has flagged a coined label, and that same label is the
@@ -750,7 +830,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         end = int(args.get("end", start + 40))
         full = os.path.join(repo_dir, path)
         if not os.path.isfile(full):
-            return {"error": f"file not found: {path}"}
+            return {"error": _missing_file_hint(path, repo_dir)}
         try:
             with open(full, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
@@ -773,12 +853,57 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                              "not the tests"}
         full = os.path.join(repo_dir, path)
         if not os.path.isfile(full):
-            return {"error": f"file not found: {path}"}
+            return {"error": _missing_file_hint(path, repo_dir)}
         try:
             with open(full, encoding="utf-8", errors="ignore") as f:
                 text = f.read()
         except OSError as e:
             return {"error": str(e)}
+        # NEIGHBOR_INJECT baseline ordering (2026-07-27). The neighbor baseline
+        # must exist AND be pre-patch. Its only other capture point is inside
+        # reproduce(), which ornith often does not call before its first patch
+        # (52 reproduce vs 97 patch across compare3) -- so the inject silently
+        # no-fired on every such instance. Capture HERE: still strictly before
+        # any mutation, and the file being patched is the ideal proximity hint.
+        # Deliberately NOT done inside neighbor_tests: there the patch is already
+        # applied, so the broken neighbor would look base-failing and the
+        # regression would be hidden.
+        if (os.environ.get("NEIGHBOR_INJECT") == "1"
+                and state.get("baseline_pass") is None):
+            try:
+                _capture_baseline([path])
+            except Exception:
+                pass
+            _bp = state.get("baseline_pass")
+            print("   -- NEIGHBOR_INJECT baseline captured: %s tests (hint=%s)"
+                  % (len(_bp) if _bp is not None else "FAILED", path))
+
+        # STUCK CIRCUIT-BREAKER (env STUCK_ESCALATE=1). Consecutive non-progress
+        # patches (failed anchor / undo-refusal / no-op) are the flail signature;
+        # a real write or a check/reproduce/verify_fix resets `stuck`. Redirect at
+        # >=3, hard-latch at >=5. Offline-validated: fires only on the two flails.
+        if os.environ.get("STUCK_ESCALATE") == "1" and state.get("stuck", 0) >= 3:
+            _fired(state, "stuck_break")
+            if state.get("stuck", 0) >= 5:
+                return {"error": (
+                    "PATCH LOCKED: your last 5+ patch attempts made no progress "
+                    "(anchor mismatch, or undo of an edit already in place). You "
+                    "cannot patch again until you OBSERVE. Run reproduce() or "
+                    "verify_fix to test the edits you already have."),
+                    "do_this_instead": (
+                        "reproduce() -> if still RED, the remaining fault is in a "
+                        "DIFFERENT file than the one you keep editing; read_range "
+                        "that other file. Do NOT re-send a patch to this file.")}
+            return {"error": (
+                "NO PROGRESS: your last 3 patches did not change the file (anchor "
+                "did not match, or would undo an edit already in place). Stop "
+                "re-sending patches -- the edit you need is either already in, or "
+                "belongs in a different file."),
+                "do_this_instead": (
+                    "Run ONE check() that PRINTS the current value at the target, "
+                    "or reproduce() to see if you are already done. A probe resets "
+                    "this and lets you patch again.")}
+        state["stuck"] = state.get("stuck", 0) + 1   # tentative; zeroed on a real write
         # LINE-ANCHORED MODE: two integers cannot be mis-escaped. Text anchors
         # containing a backslash fail 66% of the time (25/38 measured); line
         # anchors cannot fail that way at all.
@@ -822,6 +947,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["last_verify_sig"] = None
             state["rejected_repro_streak"] = 0
             state["must_observe"] = False
+            state["stuck"] = 0
             state["patch_attempts"] = state.get("patch_attempts", 0) + 1
             state["patch_history"].append({"file": path, "verdict": "unverified"})
             _syn = _syntax_check(full, path)
@@ -986,6 +1112,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         with open(full, "w", encoding="utf-8") as f:
             f.write(new_text)
         _remember_state(state, path, new_text)
+        state["stuck"] = 0
         state["repro_green"] = False
         state["fix_verified"] = False
         state["same_verify_count"] = 0
@@ -1141,6 +1268,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     def h_verify_fix(pcb, args):
         """Rerun the registered reproduction. GREEN when it exits 0."""
         shutil.rmtree(os.path.join(repo_dir, ".hypothesis"), ignore_errors=True)
+        state["stuck"] = 0   # a probe ran -> unstick
         if not state["repro_script"]:
             return {"ok": False,
                     "error": ("no registered reproduction — use reproduce() "
@@ -1261,8 +1389,41 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             out["diagnosis"] = res["diagnosis"]
         return out
 
+    def h_neighbor_tests(pcb, args):
+        """Run the repo's EXISTING tests around the changed code so the agent can
+        see (and repair) its own regressions. Reports how many nearby base-passing
+        tests still pass and which the patch BROKE. Leak-safe: baseline_pass are
+        tests that were green pre-patch, so the graded FAIL_TO_PASS (red pre-patch)
+        is never in the set."""
+        import test_runner as _tr
+        base = state.get("baseline_pass") or []
+        if not base:
+            return {"error": ("no neighborhood baseline yet -- run reproduce() "
+                              "first; that captures the nearby tests that pass "
+                              "before your change.")}
+        try:
+            r = _tr.run_tests(repo_dir, env_kind, base, env_vars=env_vars,
+                              repo=repo, timeout=300)
+        except Exception as _e:
+            return {"error": "could not run neighbor tests: %s" % type(_e).__name__}
+        if r.get("ok"):
+            return {"neighbor_tests": len(base), "regressed": 0,
+                    "note": ("all %d existing tests around your change still pass "
+                             "-- no regression in your blast radius." % len(base))}
+        _f = re.findall(r"(?:FAILED|ERROR)\s+([^\s:]+(?:::\S+)?)", r.get("tail") or "")
+        regressed = list(dict.fromkeys(_f))
+        state["neighbor_regressed"] = regressed
+        return {"neighbor_tests": len(base),
+                "regressed": len(regressed) or "some",
+                "which": regressed[:8],
+                "detail": (r.get("tail") or "")[-700:],
+                "note": ("your patch BROKE existing test(s) that passed before. "
+                         "KEEP your fix and ALSO make these pass -- a fix that "
+                         "regresses the neighborhood is not done.")}
+
     def h_check(pcb, args):
         state["must_observe"] = False
+        state["stuck"] = 0   # a probe ran -> unstick
         """Answer ONE small question. Registers nothing, gates nothing."""
         snippet = args.get("snippet") or args.get("python") or ""
         if not snippet.strip():
@@ -1378,6 +1539,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.patch":       h_patch,
         "swe.verify_fix":  h_verify_fix,
         "swe.run_tests":   h_run_tests,
+        "swe.neighbor_tests": h_neighbor_tests,
         "swe.check":       h_check,
         "swe.submit":      h_submit,
     }
@@ -1507,12 +1669,13 @@ FIX_TOOL2SYS = {
     "patch":       "swe.patch",
     "verify_fix":  "swe.verify_fix",
     "run_tests":   "swe.run_tests",
+    "neighbor_tests": "swe.neighbor_tests",
     "submit":      "RETURN",   # terminal
 }
 
 
 FIX_SYSTEM_PROMPT = (
-    "The environment is verified and ready. Fix the bug using this loop:\n"
+    "The environment is verified and ready. YOUR JOB: produce a patch to the SOURCE that fixes the bug, then submit. ONLY the project's real tests decide pass/fail -- reproduce, check, verify_fix and run_tests are OPTIONAL scaffolding to help YOU; use them or skip them, it does not matter. Do NOT spend turns reading or exploring without patching: the moment you can name the fix, make the edit. If a patch, reproduction, or check comes back with a SYNTAX ERROR or is incomplete, FIX that one error and re-run it -- NEVER abandon it and go back to exploring. When in doubt between reading more and patching, PATCH; you can always adjust after. A suggested loop:\n"
     "  1. reproduce — write a reproduction that FAILS (nonzero exit: uncaught "
     "exception or assert) because of the reported bug. This registers your "
     "reproduction. If your script exits 0, it does not demonstrate the bug — "
@@ -1556,9 +1719,67 @@ FIX_SYSTEM_PROMPT = (
 To localize any of these: reproduce, read the fault_locations, and find the SINGLE decision -- a comparison, an isinstance, a branch, a parenthesization -- whose boundary is wrong, and in which direction. Change that boundary, not the surrounding logic. If you cannot say in one sentence which decision is wrong and which way it should move, you have not localized yet.
 
 """
-    """MINIMAL FIRST -- before anything fancier, your first verified candidate MUST be the bare fix: the single smallest edit that addresses the reported behavior, with NOTHING added -- no extra branch, no defensive case, no refactor, no rename. Then confirm it TWO ways before you trust it: verify_fix (your own reproduction goes green) AND run_tests on a neighboring existing test file (proof you did not break OTHER cases -- a fix can pass the reported case while quietly regressing others). Submit only when BOTH are green, and then submit AS-IS: do NOT improve, generalize, or harden a fix that already verifies. If the bare edit fails EITHER check, extend it one element at a time, re-verifying BOTH after each. A fix the issue reporter SUGGESTS -- a proposed diff, snippet or one-liner -- is a HYPOTHESIS to test exactly this way, never code to copy on trust: suggested fixes are frequently over- or under-broad.
+    """MINIMAL FIRST -- before anything fancier, your first verified candidate MUST be the bare fix: the single smallest edit that addresses the reported behavior, with NOTHING added -- no extra branch, no defensive case, no refactor, no rename. Then confirm it TWO ways before you trust it: verify_fix (your own reproduction goes green) AND run_tests on a neighboring existing test file (proof you did not break OTHER cases -- a fix can pass the reported case while quietly regressing others). These two checks are ADVISORY -- only the project tests decide, and a real source diff is ALL that submit requires. Once you have a diff you believe fixes the bug, submit AS-IS: do NOT improve, generalize, harden, or keep exploring. If a check fails because your SCRIPT is malformed, fix the script and re-run; if it fails because the PATCH is wrong, adjust the patch one element at a time -- but a failing self-check NEVER means revert the patch and go back to reading. A fix the issue reporter SUGGESTS -- a proposed diff, snippet or one-liner -- is a HYPOTHESIS to test exactly this way, never code to copy on trust: suggested fixes are frequently over- or under-broad.
 
 """
     "Make the smallest change that fixes the issue. Every turn MUST call "
     "exactly one tool."
 )
+
+
+# --- Blast-radius discipline (A/B, env-gated 2026-07-26) ---------------------
+if os.environ.get("BLAST_RADIUS") == "1":
+    FIX_SYSTEM_PROMPT = FIX_SYSTEM_PROMPT + (
+        "\n\nCHECK YOUR BLAST RADIUS BEFORE YOU SUBMIT:\n"
+        "A fix that makes the bug's test pass but breaks another existing test is "
+        "NOT a fix. You have a `neighbor_tests` tool that runs the repo's own "
+        "tests around the code you changed. After you patch and before you "
+        "submit, call neighbor_tests. If it reports a regression, you broke a "
+        "test that passed before -- KEEP your fix and ALSO repair it (your change "
+        "altered behavior or a signature it depends on). Submit only once the bug "
+        "is fixed AND the neighborhood still passes.")
+
+
+# --- Scientific-debugging discipline (A/B, env-gated 2026-07-26) --------------
+if os.environ.get("ISOLATE_DISCIPLINE") == "1":
+    FIX_SYSTEM_PROMPT = FIX_SYSTEM_PROMPT + (
+        "\n\nOVERRIDE -- DEBUG BY EXPERIMENT, NOT BY READING:\n"
+        "Do NOT theorize from reading code. Every hypothesis about the bug is "
+        "cheap to test, so TEST it. Loop:\n"
+        "  (a) state ONE hypothesis: 'the fault is in <function>, which returns "
+        "X but should return Y'.\n"
+        "  (b) IMMEDIATELY run a `check` probe that constructs the minimal input "
+        "and PRINTS the suspect value (call the function; print what it returns "
+        "vs. what it should). One probe that prints the divergence is worth ten "
+        "file reads.\n"
+        "  (c) read the probe OUTPUT; keep or revise the hypothesis.\n"
+        "  (d) patch ONLY after a probe has pinned the fault to a specific line "
+        "or branch -- then verify with another probe.\n"
+        "HARD RULES: never read_range more than TWICE in a row without running a "
+        "probe in between; never patch a location you have not first confirmed "
+        "with a probe that printed the wrong value there. A 5-line experiment "
+        "that prints an intermediate value beats re-reading the source or "
+        "re-running the full suite. If you have reasoned more than a few "
+        "sentences without running a probe, stop and run one.")
+
+
+
+# ---- recall tool (2026-07-25): retrieve the full output of an earlier call ----
+from repo_bootstrap_tools import RECALL_TOOL as _RECALL_TOOL
+FIX_TOOLS = FIX_TOOLS + [_RECALL_TOOL]
+FIX_TOOL2SYS["recall"] = "recall"
+
+# ---- neighbor_tests tool (BLAST_RADIUS, 2026-07-26): run the existing tests
+# around the changed code so the agent sees and fixes its own regressions -------
+_NEIGHBOR_TOOL = {"type": "function", "function": {
+    "name": "neighbor_tests",
+    "description": (
+        "Run the repo's EXISTING tests around the code you changed, to see your "
+        "blast radius. Reports which nearby base-passing tests still pass and "
+        "which your patch BROKE. Call it AFTER you patch and before you submit: a "
+        "fix that makes the bug's test pass but breaks a neighboring test is NOT "
+        "done. Requires a registered reproduction first (that captures the "
+        "baseline)."),
+    "parameters": {"type": "object", "properties": {}}}}
+if os.environ.get("BLAST_RADIUS") == "1":
+    FIX_TOOLS = FIX_TOOLS + [_NEIGHBOR_TOOL]
