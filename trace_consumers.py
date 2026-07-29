@@ -134,7 +134,7 @@ def critic_review(messages, last_n=12):
                 "its own progress, or chasing the wrong cause? Reply with ONE "
                 "short paragraph of corrective advice naming the exact next "
                 "action, or exactly OK if progress is sound."),
-        max_tokens=600)
+        max_tokens=1600)
     advice = (advice or "").strip()
     if advice.upper().startswith("OK") and len(advice) < 8:
         return ""

@@ -38,6 +38,16 @@ def reshape_json(raw, schema, host="http://127.0.0.1:8080"):
         return {}
 
 
+def _llm_content(m):
+    """Extract the model's ANSWER from a chat message dict. Reasoning models
+    put chain-of-thought in reasoning_content; when the token budget dies
+    inside the think block, content comes back EMPTY. Returning the think
+    stream as if it were the answer poisoned every downstream consumer (the
+    critic advised agents with its own half-finished reasoning). Content or
+    nothing."""
+    return (m.get("content") or "").strip()
+
+
 def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
              model="ornith:35b", host="http://127.0.0.1:8080",
              temperature=0.3, max_tokens=1600, timeout=300,
@@ -77,7 +87,7 @@ def llm_call(prompt, system="You are a helpful assistant. Answer concisely.",
         with urllib.request.urlopen(req, timeout=timeout) as r:
             resp = json.loads(r.read())
         m = (resp.get("choices") or [{}])[0].get("message", {}) or {}
-        return m.get("content", "") or m.get("reasoning_content", "")
+        return _llm_content(m)
     except Exception as e:
         return f"[llm_call error: {e}]"
 
@@ -140,7 +150,9 @@ VERIFY_TOOLS = [
         "name": "run_sanity",
         "description": (
             "Try to import the package inside the active env. Returns stdout/"
-            "stderr and an LLM diagnosis on failure. Sets state.sanity_ok."),
+            "stderr and an LLM diagnosis on failure. Sets state.sanity_ok. "
+            "Do NOT use this to read or search repo files -- use read_range "
+            "and locate for that."),
         "parameters": {"type": "object", "properties": {
             "import_stmt": {"type": "string",
                              "description": "e.g. 'import astropy; print(astropy.__version__)'"},
@@ -148,8 +160,11 @@ VERIFY_TOOLS = [
     {"type": "function", "function": {
         "name": "run_smoke_test",
         "description": (
-            "Run pytest --collect-only + one specific test id. Returns outputs "
-            "and an LLM diagnosis on failure. Sets state.smoke_ok."),
+            "Verify the env can run the repo's tests. PREFERRED: call with NO "
+            "arguments ({}) -- the harness auto-selects a known-good EXISTING "
+            "test and runs it. Only pass test_id if you have verified that "
+            "exact id exists (never guess or invent names). Returns outputs "
+            "and a diagnosis on failure. Sets state.smoke_ok."),
         "parameters": {"type": "object", "properties": {
             "test_id":            {"type": "string"},
             "extra_pytest_args":  {"type": "string", "default": ""},
@@ -161,7 +176,7 @@ VERIFY_TOOLS = [
             "runner_args":        {"type": "string",
                 "description": "arguments for runner_script, e.g. "
                                "migrations.test_writer -v 0"},
-        }, "required": ["test_id"]}}},
+        }, "required": []}}},
     {"type": "function", "function": {
         "name": "declare_env_ready",
         "description": (
@@ -173,7 +188,91 @@ VERIFY_TOOLS = [
         }, "required": ["summary"]}}},
 ]
 
-BOOTSTRAP_TOOLS = RECON_TOOLS + INSTALL_TOOLS + VERIFY_TOOLS
+def _clip(s, head=1400, tail=900):
+    """Keep BOTH ends of tool output. Test runners put the traceback at the
+    top and boilerplate at the bottom; a pure tail slice hides the error."""
+    s = s or ""
+    if len(s) <= head + tail:
+        return s
+    return s[:head] + "\n...[%d chars elided]...\n" % (len(s) - head - tail) + s[-tail:]
+
+
+_NO_ATTR = re.compile(r"type object '([A-Za-z_][\w]*)' has no attribute '([A-Za-z_][\w]*)'")
+
+
+def _bad_test_id_hint(stdout, stderr, test_id, repo_dir):
+    """If the runner failed because the test id does not exist, say so plainly
+    and list the real test methods on that class. Otherwise return None."""
+    import os as _os
+    blob = (stdout or "") + "\n" + (stderr or "")
+    m = _NO_ATTR.search(blob)
+    if not m and "_FailedTest" not in blob and "ModuleNotFoundError" not in blob:
+        return None
+    if not m:
+        return ("The test id %r could not be LOADED (it does not exist, or its "
+                "module cannot be imported). This is not an environment "
+                "failure. Pick a test id that actually exists." % test_id)
+    cls, meth = m.group(1), m.group(2)
+    methods = []
+    try:
+        for root, dirs, files in _os.walk(repo_dir):
+            dirs[:] = [d for d in dirs
+                       if d not in (".git", ".venv", ".condaenv", "node_modules")]
+            for fn in files:
+                if not fn.endswith(".py"):
+                    continue
+                fp = _os.path.join(root, fn)
+                try:
+                    txt = open(fp, encoding="utf-8", errors="replace").read()
+                except OSError:
+                    continue
+                cm = re.search(r"^class\s+%s\b.*?:\s*$" % re.escape(cls), txt, re.M)
+                if not cm:
+                    continue
+                body = txt[cm.end():]
+                nxt = re.search(r"^class\s", body, re.M)
+                if nxt:
+                    body = body[:nxt.start()]
+                methods = re.findall(r"^\s+def\s+(test_\w+)", body, re.M)
+                if methods:
+                    break
+            if methods:
+                break
+    except Exception:
+        pass
+    hint = ("TEST DOES NOT EXIST: class %s has no method %s. The environment is "
+            "fine -- you named a test that is not there. Do NOT invent test "
+            "names." % (cls, meth))
+    if methods:
+        hint += " Real test methods on %s: %s" % (cls, ", ".join(methods[:25]))
+    return hint
+
+FILE_TOOLS = [
+    {"type": "function", "function": {
+        "name": "locate",
+        "description": (
+            "Search repo files for a regex pattern (like grep -rn). Returns "
+            "'path:line: text' matches. Use this to find REAL test names, "
+            "classes and functions instead of guessing."),
+        "parameters": {"type": "object", "properties": {
+            "pattern":   {"type": "string"},
+            "file_glob": {"type": "string",
+                          "description": "optional filename filter, e.g. "
+                                         "'*.py' or a path substring"},
+        }, "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "read_range",
+        "description": (
+            "Read lines [start, end] of a repo file (same tool as the fix "
+            "phase). Use this, not run_sanity, to inspect files."),
+        "parameters": {"type": "object", "properties": {
+            "file":  {"type": "string"},
+            "start": {"type": "integer"},
+            "end":   {"type": "integer"},
+        }, "required": ["file"]}}},
+]
+
+BOOTSTRAP_TOOLS = RECON_TOOLS + INSTALL_TOOLS + VERIFY_TOOLS + FILE_TOOLS
 
 BOOTSTRAP_TOOL2SYS = {
     "read_repo_docs":       "repo.read_docs",
@@ -181,6 +280,8 @@ BOOTSTRAP_TOOL2SYS = {
     "web_search":           "web.search",
     "run_sanity":           "repo.run_sanity",
     "run_smoke_test":       "repo.run_smoke_test",
+    "locate":               "repo.locate",
+    "read_range":           "repo.read_range",
     "declare_env_ready":    "RETURN",
 }
 BOOTSTRAP_TOOL2SYS.update(INSTALL_TOOL2SYS)
@@ -555,6 +656,75 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
                 max_tokens=400)
         return result
 
+    # ---- phase-1 file tools (mirror phase-2 locate/read_range) ---------
+    def h_locate(pcb, args):
+        import fnmatch
+        pat = str(args.get("pattern", ""))
+        glob_f = str(args.get("file_glob", "") or "")
+        if not pat:
+            return {"matches": [], "match_count": 0, "truncated": False,
+                    "error": "empty pattern",
+                    "goal_stack": _stack_snapshot(state)}
+        try:
+            rx = re.compile(pat)
+        except re.error as e:
+            return {"matches": [], "match_count": 0, "truncated": False,
+                    "error": "bad regex: %s" % e,
+                    "goal_stack": _stack_snapshot(state)}
+        matches, truncated, cap = [], False, 40
+        for root, dirs, files in os.walk(repo_dir):
+            dirs[:] = [d for d in dirs if d not in
+                       (".git", ".venv", ".condaenv", "node_modules",
+                        "__pycache__")]
+            for fn in files:
+                fp = os.path.join(root, fn)
+                rel = os.path.relpath(fp, repo_dir)
+                if glob_f:
+                    if not (fnmatch.fnmatch(fn, glob_f)
+                            or fnmatch.fnmatch(rel, glob_f)
+                            or glob_f in rel):
+                        continue
+                elif not fn.endswith((".py", ".txt", ".rst", ".cfg", ".toml",
+                                      ".ini", ".md", ".yml", ".yaml")):
+                    continue
+                try:
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        for i, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                matches.append("%s:%d: %s"
+                                               % (rel, i, line.rstrip()[:160]))
+                                if len(matches) >= cap:
+                                    truncated = True
+                                    break
+                except OSError:
+                    continue
+                if truncated:
+                    break
+            if truncated:
+                break
+        return {"matches": matches, "match_count": len(matches),
+                "truncated": truncated, "goal_stack": _stack_snapshot(state)}
+
+    def h_read_range(pcb, args):
+        rel = os.path.normpath(str(args.get("file", "")))
+        if rel.startswith("..") or os.path.isabs(rel):
+            return {"error": "file must be a relative path inside the repo",
+                    "goal_stack": _stack_snapshot(state)}
+        fp = os.path.join(repo_dir, rel)
+        if not os.path.isfile(fp):
+            return {"error": "no such file: %s" % rel,
+                    "goal_stack": _stack_snapshot(state)}
+        try:
+            lines = open(fp, encoding="utf-8", errors="replace").readlines()
+        except OSError as e:
+            return {"error": str(e), "goal_stack": _stack_snapshot(state)}
+        start = max(1, int(args.get("start") or 1))
+        end = min(len(lines), int(args.get("end") or start + 120))
+        body = "".join(lines[start - 1:end])[:8000]
+        return {"path": rel, "start": start, "end": end,
+                "total_lines": len(lines), "content": body,
+                "goal_stack": _stack_snapshot(state)}
+
     # ---- run_smoke_test ------------------------------------------------
     def h_run_smoke(pcb, args):
         active = state["active_env_kind"]
@@ -608,11 +778,17 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
                        active_env_kind=active)
             ok = r_t.returncode == 0
             state["smoke_ok"] = ok
-            return {"ok": ok, "runner": f"{sp} {runner_args}".strip(),
+            _out = {"ok": ok, "runner": f"{sp} {runner_args}".strip(),
                     "exit": r_t.returncode,
-                    "stdout": (r_t.stdout or "")[-1500:],
-                    "stderr": (r_t.stderr or "")[-1500:],
+                    "stdout": _clip(r_t.stdout),
+                    "stderr": _clip(r_t.stderr),
                     "goal_stack": _stack_snapshot(state)}
+            if not ok:
+                _h = _bad_test_id_hint(r_t.stdout, r_t.stderr,
+                                       (runner_args or test_id), repo_dir)
+                if _h:
+                    _out["hint"] = _h
+            return _out
         r_collect = _run(
             f'{bin_}/python -m pytest --collect-only -q {extra_args} "{test_id}"',
             repo_dir, env_vars=state["env_vars"], timeout=180,
@@ -625,12 +801,17 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
         state["smoke_ok"] = ok
         result = {"ok": ok,
                   "collect_exit": r_collect.returncode,
-                  "collect_tail": (r_collect.stdout or "")[-1500:]
-                                   + (r_collect.stderr or "")[-500:],
+                  "collect_tail": _clip(r_collect.stdout, 900, 500)
+                                   + _clip(r_collect.stderr, 300, 200),
                   "test_exit": r_test.returncode,
-                  "test_tail": (r_test.stdout or "")[-1500:]
-                                + (r_test.stderr or "")[-500:],
+                  "test_tail": _clip(r_test.stdout, 900, 500)
+                                + _clip(r_test.stderr, 300, 200),
                   "goal_stack": _stack_snapshot(state)}
+        if not ok:
+            _h = _bad_test_id_hint(r_test.stdout, r_test.stderr,
+                                   test_id, repo_dir)
+            if _h:
+                result["hint"] = _h
         if not ok:
             result["diagnosis"] = llm_call(
                 system="Diagnose a pytest failure. Be specific.",
@@ -648,6 +829,8 @@ def make_bootstrap_handlers(repo_dir, base_env_vars=None, fail_to_pass=None,
         "web.search":           h_web_search,
         "repo.run_sanity":      h_run_sanity,
         "repo.run_smoke_test":  h_run_smoke,
+        "repo.locate":          h_locate,
+        "repo.read_range":      h_read_range,
     }
     handlers.update(install_handlers)
     return handlers, state
@@ -794,3 +977,19 @@ BOOTSTRAP_SYSTEM_PROMPT = (
     "packages that lack pip wheels for this platform.\n\n"
     "Every turn MUST call exactly one tool."
 )
+
+
+# ---- recall tool (2026-07-25): retrieve the full output of an earlier call ----
+RECALL_TOOL = {"type": "function", "function": {
+    "name": "recall",
+    "description": (
+        "See the FULL output of an earlier tool call. Long outputs are shown "
+        "summarized, ending with a note and an id like out17; pass that id as "
+        "ref to get the entire original output back. Nothing is ever discarded "
+        "-- only summarized. recall retrieves the rest."),
+    "parameters": {"type": "object", "properties": {
+        "ref": {"type": "string",
+                "description": "the id from a summary note, e.g. \"out17\""}},
+        "required": ["ref"]}}}
+BOOTSTRAP_TOOLS = BOOTSTRAP_TOOLS + [RECALL_TOOL]
+BOOTSTRAP_TOOL2SYS["recall"] = "recall"

@@ -210,32 +210,52 @@ class ToolCallCPU(OllamaCPU):
 
     def _chat(self, messages):
         _gemini = "googleapis" in self.host
-        _payload = {
-            "model": self.model, "stream": False,
-            "messages": self._normalize(messages), "tools": self.tools,
-            "temperature": self.temperature, "max_tokens": self.num_predict,
-        }
-        if not _gemini:
-            _payload.update({"top_p": 0.95, "top_k": 20, "seed": self.seed})
-        body = json.dumps(_payload).encode()
+        _norm = self._normalize(messages)
+        # ADAPTIVE ANTI-TRUNCATION (env TRUNC_RETRY, default on). llama.cpp sets
+        # finish_reason=="length" when the model hit max_tokens mid-output; for a
+        # thinking model at 2048 the tool-call JSON (a patch, or a long check/
+        # reproduce script) gets cut off, the call is unparseable, and the turn is
+        # wasted. Rather than ask the model to "resend smaller" (which ornith does
+        # not reliably do), transparently re-generate with a doubled ceiling up to
+        # TRUNC_MAX. Baseline-preserving: only grows on an actual length-stop.
+        _retry = os.environ.get("TRUNC_RETRY", "1") == "1"
+        _cap = int(os.environ.get("TRUNC_MAX", "8192"))
+        _mt = self.num_predict
         _headers = {"Content-Type": "application/json"}
         if _gemini:
             _url = self.host + "/chat/completions"
             _headers["Authorization"] = "Bearer " + os.environ.get("GEMINI_API_KEY", "")
         else:
             _url = self.host + "/v1/chat/completions"
-        resp = None
-        for _attempt in range(6):
-            try:
-                req = urllib.request.Request(_url, data=body, headers=_headers)
-                with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
-                    resp = json.loads(r.read())
-                break
-            except urllib.error.HTTPError as _e:
-                if _e.code == 429 and _attempt < 5:
-                    time.sleep(min(90, 10 * (_attempt + 1))); continue
-                raise
-        m = (resp.get("choices") or [{}])[0].get("message", {}) or {}
+        resp = None; m = {}; _fr = None; _grew = 0
+        for _grow in range(3):   # initial try + up to 2 doublings
+            _payload = {
+                "model": self.model, "stream": False,
+                "messages": _norm, "tools": self.tools,
+                "temperature": self.temperature, "max_tokens": _mt,
+            }
+            if not _gemini:
+                _payload.update({"top_p": 0.95, "top_k": 20, "seed": self.seed})
+            body = json.dumps(_payload).encode()
+            resp = None
+            for _attempt in range(6):
+                try:
+                    req = urllib.request.Request(_url, data=body, headers=_headers)
+                    with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
+                        resp = json.loads(r.read())
+                    break
+                except urllib.error.HTTPError as _e:
+                    if _e.code == 429 and _attempt < 5:
+                        time.sleep(min(90, 10 * (_attempt + 1))); continue
+                    raise
+            _choice = (resp.get("choices") or [{}])[0]
+            _fr = _choice.get("finish_reason")
+            m = _choice.get("message", {}) or {}
+            if _retry and _fr == "length" and _mt < _cap:
+                _mt = min(_cap, _mt * 2)
+                _grew += 1
+                continue
+            break
         if not m.get("tool_calls") and m.get("content"):
             _rec = self._recover_tool_call(m["content"])
             if _rec: m["tool_calls"] = _rec
@@ -245,5 +265,8 @@ class ToolCallCPU(OllamaCPU):
                 "eval_tokens":   usage.get("completion_tokens"),
                 "eval_ms": timings.get("predicted_ms", 0),
                 "load_ms": 0,
-                "retries": 0}
+                "retries": 0,
+                "finish_reason": _fr,
+                "trunc_grow": _grew,
+                "max_tokens": _mt}
         return m, meta

@@ -58,6 +58,31 @@ def _web_pip_name(mod):
     return pkg if pkg and pkg not in ("null", "None", "") else None
 
 
+def _pip_argv_install(py, pkg, repo_dir, env, timeout=300):
+    """Install one package with NO SHELL. Returns True on success.
+
+    The name may have come from the model (see _web_pip_name), so it goes
+    through pkg_guard: argv list, bounded PEP 508 name, no shell to parse
+    metacharacters. An unsafe name is refused rather than escaped.
+    """
+    import pkg_guard as _pkg_guard
+    exe = py if os.path.isabs(py) else os.path.join(repo_dir, py)
+    try:
+        argv = _pkg_guard.pip_argv(exe, pkg)
+    except ValueError as e:
+        print("  -- %s" % e)
+        return False
+    try:
+        return subprocess.run(argv, cwd=repo_dir, capture_output=True,
+                              text=True, timeout=timeout,
+                              env=env).returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        # argv exec RAISES where shell=True returned 127. Declining one
+        # install must not kill the run.
+        print("  -- pip install %r failed to launch: %s" % (pkg, e))
+        return False
+
+
 def _diagnose(node_ids, output):
     """Optional LLM diagnosis of a test failure (advisory; not the verdict)."""
     try:
@@ -272,17 +297,20 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
             break
         tried.add(mod)
         pkg = _PKG_ALIASES.get(mod, mod.split(".")[0])
-        ok_i = subprocess.run(
-            f'{py} -m pip install "{pkg}"', shell=True, cwd=repo_dir,
-            capture_output=True, text=True, timeout=300, env=env).returncode == 0
+        ok_i = _pip_argv_install(py, pkg, repo_dir, env)
         if not ok_i:
-            # Escalate: web-search the real pip name and try that.
+            # Escalate: web-search the real pip name and try that. That name is
+            # MODEL OUTPUT derived from web snippets, so it never touches a
+            # shell -- pkg_guard validates it and _pip_argv_install execs a
+            # list. relatedness() is logged, not enforced: a typosquat's tell
+            # is "distant", but so is a legitimate rename (bs4 ->
+            # beautifulsoup4), and refusing those costs a whole instance.
             looked = _web_pip_name(mod)
             if looked and looked != pkg:
-                ok_i = subprocess.run(
-                    f'{py} -m pip install "{looked}"', shell=True, cwd=repo_dir,
-                    capture_output=True, text=True, timeout=300,
-                    env=env).returncode == 0
+                import pkg_guard as _pg
+                print("  -- pip name from web: %r -> %r (%s)"
+                      % (mod, looked, _pg.relatedness(mod, looked)))
+                ok_i = _pip_argv_install(py, looked, repo_dir, env)
                 if ok_i:
                     pkg = looked
         if not ok_i:

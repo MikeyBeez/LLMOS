@@ -30,7 +30,7 @@ mix pip/uv freely inside a uv .venv, but you can only conda-install into
 a conda env. Trying to install conda pkgs into a uv .venv returns an error
 telling the model to create_venv(backend="conda") first.
 """
-import os, shutil, subprocess
+import os, re, shutil, subprocess
 
 
 UV = os.path.expanduser("~/.local/bin/uv")
@@ -202,8 +202,47 @@ def make_install_handlers(repo_dir, base_env_vars=None):
         backend = str(args.get("backend", "uv"))
         no_iso  = bool(args.get("no_build_isolation", False))
         channel = str(args.get("channel", "") or "conda-forge")
-        if not name:
+        reqfile = str(args.get("requirements_file", "") or "").strip()
+
+        # REQUIREMENTS-FILE SUPPORT (2026-07-28). Measured: 48 of 107 install
+        # failures across every recorded run were the model trying to install
+        # from a requirements FILE -- tests/requirements/py3.txt (27 failures,
+        # 0 successes), "-r tests/requirements/py3.txt" (11), and so on. The
+        # instinct is CORRECT; the tool simply had no way to do it, so it
+        # refused and the model kept retrying. 45% of install failures were a
+        # missing capability, not a model error.
+        if not reqfile and name:
+            m_r = re.match(r"^-r\s+(\S+)$", name)       # "-r foo/bar.txt"
+            if m_r:
+                reqfile, name = m_r.group(1), ""
+            elif name.endswith(".txt") and ("/" in name or "requirement" in name.lower()):
+                reqfile, name = name, ""
+
+        if reqfile:
+            abs_req = os.path.realpath(os.path.join(repo_dir, reqfile))
+            if not abs_req.startswith(os.path.realpath(repo_dir) + os.sep):
+                return {"error": "requirements_file must be inside the repo; got %r"
+                                 % reqfile, "goal_stack": _stack_snapshot(state)}
+            if not os.path.isfile(abs_req):
+                import dep_discovery as _dd
+                return {"error": "no such requirements file: %r" % reqfile,
+                        "available": _dd.discover(repo_dir)["requirements_files"],
+                        "goal_stack": _stack_snapshot(state)}
+
+        if not name and not reqfile:
             return {"error": "name is required",
+                    "goal_stack": _stack_snapshot(state)}
+
+        # A bare flag or a path in `name` is a malformed call. REDIRECT rather
+        # than fail silently -- the model is asking for something real.
+        if name and (name.startswith("-") or "/" in name or "\\" in name
+                     or " " in name.strip()):
+            import dep_discovery as _dd
+            return {"error": ("%r is not a package name. To install from a "
+                              "requirements file call install_package with "
+                              "requirements_file=<path>." % name),
+                    "available_requirements_files":
+                        _dd.discover(repo_dir)["requirements_files"],
                     "goal_stack": _stack_snapshot(state)}
         active = state["active_env_kind"]
         if not active:
@@ -216,6 +255,25 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                               "'conda') or use backend='pip'/'uv' instead."),
                     "goal_stack": _stack_snapshot(state)}
         # Compose command
+        if reqfile:
+            if backend == "conda":
+                return {"error": "requirements_file needs backend 'uv' or 'pip'",
+                        "goal_stack": _stack_snapshot(state)}
+            if backend == "pip":
+                cmd = ('.%s/bin/pip install -r "%s"'
+                       % ("condaenv" if active == "conda" else "venv", reqfile))
+            else:
+                cmd = '%s pip install --python .venv/bin/python -r "%s"' % (UV, reqfile)
+            r = _run(cmd, repo_dir, env_vars=state["env_vars"], timeout=1800,
+                     active_env_kind=active)
+            ok = r.returncode == 0
+            state.setdefault("installs", []).append(
+                {"name": "-r " + reqfile, "version_spec": "", "backend": backend,
+                 "no_build_isolation": False, "ok": ok})
+            return {"ok": ok, "requirements_file": reqfile,
+                    "stderr": "" if ok else (r.stderr or "")[-1200:],
+                    "goal_stack": _stack_snapshot(state)}
+
         pkg = f'"{name}{vspec}"'
         if backend == "conda":
             cmd = (f'{MAMBA} install -y -p .condaenv -c {channel} '
@@ -323,7 +381,17 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                 "installed":       state["installed"][-10:],
                 "repo_installed":  state["repo_installed"]}
 
+    def h_list_dependencies(pcb, args):
+        """How THIS repo declares its dependencies. Deterministic, no LLM, no
+        network. Exists because assuming requirements.txt covers 10 of our 300
+        checkouts while tests/requirements/ covers 50 -- and most repos declare
+        test deps in packaging metadata instead."""
+        import dep_discovery as _dd
+        d = _dd.discover(repo_dir)
+        return {"report": _dd.format_report(d), **d}
+
     handlers = {
+        "install.list_dependencies":      h_list_dependencies,
         "install.create_venv":            h_create_venv,
         "install.install_package":        h_install_package,
         "install.install_repo_editable":  h_install_repo_editable,
@@ -353,6 +421,15 @@ INSTALL_TOOLS = [
                                 "description": "uv (default, fast) or conda (for compiled deps)"},
         }, "required": ["python_version"]}}},
     {"type": "function", "function": {
+        "name": "list_dependencies",
+        "description": (
+            "List how THIS repo declares its dependencies: every requirements "
+            "file (test/dev first), the extras_require / optional-dependencies "
+            "names from setup.py, setup.cfg and pyproject.toml, and the tox "
+            "environments. Call this BEFORE guessing package names -- repos "
+            "rarely use a plain requirements.txt."),
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "install_package",
         "description": (
             "Install ONE package into the active env. Use this to install build "
@@ -364,6 +441,11 @@ INSTALL_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "name":               {"type": "string",
                                     "description": "package name, e.g. 'setuptools'"},
+            "requirements_file":  {"type": "string",
+                                    "description": ("install from a requirements file in "
+                                                    "the repo instead of one package, e.g. "
+                                                    "'requirements_test.txt'. Get the list "
+                                                    "from list_dependencies.")},
             "version_spec":       {"type": "string",
                                     "description": "e.g. '<69', '==1.24', '' for latest"},
             "backend":            {"type": "string", "enum": ["uv", "pip", "conda"],
@@ -431,6 +513,7 @@ INSTALL_TOOLS = [
 
 INSTALL_TOOL2SYS = {
     "create_venv":            "install.create_venv",
+    "list_dependencies":      "install.list_dependencies",
     "install_package":        "install.install_package",
     "install_repo_editable":  "install.install_repo_editable",
     "push_subgoal":           "install.push_subgoal",

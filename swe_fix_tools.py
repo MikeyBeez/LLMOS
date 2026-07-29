@@ -384,10 +384,19 @@ def _syntax_check(full_path, rel):
     if not full_path.endswith(".py"):
         return None
     try:
-        import ast
         with open(full_path, encoding="utf-8", errors="ignore") as f:
             src = f.read()
-        ast.parse(src)
+        # compile(), NOT ast.parse(). ast.parse only PARSES; errors raised by
+        # the symbol table -- "return outside function", "nonlocal at module
+        # level", duplicate parameters -- are compile-time and slip straight
+        # through it. Measured 2026-07-28 on django-15061: the model left a
+        # duplicated `class SplitDateTimeWidget(MultiWidget):` with an orphaned
+        # `return` under it. ast.parse accepted the file, we recorded
+        # syntax_ok=True, the agent was never told, and grading then died with
+        # "SyntaxError: 'return' outside function". The instance regressed
+        # identically across three different harness designs today because none
+        # of them touched the thing that was actually broken.
+        compile(src, full_path, "exec")
         return None
     except SyntaxError as e:
         line = e.lineno or 0
@@ -1519,6 +1528,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             unmet.append("your reproduction is still red")
         if state.get("probe_script") and not state.get("probe_green"):
             unmet.append("the locked invariant probe is still red")
+        # (The sibling gate used to live here. It never ran: `submit` maps to
+        # RETURN in FIX_TOOL2SYS, so phase_run returns before dispatching
+        # h_submit at all -- exactly the trap atlas_doc.py already warned
+        # about. The real gate is _fix_gate in swe_agent_v2.py.)
         out = {"submitted": True, "summary": args.get("summary", ""),
                "fix_verified": verified}
         state["submitted"] = True
@@ -1546,6 +1559,116 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
     handlers["_diff_nonempty"] = _diff_nonempty  # runner-only; the fix-phase gate
     handlers["_check_regressions"] = _check_regressions  # runner-only; given tests
+    def _sibling_sweep(old_snippet, new_snippet, edited_line=None, rel_path=None):
+        """Runner-only. Classify the edit just applied and report UNCHANGED
+        sites of the same class in the same file. repo_dir is only in scope
+        here, which is why this lives beside the other runner-only handlers
+        rather than in phase_run (same reason neighbor_tests does)."""
+        import os as _os
+        import code_probes as _cp
+        if not rel_path:
+            return {}
+        path = _os.path.join(repo_dir, rel_path)
+        if not _os.path.isfile(path):
+            return {}
+        # v2 (2026-07-28). v1 stored the LAST sweep result and was wiped by the
+        # next unrelated patch, so by submit time the list was always empty and
+        # the gate never fired once in 10 instances / 46 evaluations.
+        # v2 tracks which CLASSES are live per file and RE-PROBES fresh every
+        # time. Deliberately not tracking line numbers: any edit above a site
+        # shifts them, and a stale line number would look like "fixed".
+        # Self-clearing: once the sites are actually changed the probe stops
+        # reporting them (it ignores already-normalised comparisons), so the
+        # gate becomes satisfiable rather than a trap.
+        live = state.setdefault("sibling_classes", {})
+        classes = _cp.classify_edit(old_snippet, new_snippet)
+        if classes:
+            live[rel_path] = sorted(set(live.get(rel_path, [])) | set(classes))
+
+        outstanding, edit_classes = [], set()
+        for _rp in list(live):
+            _p = _os.path.join(repo_dir, _rp)
+            if not _os.path.isfile(_p):
+                live.pop(_rp)
+                continue
+            _cls = live[_rp]
+            _found = [f for f in _cp.probe_file(_p, only=_cls)
+                      if f["probe"] in _cls]
+            if not _found:
+                live.pop(_rp)          # every site of this class is now clean
+                continue
+            edit_classes |= set(_cls)
+            for f in _found[:8]:
+                outstanding.append({"file": _rp, "line": f["line"],
+                                    "fact": f["fact"], "code": f["code"][:120]})
+
+        state["sibling_outstanding"] = (
+            {"edit_class": sorted(edit_classes),
+             "unchanged_same_class_sites": outstanding[:8]}
+            if outstanding else {})
+        return state["sibling_outstanding"]
+
+    def _revert_tree():
+        """Runner-only. Put the source back to base so the next operation in
+        the repertoire starts from a clean tree instead of inheriting the
+        previous attempt\'s damage. Tracked files only -- the venv and any
+        scratch reproduction scripts are untracked and survive."""
+        import subprocess as _sp
+        _sp.run("git checkout -- .", shell=True, cwd=repo_dir,
+                capture_output=True, timeout=60)
+        state["probe_green"] = False
+        state["repro_green"] = False      # the fix is gone; so is its evidence
+        return {"reverted": True}
+
+    def h_neighborhood(pcb, args):
+        """Call graph around a symbol the agent has ALREADY located.
+
+        Measured 2026-07-28: graphify `query` from an issue title does NOT find
+        the bug (47 nodes, all test fixtures, gold target absent), but
+        `affected` from a known symbol returns the caller chain with exact
+        file:line immediately. So this exposes only the half that works --
+        expansion, not search. Targets the bucket-A failure: fixed one site,
+        never found the sibling (astropy-14365 added re.IGNORECASE and left
+        `if v == "NO"` at line 309 untouched).
+
+        Deterministic: tree-sitter AST, no LLM, no network. ~26s to build the
+        graph once per checkout, cached thereafter.
+        """
+        import graph_tools as _gt
+        sym = str(args.get("symbol", "")).strip()
+        if not sym:
+            return {"error": "symbol is required, e.g. symbol='_is_ignored_file'"}
+        return _gt.neighborhood(repo_dir, sym,
+                                depth=int(args.get("depth", 2) or 2))
+
+    def _capture_diff():
+        """Runner-only. The current source diff as text, so a candidate patch
+        can survive the revert between repertoire operations."""
+        import subprocess as _sp
+        r = _sp.run("git diff", shell=True, cwd=repo_dir,
+                    capture_output=True, text=True, timeout=60)
+        return r.stdout or ""
+
+    def _restore_diff(text):
+        """Runner-only. Put a saved candidate back on a clean tree."""
+        import subprocess as _sp, tempfile, os as _os
+        _sp.run("git checkout -- .", shell=True, cwd=repo_dir,
+                capture_output=True, timeout=60)
+        if not (text or "").strip():
+            return {"restored": False}
+        fd, path = tempfile.mkstemp(suffix=".patch")
+        with _os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        r = _sp.run("git apply %s" % path, shell=True, cwd=repo_dir,
+                    capture_output=True, text=True, timeout=60)
+        _os.unlink(path)
+        return {"restored": r.returncode == 0, "err": (r.stderr or "")[:200]}
+
+    handlers["swe.neighborhood"] = h_neighborhood        # agent-facing
+    handlers["_capture_diff"] = _capture_diff            # runner-only
+    handlers["_restore_diff"] = _restore_diff            # runner-only
+    handlers["_revert_tree"] = _revert_tree              # runner-only
+    handlers["_sibling_sweep"] = _sibling_sweep          # runner-only
     handlers["_capture_baseline"] = _capture_baseline    # runner-only
     return handlers, state
 
@@ -1670,6 +1793,7 @@ FIX_TOOL2SYS = {
     "verify_fix":  "swe.verify_fix",
     "run_tests":   "swe.run_tests",
     "neighbor_tests": "swe.neighbor_tests",
+    "neighborhood":   "swe.neighborhood",
     "submit":      "RETURN",   # terminal
 }
 
@@ -1783,3 +1907,23 @@ _NEIGHBOR_TOOL = {"type": "function", "function": {
     "parameters": {"type": "object", "properties": {}}}}
 if os.environ.get("BLAST_RADIUS") == "1":
     FIX_TOOLS = FIX_TOOLS + [_NEIGHBOR_TOOL]
+
+_NEIGHBORHOOD_TOOL = {"type": "function", "function": {
+    "name": "neighborhood",
+    "description": (
+        "Given a symbol you have ALREADY found (from locate, or a traceback "
+        "frame), list everything that calls, imports or references it, and what "
+        "it calls -- with exact file:line. Use it after you locate the fault to "
+        "find the OTHER places that need the same change: a fix often has more "
+        "than one site and the traceback names only the first. This is a lookup "
+        "in a precomputed code graph, not a search -- give it a real symbol "
+        "name, not a description."),
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string",
+                   "description": "exact symbol name, e.g. '_is_ignored_file'"},
+        "depth":  {"type": "integer",
+                   "description": "traversal depth, default 2"},
+    }, "required": ["symbol"]}}}
+
+if os.environ.get("GRAPHIFY") == "1":
+    FIX_TOOLS = FIX_TOOLS + [_NEIGHBORHOOD_TOOL]
