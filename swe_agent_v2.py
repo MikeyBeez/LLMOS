@@ -715,7 +715,10 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 _sw = handlers["_sibling_sweep"](
                     str(args.get("old_snippet") or ""),
                     str(args.get("new_snippet") or ""),
-                    args.get("start_line"),
+                    # start_line is OPTIONAL in the patch schema and absent in
+                    # snippet mode. edited_line is what the harness actually
+                    # wrote, so prefer it.
+                    result.get("edited_line") or args.get("start_line"),
                     result.get("edited"),
                 )
                 if _sw:
@@ -726,6 +729,31 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                     log("SIBLING_SWEEP no-fire (no class or no unchanged sites)")
             except Exception as _e:
                 log("SIBLING_SWEEP error: %s: %s" % (type(_e).__name__, _e))
+        # GRAPHIFY INJECT (env GRAPHIFY_INJECT, default off). Same failure as
+        # SIBLING_SWEEP above -- fixed one site, missed the sibling -- reached
+        # from the other direction. The sweep finds unchanged sites of the same
+        # SYNTACTIC class; this finds sites in the same CALL GRAPH, which no
+        # pattern match on the edit itself can see.
+        #
+        # It fires rather than being offered because offering it was measured
+        # and did nothing: GRAPHIFY=1 put `neighborhood` in the tool list for
+        # two instances / 84 tool calls and the model never once called it.
+        if (os.environ.get("GRAPHIFY_INJECT") == "1" and tool == "patch"
+                and isinstance(result, dict) and "edited" in result):
+            try:
+                _gn = handlers["_neighborhood_of_edit"](
+                    result.get("edited"),
+                    result.get("edited_line") or args.get("start_line"))
+                if _gn:
+                    result["call_graph_neighborhood"] = _gn
+                    log("GRAPHIFY_INJECT symbol=%s chars=%d"
+                        % (_gn.get("edited_symbol"),
+                           len(_gn.get("other_sites_in_the_call_graph") or "")))
+                else:
+                    log("GRAPHIFY_INJECT no-fire (no enclosing symbol, or "
+                        "symbol absent from the code graph)")
+            except Exception as _e:
+                log("GRAPHIFY_INJECT error: %s: %s" % (type(_e).__name__, _e))
         if (os.environ.get("NEIGHBOR_INJECT") == "1" and tool == "patch"
                 and isinstance(result, dict) and "edited" in result):
             try:

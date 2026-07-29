@@ -87,3 +87,88 @@ def neighborhood(repo_dir, symbol, depth=2, log=print):
     return {"symbol": symbol,
             "callers_and_dependents": aff[:3000],
             "definition_and_edges": exp[:2000]}
+
+
+# ---------------------------------------------------------------------------
+# AUTOMATIC INJECTION (2026-07-29)
+#
+# MEASURED, not assumed: with GRAPHIFY=1 the `neighborhood` tool was in the fix
+# tool list for two full instances -- 84 tool calls, a description that spells
+# out exactly when to use it -- and the model called it ZERO times. That is the
+# third time a persuasive description has moved this model not at all. Offering
+# a tool is exhortation. Firing it is structure.
+#
+# So the neighbourhood is now fetched BY THE HARNESS after a successful patch
+# and attached to the patch result, the same channel and the same shape as
+# sibling_sites. The model does not have to decide to look; it just receives.
+#
+# This is complementary to _sibling_sweep, not a duplicate. The sweep finds
+# unchanged sites of the same SYNTACTIC class (another `==` compare, another
+# regex without a flag). This finds sites in the same CALL GRAPH -- the other
+# callers of what you just edited, which no amount of pattern matching on the
+# edit itself can reach.
+# ---------------------------------------------------------------------------
+
+_DEF_RE = None
+
+
+def enclosing_symbol(file_path, line):
+    """Name of the innermost def/class containing `line` (1-indexed).
+
+    Text-based on purpose: the file has just been mutated and may not parse.
+    A syntax error in the file being edited is exactly when this is called.
+    Returns None if nothing plausible is above the line.
+    """
+    global _DEF_RE
+    if _DEF_RE is None:
+        import re
+        _DEF_RE = re.compile(r"^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)")
+    try:
+        with open(file_path, encoding="utf-8", errors="ignore") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    if not lines:
+        return None
+    idx = max(0, min(int(line or 1) - 1, len(lines) - 1))
+    best_indent = None
+    for i in range(idx, -1, -1):
+        m = _DEF_RE.match(lines[i])
+        if not m:
+            continue
+        indent = len(m.group(1).expandtabs(4))
+        # Walk outward: the first def/class above the line wins, then only
+        # strictly less-indented ones (its enclosing scopes) are candidates.
+        if best_indent is None or indent < best_indent:
+            best_indent = indent
+            if m.group(2) == "def":
+                return m.group(3)          # prefer the function
+            enclosing_class = m.group(3)
+            if indent == 0:
+                return enclosing_class
+    return None
+
+
+def neighborhood_of_edit(repo_dir, rel_path, line, depth=2, log=print):
+    """The call-graph neighbourhood of whatever was just edited.
+
+    Returns {} when there is nothing useful to say -- an empty dict so the
+    caller can `if not x` and inject nothing rather than injecting noise.
+    """
+    if not rel_path:
+        return {}
+    full = rel_path if os.path.isabs(rel_path) else os.path.join(repo_dir,
+                                                                 rel_path)
+    sym = enclosing_symbol(full, line)
+    if not sym:
+        return {}
+    info = neighborhood(repo_dir, sym, depth=depth, log=log)
+    if not isinstance(info, dict) or info.get("error"):
+        return {}
+    aff = (info.get("callers_and_dependents") or "").strip()
+    if not aff:
+        return {}
+    return {"edited_symbol": sym,
+            "other_sites_in_the_call_graph": aff[:1800],
+            "note": ("these reference or are referenced by the symbol you just "
+                     "changed; a fix often needs more than one site")}

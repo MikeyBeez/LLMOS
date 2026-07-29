@@ -963,6 +963,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             _fired(state, "patch_line_anchored")
             out = {"edited": path, "mode": "line_anchored",
                    "lines": "%d-%d" % (_sl, _el),
+                   "edited_line": _sl,
                    "you_replaced_exactly": _replaced,
                    "note": ("verification invalidated - run verify_fix. CHECK "
                             "you_replaced_exactly: if that is not the text you "
@@ -1131,8 +1132,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["patch_history"].append(
             {"file": str(args.get("file", "?")), "verdict": "unverified"})
         _syn = _syntax_check(full, path)
+        # Where did the replacement land? The harness knows; the model was not
+        # required to say (start_line is optional in the schema). Runner-side
+        # consumers -- GRAPHIFY_INJECT, sibling sweep -- need a line, and
+        # deriving it here is the one place it is certainly correct.
+        try:
+            _eline = (new_text[:new_text.index(new)].count("\n") + 1
+                      if new else None)
+        except ValueError:
+            _eline = None
         out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
-               "delta_bytes": len(new) - len(old),
+               "delta_bytes": len(new) - len(old), "edited_line": _eline,
                "match": _how, "note": "verification invalidated — run verify_fix"}
         if _syn:
             out["syntax"] = _syn
@@ -1664,6 +1674,19 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _os.unlink(path)
         return {"restored": r.returncode == 0, "err": (r.stderr or "")[:200]}
 
+    def _neighborhood_of_edit(rel_path, line):
+        """Runner-only. Call-graph neighbourhood of the symbol just edited.
+
+        Returns {} when there is nothing worth saying, so the caller injects
+        nothing rather than injecting noise.
+        """
+        try:
+            import graph_tools as _gt
+            return _gt.neighborhood_of_edit(repo_dir, rel_path, line)
+        except Exception:
+            return {}
+
+    handlers["_neighborhood_of_edit"] = _neighborhood_of_edit   # runner-only
     handlers["swe.neighborhood"] = h_neighborhood        # agent-facing
     handlers["_capture_diff"] = _capture_diff            # runner-only
     handlers["_restore_diff"] = _restore_diff            # runner-only
