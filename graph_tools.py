@@ -88,7 +88,6 @@ def neighborhood(repo_dir, symbol, depth=2, log=print):
             "callers_and_dependents": aff[:3000],
             "definition_and_edges": exp[:2000]}
 
-
 # ---------------------------------------------------------------------------
 # AUTOMATIC INJECTION (2026-07-29)
 #
@@ -98,77 +97,155 @@ def neighborhood(repo_dir, symbol, depth=2, log=print):
 # third time a persuasive description has moved this model not at all. Offering
 # a tool is exhortation. Firing it is structure.
 #
-# So the neighbourhood is now fetched BY THE HARNESS after a successful patch
-# and attached to the patch result, the same channel and the same shape as
+# So the neighbourhood is fetched BY THE HARNESS after a successful patch and
+# attached to the patch result, the same channel and the same shape as
 # sibling_sites. The model does not have to decide to look; it just receives.
 #
-# This is complementary to _sibling_sweep, not a duplicate. The sweep finds
-# unchanged sites of the same SYNTACTIC class (another `==` compare, another
-# regex without a flag). This finds sites in the same CALL GRAPH -- the other
-# callers of what you just edited, which no amount of pattern matching on the
-# edit itself can reach.
+# WHY THE CLASS AND NOT THE METHOD. First version asked the graph about the
+# innermost enclosing def. Measured on django-15061, where the model edited
+# MultiWidget.id_for_label:
+#
+#   affected "id_for_label"                          -> No unique node match
+#                                                       (15 nodes share the label)
+#   affected "MultiWidget.id_for_label"              -> No unique node match
+#                                                       (dotted form is not a selector)
+#   affected "django_forms_widgets_multiwidget_id_for_label"
+#                                                    -> No affected nodes found
+#   affected "MultiWidget"                           -> RangeWidget [inherits],
+#        SplitDateTimeWidget [inherits] django/forms/widgets.py:L895,
+#        ComplexMultiWidget [inherits] tests/forms_tests/field_tests/
+#            test_multivaluefield.py:L27,   <-- an actual FAIL_TO_PASS module
+#        ... plus tests/forms_tests/widget_tests/test_multiwidget.py
+#
+# A method name is ambiguous across a large codebase, and nothing "calls" an
+# overridden method by name anyway -- dispatch is dynamic. The CLASS is what
+# other code inherits, instantiates and tests. So for an edit inside a class we
+# ask about the class, and fall back to the bare function name only for
+# module-level functions (pylint's _is_ignored_file, where it works well).
 # ---------------------------------------------------------------------------
 
 _DEF_RE = None
 
 
-def enclosing_symbol(file_path, line):
-    """Name of the innermost def/class containing `line` (1-indexed).
-
-    Text-based on purpose: the file has just been mutated and may not parse.
-    A syntax error in the file being edited is exactly when this is called.
-    Returns None if nothing plausible is above the line.
-    """
+def _def_re():
     global _DEF_RE
     if _DEF_RE is None:
         import re
         _DEF_RE = re.compile(r"^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)")
+    return _DEF_RE
+
+
+def enclosing_scopes(file_path, line):
+    """(innermost def or None, innermost class or None) containing `line`.
+
+    Text-based on purpose: the file has just been mutated and may not parse. A
+    syntax error in the file being edited is exactly when this gets called.
+    """
+    rx = _def_re()
     try:
         with open(file_path, encoding="utf-8", errors="ignore") as fh:
             lines = fh.read().splitlines()
     except OSError:
-        return None
+        return None, None
     if not lines:
-        return None
+        return None, None
     idx = max(0, min(int(line or 1) - 1, len(lines) - 1))
-    best_indent = None
+    func = cls = None
+    ceiling = None          # only strictly-less-indented scopes enclose us
     for i in range(idx, -1, -1):
-        m = _DEF_RE.match(lines[i])
+        m = rx.match(lines[i])
         if not m:
             continue
         indent = len(m.group(1).expandtabs(4))
-        # Walk outward: the first def/class above the line wins, then only
-        # strictly less-indented ones (its enclosing scopes) are candidates.
-        if best_indent is None or indent < best_indent:
-            best_indent = indent
-            if m.group(2) == "def":
-                return m.group(3)          # prefer the function
-            enclosing_class = m.group(3)
+        if ceiling is not None and indent >= ceiling:
+            continue
+        ceiling = indent
+        if m.group(2) == "def":
+            if func is None:
+                func = m.group(3)
+        else:
+            if cls is None:
+                cls = m.group(3)
             if indent == 0:
-                return enclosing_class
-    return None
+                break
+        if indent == 0:
+            break
+    return func, cls
+
+
+def enclosing_symbol(file_path, line):
+    """Back-compatible: the innermost def, else the innermost class."""
+    func, cls = enclosing_scopes(file_path, line)
+    return func or cls
+
+
+def _graph_query(repo_dir, symbol, depth, log):
+    info = neighborhood(repo_dir, symbol, depth=depth, log=log)
+    if not isinstance(info, dict) or info.get("error"):
+        return ""
+    aff = (info.get("callers_and_dependents") or "")
+    # graphify answers "no unique node match" / "no affected nodes found" with
+    # exit 0 and prose, so an empty answer has to be recognised, not assumed.
+    low = aff.lower()
+    if ("no unique node match" in low or "no affected nodes found" in low
+            or not aff.strip()):
+        return ""
+    return aff
 
 
 def neighborhood_of_edit(repo_dir, rel_path, line, depth=2, log=print):
-    """The call-graph neighbourhood of whatever was just edited.
+    """Call-graph neighbourhood of whatever was just edited.
 
-    Returns {} when there is nothing useful to say -- an empty dict so the
-    caller can `if not x` and inject nothing rather than injecting noise.
+    Class first, then the function -- see the note above. Returns {} when
+    there is nothing useful to say, so the caller injects nothing rather than
+    injecting noise.
     """
     if not rel_path:
         return {}
-    full = rel_path if os.path.isabs(rel_path) else os.path.join(repo_dir,
-                                                                 rel_path)
-    sym = enclosing_symbol(full, line)
-    if not sym:
-        return {}
-    info = neighborhood(repo_dir, sym, depth=depth, log=log)
-    if not isinstance(info, dict) or info.get("error"):
-        return {}
-    aff = (info.get("callers_and_dependents") or "").strip()
-    if not aff:
-        return {}
-    return {"edited_symbol": sym,
-            "other_sites_in_the_call_graph": aff[:1800],
-            "note": ("these reference or are referenced by the symbol you just "
-                     "changed; a fix often needs more than one site")}
+    full = (rel_path if os.path.isabs(rel_path)
+            else os.path.join(repo_dir, rel_path))
+    func, cls = enclosing_scopes(full, line)
+    for sym, kind in ((cls, "class"), (func, "function")):
+        if not sym:
+            continue
+        aff = _graph_query(repo_dir, sym, depth, log)
+        if aff.strip():
+            return {"edited_symbol": sym,
+                    "symbol_kind": kind,
+                    "other_sites_in_the_call_graph": aff[:1800],
+                    "note": ("these inherit from, reference, or are referenced "
+                             "by what you just changed; a fix often needs more "
+                             "than one site")}
+    return {}
+
+
+_TEST_RE = None
+
+
+def test_files_near(repo_dir, rel_path, line, depth=2, log=print):
+    """Repo-relative test files the graph connects to the edited code.
+
+    For choosing which EXISTING tests to run as a blast-radius check. Path
+    proximity has to guess among thousands of test files; the graph names them.
+    Measured on django-15061 (edit in MultiWidget.id_for_label): returns
+    tests/forms_tests/field_tests/test_multivaluefield.py and
+    tests/forms_tests/widget_tests/test_multiwidget.py -- the first is an
+    actual FAIL_TO_PASS module, and path proximity from django/forms/widgets.py
+    ranks neither.
+
+    Leak-safe: this reads the repo's own call graph, never the answer key.
+    """
+    global _TEST_RE
+    if _TEST_RE is None:
+        import re
+        _TEST_RE = re.compile(r"((?:[\w.\-/]+/)?(?:tests?|testing)/[\w.\-/]*"
+                              r"\.py|[\w.\-/]*test_[\w.\-]*\.py|"
+                              r"[\w.\-/]*_test\.py)")
+    info = neighborhood_of_edit(repo_dir, rel_path, line, depth=depth, log=log)
+    aff = info.get("other_sites_in_the_call_graph") or ""
+    out = []
+    for m in _TEST_RE.finditer(aff):
+        p = m.group(1)
+        if p not in out and os.path.isfile(os.path.join(repo_dir, p)):
+            out.append(p)
+    return out

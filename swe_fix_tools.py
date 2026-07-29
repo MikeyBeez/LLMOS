@@ -602,7 +602,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["fix_verified"] = ok
         return state["fix_verified"]
 
-    def _capture_baseline(hint_paths=None):
+    def _capture_baseline(hint_paths=None, graph_files=None):
         """Sample neighbor tests that PASS in the pre-patch tree (cheap: a
         spread of a few files, short timeouts). Called once, before any
         patch, so a later failure is a real regression."""
@@ -618,6 +618,23 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 seen.add(f)
                 per_file.append((f, nid))
         spread = _rank_test_files(per_file, hint_paths, limit=6)
+        # GRAPH_HINTS: test files the call graph connects to the edited code go
+        # in FIRST, ahead of anything proximity chose. Proximity has to guess
+        # among thousands of test files by path similarity; the graph names
+        # them. On django-15061 proximity picked six files that never rendered
+        # a label, while the graph named both FAIL_TO_PASS modules.
+        if graph_files:
+            _gsel = [nid for nid in ids
+                     if nid.split("::", 1)[0] in set(graph_files)]
+            if _gsel:
+                print("   -- GRAPH_HINTS seeded %d ids from %d graph test "
+                      "file(s): %s" % (len(_gsel[:40]), len(graph_files),
+                                       ", ".join(graph_files[:4])))
+                spread = _gsel[:40] + [n for n in spread if n not in _gsel]
+            else:
+                print("   -- GRAPH_HINTS no-fire (graph named %d file(s), none "
+                      "collected: %s)" % (len(graph_files),
+                                          ", ".join(graph_files[:4])))
         # BLAST_RADIUS: pull the FULL nearest test file(s) (all their tests), not
         # just one id per file, so the neighbor-test baseline covers the module the
         # change touches. Base status is genuine (pre-patch); FAIL_TO_PASS fails
@@ -879,8 +896,31 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         # regression would be hidden.
         if (os.environ.get("NEIGHBOR_INJECT") == "1"
                 and state.get("baseline_pass") is None):
+            # Where in the PRE-patch file is this edit? start_line is optional
+            # in the schema, so derive it from where old_snippet sits. The graph
+            # was built on the pre-patch tree, so pre-patch lines are the right
+            # coordinates.
+            _gfiles = None
+            if os.environ.get("GRAPH_HINTS") == "1":
+                try:
+                    _pl = args.get("start_line")
+                    if not _pl and old:
+                        _k = text.find(old)
+                        if _k >= 0:
+                            _pl = text[:_k].count("\n") + 1
+                    if _pl:
+                        import graph_tools as _gt
+                        _gfiles = _gt.test_files_near(repo_dir, path, _pl)
+                        print("   -- GRAPH_HINTS %s:%s -> %d test file(s)"
+                              % (path, _pl, len(_gfiles or [])))
+                    else:
+                        print("   -- GRAPH_HINTS skipped (no pre-patch line "
+                              "for %s)" % path)
+                except Exception as _e:
+                    print("   -- GRAPH_HINTS error: %s: %s"
+                          % (type(_e).__name__, _e))
             try:
-                _capture_baseline([path])
+                _capture_baseline([path], graph_files=_gfiles)
             except Exception:
                 pass
             _bp = state.get("baseline_pass")
@@ -1136,11 +1176,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         # required to say (start_line is optional in the schema). Runner-side
         # consumers -- GRAPHIFY_INJECT, sibling sweep -- need a line, and
         # deriving it here is the one place it is certainly correct.
-        try:
-            _eline = (new_text[:new_text.index(new)].count("\n") + 1
-                      if new else None)
-        except ValueError:
-            _eline = None
+        # The edit point is the first character where old and new text differ.
+        # NOT new_text.index(new): a short generic snippet -- a bare
+        # return, a lone pass -- occurs earlier in the file too, and
+        # that lookup then silently returns the wrong line
+        # (measured on django-15061: reported 772, actual 852).
+        _i, _lim = 0, min(len(text), len(new_text))
+        while _i < _lim and text[_i] == new_text[_i]:
+            _i += 1
+        _eline = text[:_i].count("\n") + 1 if new_text != text else None
         out = {"edited": path, "old_bytes": len(old), "new_bytes": len(new),
                "delta_bytes": len(new) - len(old), "edited_line": _eline,
                "match": _how, "note": "verification invalidated — run verify_fix"}
