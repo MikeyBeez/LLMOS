@@ -702,6 +702,69 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return _run(f"{env_dir}/bin/python -c {shlex.quote(script)}",
                     timeout=timeout)
 
+    def _promote_if_red_at_base(script, mode):
+        """Is this passing script actually a valid reproduction of the bug?
+
+        Red on the unmodified base tree and green with the current patch is the
+        definition. Anything else is not promotable. See the module note on
+        REPRO_PROMOTE for the measurement that motivated this.
+
+        Leak-safe: runs the MODEL\'s own script against the repo\'s own source.
+        Nothing here reads the gold patch or FAIL_TO_PASS.
+        """
+        import subprocess as _sp
+        import tempfile as _tf
+
+        def _git(cmd, t=60):
+            return _sp.run(cmd, shell=True, cwd=repo_dir, capture_output=True,
+                           text=True, timeout=t)
+
+        diff = _git("git diff").stdout or ""
+        if not diff.strip():
+            print("   -- REPRO_PROMOTE skipped: no patch applied, so a passing "
+                  "script proves nothing", flush=True)
+            return False
+        fd, pth = _tf.mkstemp(suffix=".promote.patch")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(diff)
+
+        base_rc, restore_err = None, None
+        try:
+            _git("git checkout -- .")
+            base_rc = _exec_repro(script, mode, timeout=180).returncode
+        except Exception as _e:
+            print("   -- REPRO_PROMOTE error while testing base: %s: %s"
+                  % (type(_e).__name__, _e), flush=True)
+        finally:
+            # Restore unconditionally. Losing the candidate patch here would be
+            # far worse than declining the promotion.
+            _git("git checkout -- .")
+            _ap = _git("git apply %s" % pth)
+            if _ap.returncode != 0:
+                restore_err = (_ap.stderr or "").strip()[:180]
+
+        if restore_err is not None:
+            print("   -- REPRO_PROMOTE RESTORE FAILED (%s). Working tree is now "
+                  "BASE; the candidate diff is preserved at %s"
+                  % (restore_err, pth), flush=True)
+            state["repro_green"] = False
+            state["fix_verified"] = False
+            return False
+        try:
+            os.unlink(pth)
+        except OSError:
+            pass
+
+        if base_rc is None:
+            return False
+        if base_rc == 0:
+            print("   -- REPRO_PROMOTE rejected: the script passes on the BASE "
+                  "tree too, so it does not exercise the bug", flush=True)
+            return False
+        print("   -- REPRO_PROMOTE accepted: RED at base (exit %s), GREEN with "
+              "your patch -- this is a valid reproduction" % base_rc, flush=True)
+        return True
+
     def h_reproduce(pcb, args):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
@@ -774,6 +837,30 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                               "Write a script that FAILS (nonzero exit, e.g. "
                               "an assert or uncaught exception) because of "
                               "the reported bug.")
+        elif (os.environ.get("REPRO_PROMOTE") == "1"
+              and state.get("promotions", 0)
+                  < int(os.environ.get("REPRO_PROMOTE_MAX", "3") or 3)
+              and _promote_if_red_at_base(script, _mode)):
+            # It passed HERE and failed at BASE: a real reproduction that the
+            # current patch fixes. Without this branch a correct replacement for
+            # a wrong reproduction is unreachable -- see REPRO_PROMOTE note.
+            state["repro_script"] = script
+            state["repro_mode"] = _mode
+            state["seen_red"] = True
+            state["repro_green"] = True
+            # A promotion IS a red->green transition, proven on both trees, so
+            # it freezes the verification target exactly as verify_fix does.
+            # Without this the freshly promoted reproduction could be
+            # overwritten by any later script that happens to exit nonzero.
+            state["repro_locked"] = True
+            state["rejected_repro_streak"] = 0
+            state["promotions"] = state.get("promotions", 0) + 1
+            result["registered_as_reproduction"] = True
+            result["note"] = (
+                "PROMOTED. This script FAILS on the unmodified base tree and "
+                "PASSES with your patch applied, so it is a valid reproduction "
+                "that your fix resolves. It is now the registered reproduction "
+                "and it is GREEN.")
         else:
             state["rejected_repro_streak"] = state.get("rejected_repro_streak", 0) + 1
             # Rejected AFTER a red reproduction is already registered. This
@@ -908,6 +995,35 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         _k = text.find(old)
                         if _k >= 0:
                             _pl = text[:_k].count("\n") + 1
+                    if not _pl and old:
+                        # h_patch matches the anchor FUZZILY, so an exact find
+                        # misses whenever indentation or trailing whitespace
+                        # differs. Compare the first real line stripped.
+                        _tl = text.splitlines()
+                        _first = next((x.strip() for x in old.splitlines()
+                                       if x.strip()), "")
+                        if _first:
+                            for _n, _line in enumerate(_tl, 1):
+                                if _line.strip() == _first:
+                                    _pl = _n
+                                    break
+                        if not _pl:
+                            # last resort: a def/class named anywhere in the
+                            # snippet, found by its declaration in the file
+                            import re as _re
+                            _names = _re.findall(
+                                r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)",
+                                old, _re.M)
+                            for _nm in _names:
+                                _rx = _re.compile(
+                                    r"^\s*(?:async\s+)?(?:def|class)\s+%s\b"
+                                    % _re.escape(_nm))
+                                for _n, _line in enumerate(_tl, 1):
+                                    if _rx.match(_line):
+                                        _pl = _n
+                                        break
+                                if _pl:
+                                    break
                     if _pl:
                         import graph_tools as _gt
                         _gfiles = _gt.test_files_near(repo_dir, path, _pl)
