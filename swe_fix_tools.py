@@ -702,6 +702,25 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return _run(f"{env_dir}/bin/python -c {shlex.quote(script)}",
                     timeout=timeout)
 
+    _EXC_LINE = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)(?::|$)")
+    _TB_CHROME = ("Traceback (most recent", "During handling",
+                  "The above exception")
+
+    def _exception_type(err):
+        """Class name of the exception that ended the script, or None.
+
+        Parsed, not matched -- see the note on _SETUP_ERRORS.
+        """
+        for line in reversed((err or "").splitlines()):
+            if not line.strip() or line[:1].isspace():
+                continue
+            if line.startswith(_TB_CHROME):
+                continue
+            m = _EXC_LINE.match(line.strip())
+            if m:
+                return m.group(1).rsplit(".", 1)[-1]
+        return None
+
     _SETUP_ERRORS = (
         "ModuleNotFoundError", "ImportError", "ImproperlyConfigured",
         "AppRegistryNotReady", "NameError", "SyntaxError", "IndentationError",
@@ -721,13 +740,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if not has_tb and out.strip():
             # ran to completion, printed something, chose to exit nonzero
             return "assertion", "explicit nonzero exit with output"
-        for name in _SETUP_ERRORS:
-            # anchored: a dotted module prefix is allowed, but the name must be
-            # the whole token before the colon. Substring matching would call
-            # django's TemplateSyntaxError a SyntaxError and refuse a perfectly
-            # good reproduction.
-            if re.search(r"(?:^|\n)(?:[\w.]+\.)?%s: " % re.escape(name), err):
-                return "broken", name
+        _exc = _exception_type(err)
+        if _exc in _SETUP_ERRORS:
+            return "broken", _exc
         if has_tb and not frames:
             return "broken", "traceback never reaches repo source"
         if frames:
