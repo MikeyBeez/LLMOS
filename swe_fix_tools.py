@@ -1914,6 +1914,58 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         except Exception:
             return {}
 
+    def _seed_reproduction(problem_statement):
+        """Runner-only. Register the REPORTER's reproduction, if they wrote one.
+
+        Returns a dict describing what happened -- always, so a no-fire is
+        visible in the log rather than silent.
+        """
+        try:
+            import repro_extract as _rx
+        except Exception as _e:
+            return {"seeded": False, "why": "repro_extract unavailable: %s" % _e}
+        if state.get("seen_red"):
+            return {"seeded": False, "why": "a reproduction is already registered"}
+        blocks = _rx.code_blocks(problem_statement or "")
+        if not blocks:
+            return {"seeded": False, "why": "no runnable code in the issue text"}
+        skipped = []
+        for blk in blocks[:3]:
+            if blk["kind"] == "testcase":
+                # needs a home inside the repo test package for its relative
+                # imports; _exec_repro runs pytest from /tmp on purpose.
+                skipped.append("testcase (needs in-repo placement)")
+                continue
+            src = blk["source"]
+            try:
+                r = _exec_repro(src, "script", timeout=180)
+            except Exception as _e:
+                skipped.append("exec failed: %s" % _e)
+                continue
+            if r.returncode == 0:
+                skipped.append("%s exits 0 (does not show the bug)" % blk["kind"])
+                continue
+            tier, why = _repro_quality(r)
+            if tier == "broken":
+                skipped.append("%s is broken (%s)" % (blk["kind"], why))
+                continue
+            state["repro_script"] = src
+            state["repro_mode"] = "script"
+            state["repro_tier"] = tier
+            state["seen_red"] = True
+            state["repro_green"] = False
+            state["seeded_from_issue"] = True
+            if state.get("baseline_pass") is None:
+                try:
+                    _capture_baseline([fl.split(":", 1)[0] for fl in
+                                       _repo_frames(r.stderr or "", repo_dir)])
+                except Exception:
+                    pass
+            return {"seeded": True, "kind": blk["kind"], "tier": tier,
+                    "why": blk["why"], "chars": len(src)}
+        return {"seeded": False, "why": "; ".join(skipped) or "no usable block"}
+
+    handlers["_seed_reproduction"] = _seed_reproduction         # runner-only
     handlers["_neighborhood_of_edit"] = _neighborhood_of_edit   # runner-only
     handlers["swe.neighborhood"] = h_neighborhood        # agent-facing
     handlers["_capture_diff"] = _capture_diff            # runner-only

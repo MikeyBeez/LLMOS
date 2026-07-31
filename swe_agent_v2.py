@@ -1608,6 +1608,18 @@ def run_one(inst):
     fix_goal = (f"Problem:\n{inst['problem_statement'][:3000]}\n\n"
                 "Reproduce this bug with a failing script, fix the source, "
                 "then verify your reproduction passes.")
+    # REPRO_SEED: the reporter usually wrote a reproduction. Use theirs instead
+    # of asking the model to invent one -- 46% of Lite statements contain a
+    # runnable candidate, and django-16873 spent 3504s inventing a worse one
+    # than the SimpleTestCase sitting in its own issue text. A seeded script
+    # still has to earn registration: nonzero exit, and not the broken tier.
+    if os.environ.get("REPRO_SEED") == "1":
+        try:
+            _sd = f_handlers["_seed_reproduction"](inst["problem_statement"])
+            print(" -- REPRO_SEED %s" % _sd, flush=True)
+        except Exception as _e:
+            print(" -- REPRO_SEED error: %s: %s" % (type(_e).__name__, _e),
+                  flush=True)
     _tri, _inv = _triage(inst["problem_statement"], inst["repo"])
     if not _tri:
         print(" -- triage empty; retrying once", flush=True)
