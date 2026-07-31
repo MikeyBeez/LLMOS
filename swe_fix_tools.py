@@ -702,6 +702,38 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return _run(f"{env_dir}/bin/python -c {shlex.quote(script)}",
                     timeout=timeout)
 
+    _SETUP_ERRORS = (
+        "ModuleNotFoundError", "ImportError", "ImproperlyConfigured",
+        "AppRegistryNotReady", "NameError", "SyntaxError", "IndentationError",
+        "TabError", "FileNotFoundError")
+
+    def _repro_quality(r):
+        """Why did this script exit nonzero? See the REPRO_QUALITY note.
+
+        Returns (tier, detail). Only "broken" should be refused.
+        """
+        err = (r.stderr or "")
+        out = (r.stdout or "")
+        has_tb = "Traceback (most recent call last)" in err
+        frames = _repo_frames(err, repo_dir)
+        if "AssertionError" in err:
+            return "assertion", "AssertionError"
+        if not has_tb and out.strip():
+            # ran to completion, printed something, chose to exit nonzero
+            return "assertion", "explicit nonzero exit with output"
+        for name in _SETUP_ERRORS:
+            # anchored: a dotted module prefix is allowed, but the name must be
+            # the whole token before the colon. Substring matching would call
+            # django's TemplateSyntaxError a SyntaxError and refuse a perfectly
+            # good reproduction.
+            if re.search(r"(?:^|\n)(?:[\w.]+\.)?%s: " % re.escape(name), err):
+                return "broken", name
+        if has_tb and not frames:
+            return "broken", "traceback never reaches repo source"
+        if frames:
+            return "repo_exception", frames[0]
+        return "unknown", "nonzero exit, no traceback and no output"
+
     def _promote_if_red_at_base(script, mode):
         """Is this passing script actually a valid reproduction of the bug?
 
@@ -810,7 +842,27 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         r = _exec_repro(script, _mode, timeout=180)
         registered = False
         _invalid_pytest = (_mode == "pytest" and r.returncode == 5)  # no tests
+        _tier, _why = ("unknown", "")
         if r.returncode != 0 and not _invalid_pytest:
+            _tier, _why = _repro_quality(r)
+        if (os.environ.get("REPRO_QUALITY") == "1" and _tier == "broken"
+                and not state["seen_red"]):
+            # The script did not get far enough to say anything about the bug.
+            # Registering it would make it the permanent verification target --
+            # exactly what cost django-16873 five repertoire segments.
+            print("   -- REPRO_QUALITY refused a broken script (%s)" % _why,
+                  flush=True)
+            return {"exit": r.returncode,
+                    "stdout": (r.stdout or "")[-2000:],
+                    "stderr": (r.stderr or "")[-2000:],
+                    "registered_as_reproduction": False,
+                    "note": ("This script did not fail because of the bug -- it "
+                             "failed to RUN (%s). A reproduction has to reach "
+                             "the code under test and disagree with it, ideally "
+                             "with an assert. Fix the script setup and run "
+                             "reproduce again." % _why)}
+        if r.returncode != 0 and not _invalid_pytest:
+            state["repro_tier"] = _tier
             state["repro_script"] = script
             state["repro_mode"] = _mode
             state["seen_red"] = True
@@ -829,6 +881,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if _fl:
             result["fault_locations"] = _fl
         if registered:
+            result["repro_tier"] = _tier
             result["note"] = ("This failing script is now the registered "
                               "reproduction. After you patch, verify_fix will "
                               "rerun EXACTLY this script — it must exit 0.")
