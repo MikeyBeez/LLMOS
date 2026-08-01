@@ -413,7 +413,26 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     # what the un-segmented harness would have submitted. Worst case we tie
     # the old behaviour; we can no longer lose to it.
     candidates = []
+    # WALL CLOCK FOR THE WHOLE WALK (env REPERTOIRE_WALL seconds, 0 = off).
+    # PHASE_WALL_CAP below bounds ONE phase_run. This walk calls phase_run
+    # once per segment and again for every extension, so PHASE_WALL_CAP
+    # bounds a SEGMENT and the instance ceiling is 6-12x whatever you set.
+    # Measured 2026-08-01: django-16139 ran 9465s under PHASE_WALL_CAP=1800
+    # and the cap never fired. This is the instance-level bound that was
+    # intended. It BREAKS rather than returns so the fallback below still
+    # restores the best candidate -- a timed-out walk must not hand back a
+    # clean tree (see the NON-DESTRUCTIVE INVARIANT note above).
+    import time as _wt
+    _walk_t0 = _wt.time()
+    _walk_cap = float(os.environ.get("REPERTOIRE_WALL", "0") or 0)
+    _walk_capped = False
     while i < len(ops):
+        if _walk_cap and (_wt.time() - _walk_t0) > _walk_cap:
+            _walk_capped = True
+            log(" -- REPERTOIRE wall cap %.0fs reached after %d segment(s) "
+                "of %d; stopping the walk and falling back"
+                % (_walk_cap, i, len(ops)))
+            break
         name, how = ops[i]
         # Segment 1 is the SAFETY ANCHOR: it runs on the plain goal with no
         # operation directive, and its candidate is what we fall back to. It
@@ -501,8 +520,9 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             handlers["_revert_tree"]()          # clean slate for the next kind
         except Exception as e:
             log(" -- revert failed (%s); continuing without it" % type(e).__name__)
-    log(" -- REPERTOIRE exhausted %d operations without a green reproduction"
-        % len(ops))
+    log(" -- REPERTOIRE %s %d of %d operations without a green reproduction"
+        % ("stopped on the wall cap after" if _walk_capped else "exhausted",
+           i, len(ops)))
     # restore the fallback rather than submitting an empty tree
     if candidates:
         _green = [c for c in candidates if len(c) > 2 and c[2]]
