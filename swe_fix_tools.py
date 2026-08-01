@@ -1966,6 +1966,18 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return {"seeded": False, "why": "; ".join(skipped) or "no usable block"}
 
     handlers["_seed_reproduction"] = _seed_reproduction         # runner-only
+    def _sibling_body_check(rel_path, written_text, edited_line=None):
+        """Runner-only. Did the model just paste a NEARBY function's body?
+
+        Returns {} when there is nothing worth saying.
+        """
+        try:
+            import sibling_body as _sb
+            return _sb.check(repo_dir, rel_path, written_text, edited_line)
+        except Exception:
+            return {}
+
+    handlers["_sibling_body_check"] = _sibling_body_check       # runner-only
     handlers["_neighborhood_of_edit"] = _neighborhood_of_edit   # runner-only
     handlers["swe.neighborhood"] = h_neighborhood        # agent-facing
     handlers["_capture_diff"] = _capture_diff            # runner-only

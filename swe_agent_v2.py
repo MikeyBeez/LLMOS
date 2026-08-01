@@ -422,6 +422,63 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     # intended. It BREAKS rather than returns so the fallback below still
     # restores the best candidate -- a timed-out walk must not hand back a
     # clean tree (see the NON-DESTRUCTIVE INVARIANT note above).
+    def _green_audit(msgs, meta):
+        """INCOMPLETE-FIX GUARD (env GREEN_AUDIT, default off).
+
+        Measured: 20 of 74 misses (27%) ended repro_green=True,
+        given_tests_ok=True, resolved=False -- both signals satisfied by a
+        HALF-fix. A green reproduction proves the covered path is fixed; it
+        says nothing about the paths the reproduction never exercised. One
+        bounded audit phase per instance: enumerate what the issue mentions
+        that the reproduction does not touch, extend, re-verify.
+        """
+        if os.environ.get("GREEN_AUDIT") != "1" or state.get("green_audited"):
+            return msgs, meta
+        state["green_audited"] = True
+        _t = int(os.environ.get("GREEN_AUDIT_TURNS", "14"))
+        _goal = (
+            "STOP -- do not submit yet. Your reproduction passes, but a "
+            "reproduction can pass while covering only PART of the issue. "
+            "Re-read the problem statement. List every distinct example, "
+            "input variant, and symptom it mentions -- every command form, "
+            "every data value, every case variant, every code path named. "
+            "For EACH one, state whether your reproduction script actually "
+            "exercises it. EXTEND the reproduction to cover anything it "
+            "misses, run it, and if the extended version fails, fix the "
+            "source until it passes. If everything was already covered, say "
+            "so and submit.")
+        log(" -- GREEN_AUDIT: green nominates, audit confirms coverage "
+            "(%d turns)" % _t)
+        try:
+            _r, msgs2, meta2 = phase_run(cpu, tools, tool2sys, handlers,
+                                         system_prompt, _goal, _t,
+                                         log=log, init_messages=msgs, **kw)
+            msgs, meta = msgs2, meta2
+            try:
+                handlers["swe.verify_fix"](None, {})
+            except Exception:
+                pass
+            log(" -- GREEN_AUDIT done: repro_green=%s"
+                % bool(state.get("repro_green")))
+        except Exception as e:
+            log(" -- GREEN_AUDIT failed (%s); accepting green as-is"
+                % type(e).__name__)
+        return msgs, meta
+
+    def _oracle_ok():
+        """One bit, harness-side. None = gate off or inconclusive."""
+        if os.environ.get("ORACLE_GATE") != "1" or "_oracle_probe" not in handlers:
+            return None
+        try:
+            r = handlers["_oracle_probe"]()
+        except Exception as e:
+            log(" -- ORACLE_GATE probe failed (%s)" % type(e).__name__)
+            return None
+        log(" -- ORACLE_GATE: hidden tests %s (harness-side; content never "
+            "entered the context)"
+            % ("PASS" if r else "FAIL" if r is False else "inconclusive"))
+        return r
+
     import time as _wt
     _walk_t0 = _wt.time()
     _walk_cap = float(os.environ.get("REPERTOIRE_WALL", "0") or 0)
@@ -458,13 +515,55 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 "your reproduction, and stop when it passes."
                 % (name.upper(), how))
         log(" -- REPERTOIRE segment %d/%d: %s" % (i + 1, len(ops), name))
+        # Give this segment no more time than the WALK has left. Without this
+        # the wall is only a floor: measured 2026-08-01, segment 1 ended at
+        # 1944s under a 2400s wall, so segment 2 started with a fresh 1800s
+        # of its own and the real bound was wall + cap.
+        _seg_cap = None
+        if _walk_cap:
+            _left = _walk_cap - (_wt.time() - _walk_t0)
+            _env_cap = float(os.environ.get("PHASE_WALL_CAP", "0") or 0)
+            _seg_cap = min(_env_cap, _left) if _env_cap else _left
+            if _seg_cap <= 0:
+                _walk_capped = True
+                log(" -- REPERTOIRE wall cap %.0fs exhausted before segment "
+                    "%d; stopping the walk and falling back" % (_walk_cap, i + 1))
+                break
         reason, msgs, meta = phase_run(cpu, tools, tool2sys, handlers,
                                        system_prompt, seg_goal, turns_this,
+                                       wall_cap=_seg_cap,
                                        log=log, init_messages=msgs,
                                        success=_corroborated(state, handlers, log),
                                        **kw)
         if reason == "solved" or state.get("repro_green"):
             log(" -- REPERTOIRE solved at segment %d (%s)" % (i + 1, name))
+            _orc = _oracle_ok()
+            if _orc is False:
+                # The graded tests disagree with the model's green: the
+                # incomplete-fix class, caught in the act. Bank the candidate
+                # (green-nominated, so the fallback still prefers it) and
+                # keep walking. After the revert the bug is back, so the
+                # registered reproduction is genuinely red again -- the
+                # walk's own bookkeeping stays truthful.
+                try:
+                    _cand = handlers["_capture_diff"]()
+                    if _cand.strip():
+                        candidates.append((name, _cand, True))
+                        log(" -- segment %d (%s): oracle-refused candidate "
+                            "banked (%d bytes)" % (i + 1, name, len(_cand)))
+                except Exception as _e:
+                    log(" -- candidate capture failed (%s)" % type(_e).__name__)
+                state["repro_green"] = False
+                state.pop("green_seen", None)
+                try:
+                    handlers["_revert_tree"]()
+                except Exception as _e:
+                    log(" -- revert failed (%s); continuing" % type(_e).__name__)
+                extended = False
+                i += 1
+                continue
+            if _orc is None:
+                msgs, meta = _green_audit(msgs, meta)
             return "declared", msgs, meta
         if reason in ("no_call",):
             return reason, msgs, meta
@@ -489,7 +588,17 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             if state.get("repro_green"):
                 log(" -- REPERTOIRE solved at segment %d (%s) on harness verify"
                     % (i + 1, name))
-                return "declared", msgs, meta
+                _orc = _oracle_ok()
+                if _orc is False:
+                    # fall through: the normal end-of-segment logic banks the
+                    # candidate and reverts, and the walk continues.
+                    state["repro_green"] = False
+                    log(" -- ORACLE_GATE: overriding the harness-verify green; "
+                        "the walk continues")
+                else:
+                    if _orc is None:
+                        msgs, meta = _green_audit(msgs, meta)
+                    return "declared", msgs, meta
 
         # (b) AN OPERATION IS NOT SPENT UNTIL IT WAS ACTUALLY ATTEMPTED.
         # Observed: two segments burned their budget (one for 18 turns) without
@@ -542,7 +651,8 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
 
 
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
-              budget, gate=None, log=print, checkpoint=None, worksheet=None,
+              budget, wall_cap=None,
+              gate=None, log=print, checkpoint=None, worksheet=None,
               emit=None, stall_window=None, init_messages=None,
               success=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
@@ -573,7 +683,11 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     # Time is the honest bound.
     import time as _time
     _phase_t0 = _time.time()
-    _wall_cap = float(os.environ.get("PHASE_WALL_CAP", "0") or 0)
+    # An explicit cap from the caller wins over the env. The repertoire walk
+    # knows its own deadline and must be able to hand a segment less than the
+    # full PHASE_WALL_CAP, or the walk overshoots by a whole segment.
+    _wall_cap = (float(wall_cap) if wall_cap is not None
+                 else float(os.environ.get("PHASE_WALL_CAP", "0") or 0))
     searched_sigs = {}   # error signature -> turn first searched
     _catalog = {}        # out<turn> -> full tool result, recall()-able
     _seen_sigs = set()   # result signatures seen so far (no-progress watchdog)
@@ -749,6 +863,32 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                     log("SIBLING_SWEEP no-fire (no class or no unchanged sites)")
             except Exception as _e:
                 log("SIBLING_SWEEP error: %s: %s" % (type(_e).__name__, _e))
+        # SIBLING BODY (env SIBLING_BODY, default off). django-16910 resolves
+        # 2 of 9 runs. Diffing its archive shows three misses with an IDENTICAL
+        # structure to a resolved patch, differing only in that they ALSO
+        # pasted the first loop of the neighbouring _get_defer_select_mask --
+        # their comments even say QuerySet.defer() where the resolved one says
+        # only(). That is a RETRIEVAL error between two adjacent near-identical
+        # methods, not a reasoning error, and no amount of test plumbing
+        # touches it. Across the 622-patch archive the signature carries a
+        # 4.3x enrichment for misses (3.4% vs 0.8%).
+        #
+        # It WARNS. It fires on correct patches too, because porting a
+        # sibling's shared tail is legitimate -- so it names the copied lines
+        # and lets the model decide, rather than pretending to know.
+        if (os.environ.get("SIBLING_BODY") == "1" and tool == "patch"
+                and isinstance(result, dict) and "edited" in result):
+            try:
+                _sbr = handlers["_sibling_body_check"](
+                    result.get("edited"), args.get("new_snippet"),
+                    result.get("edited_line"))
+                if _sbr:
+                    result["sibling_body_warning"] = _sbr["note"]
+                    log("SIBLING_BODY %s <- %s (%d of %d lines)"
+                        % (_sbr["edited_function"], _sbr["sibling"],
+                           _sbr["shared_unique_lines"], _sbr["written_lines"]))
+            except Exception as _e:
+                log("SIBLING_BODY error: %s: %s" % (type(_e).__name__, _e))
         # GRAPHIFY INJECT (env GRAPHIFY_INJECT, default off). Same failure as
         # SIBLING_SWEEP above -- fixed one site, missed the sibling -- reached
         # from the other direction. The sweep finds unchanged sites of the same
@@ -1191,6 +1331,38 @@ def score(inst, repo, env_vars, env_kind="uv"):
     return ok, len(diff), tail
 
 
+def oracle_probe(inst, repo, env_vars, env_kind="uv"):
+    """ORACLE GATE: grade the CURRENT tree with the hidden tests, harness-side,
+    then restore. Verdict-only; test content never reaches the model.
+
+    score() applies the test patch to the tree, so afterwards this reverses it
+    (`git apply -R _t.patch`) and deletes _t.patch, closing the window where a
+    later tool call could read it. score()'s own revert_test_paths() at final
+    grading is a second net under this one. Returns True/False, or None when
+    inconclusive (test patch did not apply -- nothing to reverse).
+    """
+    try:
+        ok, _pb, tail = score(inst, repo, env_vars, env_kind=env_kind)
+    except Exception as e:
+        print(" -- ORACLE probe error: %s: %s" % (type(e).__name__, e), flush=True)
+        ok, tail = None, "probe error"
+    tp = os.path.join(repo, "_t.patch")
+    try:
+        if "did not apply" not in (tail or "") and os.path.exists(tp):
+            r = sh("git apply -R _t.patch", cwd=repo)
+            if r.returncode != 0:
+                # never `git checkout .` here -- that would destroy the
+                # model's own patch. revert only test paths.
+                revert_test_paths(repo)
+        if os.path.exists(tp):
+            os.remove(tp)
+    except Exception as e:
+        print(" -- ORACLE restore error: %s: %s" % (type(e).__name__, e), flush=True)
+    if ok is None or "did not apply" in (tail or ""):
+        return None
+    return bool(ok)
+
+
 def _clean_tail(tail):
     """End score_tail at the last real test-summary line; drop trailing
     server-log noise (e.g. the local-httpbin flasgger warning) that otherwise
@@ -1619,6 +1791,11 @@ def run_one(inst):
     f_handlers, f_state = make_fix_handlers(
         repo, env_vars=b_state["env_vars"],
         env_kind=b_state.get("active_env_kind", "uv"), repo=inst["repo"])
+    # ORACLE GATE (env ORACLE_GATE, default off): harness-side probe the walk
+    # consults when a green reproduction would stop the search. Verdict-only;
+    # content never reaches the context (see oracle_probe).
+    f_handlers["_oracle_probe"] = lambda: oracle_probe(
+        inst, repo, b_state["env_vars"], b_state.get("active_env_kind", "uv"))
     # New CPU instance for phase 2 — separate context, fresh system prompt.
     cpu2 = ToolCallCPU(tools=FIX_TOOLS, tool2sys=FIX_TOOL2SYS,
                        system_prompt=FIX_SYSTEM_PROMPT, model=MODEL, host=HOST,
