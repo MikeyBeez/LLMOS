@@ -36,7 +36,7 @@ class LlamaCppCPU(OllamaCPU):
 
     def __init__(self, model="ornith:35b", host="http://127.0.0.1:8080",
                  grammar_path=None, cache_prompt=True,
-                 num_predict=4096, num_ctx=131072,
+                 num_predict=4096, num_ctx=65536,
                  seed=0, max_retries=1, log=None, keep_alive="24h"):
         super().__init__(model=model, host=host, seed=seed, max_retries=max_retries,
                          log=log, keep_alive=keep_alive,
@@ -99,11 +99,31 @@ class LlamaCppCPU(OllamaCPU):
         #  "prompt_n": P, "timings": {"predicted_ms":..,"prompt_ms":..}, ...}
         text = resp.get("content", "") or ""
         timings = resp.get("timings", {}) or {}
+        _ptok = resp.get("tokens_evaluated") or resp.get("prompt_n") or 0
+        _trunc = bool(resp.get("truncated"))
         meta = {
-            "prompt_tokens": resp.get("tokens_evaluated") or resp.get("prompt_n"),
+            "prompt_tokens": _ptok,
             "eval_tokens":   resp.get("tokens_predicted"),
             "eval_ms":       timings.get("predicted_ms"),
             "load_ms":       timings.get("prompt_ms"),
             "cache_n":       resp.get("cache_n"),          # tokens reused from prompt cache
+            "truncated":     _trunc,
+            "ctx_used_frac": (round(float(_ptok) / self.num_ctx, 3)
+                              if self.num_ctx else None),
         }
+        # CONTEXT PRESSURE. num_ctx here is only a DECLARATION -- the server's
+        # window is fixed at startup. If the prompt exceeds it, llama-server
+        # drops tokens and answers anyway, and nothing upstream can tell. That
+        # is an unobservable failure, so say it out loud. Measured 2026-08-06
+        # over 51,182 requests: p50=392, p95=36,907, p99=67,332, max=114,596;
+        # 576 (1.13%) were above 65,536.
+        if _trunc:
+            print(" !! CONTEXT TRUNCATED by the server: prompt %s tokens "
+                  "against declared num_ctx %s. The model did NOT see its "
+                  "whole context for this step."
+                  % (_ptok, self.num_ctx), flush=True)
+        elif self.num_ctx and _ptok > 0.9 * self.num_ctx:
+            print(" -- CONTEXT PRESSURE: prompt %s tokens = %.0f%% of num_ctx "
+                  "%s." % (_ptok, 100.0 * _ptok / self.num_ctx, self.num_ctx),
+                  flush=True)
         return text, meta

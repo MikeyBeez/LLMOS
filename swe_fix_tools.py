@@ -900,6 +900,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             result["note"] = ("This failing script is now the registered "
                               "reproduction. After you patch, verify_fix will "
                               "rerun EXACTLY this script — it must exit 0.")
+            if os.environ.get("REPRO_STRENGTH") == "1":
+                try:
+                    import spec_probe as _sp
+                    _rn = _sp.repro_assertion_note(script, r.stderr or "")
+                    if _rn:
+                        result["reproduction_strength_warning"] = _rn
+                        print(" -- REPRO_STRENGTH: %s" % _rn[:110], flush=True)
+                except Exception as _re:
+                    print(" -- REPRO_STRENGTH error: %s: %s"
+                          % (type(_re).__name__, _re), flush=True)
         elif not state["seen_red"]:
             result["note"] = ("Script exited 0 — the bug is not demonstrated. "
                               "Write a script that FAILS (nonzero exit, e.g. "
@@ -1978,6 +1988,128 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {}
 
     handlers["_sibling_body_check"] = _sibling_body_check       # runner-only
+
+    def _spec_probe(rel_path, written_text, edited_line=None):
+        try:
+            import spec_probe as _sp
+            return _sp.probe(repo_dir, rel_path, edited_line, written_text)
+        except Exception:
+            return None
+
+    handlers["_spec_probe"] = _spec_probe                       # runner-only
+
+    def _coverage_gap():
+        """Added lines the registered reproduction never executes.
+
+        Returns {relpath: [line, ...]} (capped) or {} when there is no gap
+        or no way to measure one. Never raises. Stdlib `trace` only, so it
+        works in every instance venv, conda 3.6 through uv 3.12.
+        """
+        try:
+            script = state.get("repro_script")
+            if not script:
+                return {}
+            d = _run("git -C %s diff --unified=0" % shlex.quote(repo_dir),
+                     timeout=60).stdout or ""
+            added, cur = {}, None
+            for ln in d.splitlines():
+                if ln.startswith("+++ b/"):
+                    p = ln[6:].strip()
+                    cur = p if p.endswith(".py") else None
+                elif ln.startswith("@@") and cur:
+                    m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
+                    if m:
+                        s = int(m.group(1))
+                        c = int(m.group(2) or 1)
+                        added.setdefault(cur, set()).update(range(s, s + c))
+            if not added:
+                return {}
+            import json as _json
+            import tempfile
+            fd, sp = tempfile.mkstemp(suffix="_llmos_cov_src.py", dir="/tmp")
+            os.close(fd)
+            open(sp, "w").write(script)
+            fd, op = tempfile.mkstemp(suffix="_llmos_cov.json", dir="/tmp")
+            os.close(fd)
+            if state.get("repro_mode") == "pytest":
+                runner = ("import pytest\n"
+                          "t.runfunc(pytest.main, [%r, '-x', '-q'])\n" % sp)
+            else:
+                runner = ("import runpy\n"
+                          "t.runfunc(runpy.run_path, %r, "
+                          "run_name='__main__')\n" % sp)
+            wrapper = (
+                "import trace, json\n"
+                "t = trace.Trace(count=1, trace=0)\n"
+                "try:\n"
+                + "".join("    " + l + "\n"
+                          for l in runner.strip().splitlines() if l) +
+                "except BaseException:\n"
+                "    pass\n"
+                "out = {}\n"
+                "for (fn, line) in t.results().counts:\n"
+                "    out.setdefault(fn, []).append(line)\n"
+                "json.dump(out, open(%r, 'w'))\n" % op)
+            _run("%s/bin/python -c %s" % (env_dir, shlex.quote(wrapper)),
+                 timeout=420)
+            try:
+                cov = _json.load(open(op))
+            except Exception:
+                return {}
+            finally:
+                for f in (sp, op):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+            hit = {}
+            rd = os.path.realpath(repo_dir)
+            for fn, lines in cov.items():
+                rf = os.path.realpath(fn)
+                if rf.startswith(rd + os.sep):
+                    hit.setdefault(os.path.relpath(rf, rd),
+                                   set()).update(lines)
+            gap = {}
+            for f, lns in added.items():
+                missed = sorted(lns - hit.get(f, set()))
+                try:
+                    fl = open(os.path.join(repo_dir, f), encoding="utf-8",
+                              errors="replace").read().splitlines()
+                    missed = [l for l in missed
+                              if l <= len(fl) and fl[l - 1].strip()
+                              and not fl[l - 1].strip().startswith("#")]
+                except OSError:
+                    pass
+                if missed:
+                    gap[f] = missed[:12]
+            return gap
+        except Exception as _cge:
+            print(" -- COVERAGE GAP error (returning empty): %s: %s"
+                  % (type(_cge).__name__, _cge), flush=True)
+            return {}
+
+    handlers["_coverage_gap"] = _coverage_gap                   # runner-only
+
+    def _diff_hygiene():
+        try:
+            import diff_hygiene as _dhm
+            return _dhm.check(repo_dir)
+        except Exception:
+            return {}
+
+    handlers["_diff_hygiene"] = _diff_hygiene                   # runner-only
+
+    def _diff_repair(rel_path):
+        try:
+            import diff_hygiene as _dhm
+            _n = _dhm.repair(repo_dir, rel_path)
+            _n += _dhm.repair_syntax(repo_dir, rel_path)
+            _n += _dhm.repair_wrap_block(repo_dir, rel_path)
+            return _n
+        except Exception:
+            return 0
+
+    handlers["_diff_repair"] = _diff_repair                     # runner-only
     handlers["_neighborhood_of_edit"] = _neighborhood_of_edit   # runner-only
     handlers["swe.neighborhood"] = h_neighborhood        # agent-facing
     handlers["_capture_diff"] = _capture_diff            # runner-only

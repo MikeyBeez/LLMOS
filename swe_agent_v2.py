@@ -38,7 +38,7 @@ from repo_bootstrap_tools import _ddg_search
 
 HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
 MODEL = "ornith:35b"
-NUMCTX = 131072
+NUMCTX = 65536          # must match llama-server --ctx-size (see start_ornith.sh)
 # Sampling temperature. The vendor model card for Ornith-1.0 recommends 0.6
 # (top_p 0.95 / top_k 20 are already sent by tool_call_cpu). The old
 # hardcoded 1.0 came from the TTS-2 regime -- two draws deliberately
@@ -514,6 +514,61 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 "DIFFERENT KIND of fix now: %s. %s  Make the change, re-run "
                 "your reproduction, and stop when it passes."
                 % (name.upper(), how))
+        _oref = state.pop("oracle_refused", False)
+        _ocol = state.pop("oracle_collateral", False)
+        if _oref and _ocol:
+            # THE 5131 CLASS: F2P passed, P2P regressed. The fix idea is
+            # RIGHT; the diff around it is what fails. Say exactly that.
+            seg_goal += (
+                "\n\nIMPORTANT: your previous fix DID address the reported "
+                "bug -- but it broke EXISTING behaviour elsewhere. That "
+                "damage comes from COLLATERAL edits in your diff, not from "
+                "the fix idea. Keep the same fix, but reapply it as the "
+                "SMALLEST possible diff: do not delete blank lines, do not "
+                "re-space or re-wrap anything, change nothing beyond the "
+                "exact line(s) the fix requires. One line changed is the "
+                "target.")
+        if _oref and not _ocol:
+            # ORACLE-REFUSAL HINT (astropy-14365, measured): the issue example
+            # is lowercase COMMANDS only, so every issue-derived repro passes
+            # on the IGNORECASE hunk alone -- but the issue states a GENERAL
+            # property, and qdp.py has exactly 3 case-assuming sites, one of
+            # which is the missing hunk. Tell the model to generalize.
+            seg_goal += (
+                "\n\nIMPORTANT: a previous fix in this run satisfied the "
+                "reported example, yet the problem was NOT fully solved. The "
+                "issue likely states a GENERAL property beyond its one "
+                "example -- re-read it. Enumerate EVERY other site in the "
+                "file you edited that assumes the opposite of that property "
+                "(other comparisons, other string literals, other regexes) "
+                "and fix them ALL in one patch together with the original "
+                "fix. Two gaps that recur: (1) if you changed an OPERATOR "
+                "method (__mul__, __truediv__, __add__, __eq__, ...), the "
+                "SIBLING operator methods of the same class usually embed "
+                "the SAME pattern and need the IDENTICAL change -- read "
+                "each sibling and fix it too; (2) check the TYPE you "
+                "return against the package idiom: if neighbouring code "
+                "returns a library object where you return a bare Python "
+                "literal (1, True, None), return what the neighbours "
+                "return; (3) if the codebase defines a CANONICAL object "
+                "equal to the value your fix produces (a singleton, a "
+                "module-level constant), return THAT object itself -- "
+                "callers may check identity with `is`, and an "
+                "equal-but-fresh value fails that check; (4) treat the "
+                "issue text with a GRAIN OF SALT -- it is a user report, "
+                "not a contract, and the remedy it proposes may be one the "
+                "maintainers would reject. When the issue conflicts with "
+                "the codebase own conventions (deprecation-before-removal, "
+                "API style, naming), prefer the conventions.")
+        _cgap = state.pop("coverage_gap_note", None)
+        if _oref and _cgap:
+            seg_goal += (
+                "\n\nFACT: these line(s) YOUR PATCH ADDED were never "
+                "executed by your reproduction: %s. A line you never "
+                "watched run is a line you know nothing about -- it can "
+                "hold a crash your reproduction cannot see. Either extend "
+                "the reproduction so it actually crosses those lines, or "
+                "delete them if the fix does not need them." % _cgap)
         log(" -- REPERTOIRE segment %d/%d: %s" % (i + 1, len(ops), name))
         # Give this segment no more time than the WALK has left. Without this
         # the wall is only a floor: measured 2026-08-01, segment 1 ended at
@@ -537,6 +592,21 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                                        **kw)
         if reason == "solved" or state.get("repro_green"):
             log(" -- REPERTOIRE solved at segment %d (%s)" % (i + 1, name))
+            # COVERAGE GAP (django-11910): green only proves the lines the
+            # reproduction CROSSED. Compute which added lines it never
+            # executed; if the oracle refuses this green, those lines are
+            # stated as facts in the next segment goal.
+            try:
+                _gap = (handlers.get("_coverage_gap", lambda: {})()
+                        if os.environ.get("COVERAGE_GAP") == "1" else {})
+            except Exception:
+                _gap = {}
+            if _gap:
+                _gtxt = "; ".join("%s: line(s) %s" % (f, ", ".join(map(str, l)))
+                                  for f, l in sorted(_gap.items()))
+                log(" -- COVERAGE GAP: added lines never executed by the "
+                    "reproduction -- %s" % _gtxt)
+                state["coverage_gap_note"] = _gtxt
             _orc = _oracle_ok()
             if _orc is False:
                 # The graded tests disagree with the model's green: the
@@ -555,6 +625,9 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                     log(" -- candidate capture failed (%s)" % type(_e).__name__)
                 state["repro_green"] = False
                 state.pop("green_seen", None)
+                state["oracle_refused"] = True
+                if "PASS_TO_PASS regressed" in getattr(oracle_probe, "last_tail", ""):
+                    state["oracle_collateral"] = True
                 try:
                     handlers["_revert_tree"]()
                 except Exception as _e:
@@ -639,6 +712,52 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
         _name, _diff = _pick[0], _pick[1]
         log(" -- fallback: %d candidate(s), %d with a green reproduction; using %s"
             % (len(candidates), len(_green), _name))
+        # BANK AUDIT (env BANK_AUDIT + ORACLE_GATE, both default off).
+        # Measured: we bank up to 20 candidates and then pick by list
+        # position. 12113 banked a candidate touching the file the accepted
+        # fix edits and submitted a different one. Ask the oracle which of
+        # them actually passes -- the same one bit we already spend at green
+        # points, over work we have already done.
+        if (os.environ.get("BANK_AUDIT") == "1"
+                and os.environ.get("ORACLE_GATE") == "1"
+                and "_oracle_probe" in handlers and len(candidates) > 1):
+            try:
+                _seen, _ord = set(), []
+                for _c in (_green + [c for c in candidates if c not in _green]):
+                    _k = " ".join((_c[1] or "").split())
+                    if _k and _k not in _seen:
+                        _seen.add(_k)
+                        _ord.append(_c)
+                _cap = int(os.environ.get("BANK_AUDIT_MAX", "6") or 6)
+                _ord = _ord[:_cap]
+                log(" -- BANK_AUDIT: %d distinct candidate(s), probing up to %d"
+                    % (len(_seen), len(_ord)))
+                for _idx, _c in enumerate(_ord):
+                    try:
+                        handlers["_revert_tree"]()
+                    except Exception:
+                        pass
+                    _rr = handlers["_restore_diff"](_c[1])
+                    if not _rr.get("restored"):
+                        log(" -- BANK_AUDIT: candidate %d (%s) would not apply"
+                            % (_idx + 1, _c[0]))
+                        continue
+                    _v = handlers["_oracle_probe"]()
+                    log(" -- BANK_AUDIT: candidate %d (%s, %d bytes) -> %s"
+                        % (_idx + 1, _c[0], len(_c[1]),
+                           "PASS" if _v else "FAIL" if _v is False
+                           else "inconclusive"))
+                    if _v:
+                        _name, _diff = _c[0], _c[1]
+                        log(" -- BANK_AUDIT: submitting candidate %d (%s) "
+                            "instead of the positional pick" % (_idx + 1, _c[0]))
+                        break
+                else:
+                    log(" -- BANK_AUDIT: no banked candidate passed; keeping "
+                        "the positional pick (%s)" % _name)
+            except Exception as _ba:
+                log(" -- BANK_AUDIT error (%s: %s); keeping positional pick"
+                    % (type(_ba).__name__, _ba))
         try:
             _r = handlers["_restore_diff"](_diff)
             log(" -- restored candidate from segment 1 (%s): %s"
@@ -863,6 +982,23 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                     log("SIBLING_SWEEP no-fire (no class or no unchanged sites)")
             except Exception as _e:
                 log("SIBLING_SWEEP error: %s: %s" % (type(_e).__name__, _e))
+        # DIFF HYGIENE (env DIFF_HYGIENE, default off): xarray-5131 fixed the
+        # bug (F2P passed) and failed grading on collateral whitespace -- a
+        # deleted blank line broke 3 doctests. Deterministic lint on the diff.
+        if (os.environ.get("DIFF_HYGIENE") == "1" and tool == "patch"
+                and isinstance(result, dict) and "edited" in result):
+            try:
+                _dh = handlers["_diff_hygiene"]()
+                if os.environ.get("DIFF_REPAIR") == "1":
+                    _fx = handlers["_diff_repair"](result.get("edited"))
+                    if _fx:
+                        log("DIFF_REPAIR restored %d drifted line(s)" % _fx)
+                        _dh = handlers["_diff_hygiene"]()
+                if _dh:
+                    result["diff_hygiene_warning"] = _dh["note"]
+                    log("DIFF_HYGIENE %s" % "; ".join(_dh["problems"]))
+            except Exception as _e:
+                log("DIFF_HYGIENE error: %s" % type(_e).__name__)
         # SIBLING BODY (env SIBLING_BODY, default off). django-16910 resolves
         # 2 of 9 runs. Diffing its archive shows three misses with an IDENTICAL
         # structure to a resolved patch, differing only in that they ALSO
@@ -889,6 +1025,24 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                            _sbr["shared_unique_lines"], _sbr["written_lines"]))
             except Exception as _e:
                 log("SIBLING_BODY error: %s: %s" % (type(_e).__name__, _e))
+        # SPEC PROBE (env SPEC_PROBE, default off). DETERMINISTIC spec
+        # reconstruction, born 2026-08-03: four misses in one night each
+        # failed exactly ONE hidden assertion. AST facts, not advice text:
+        # (1) edit touched an operator dunder -> name the class's un-edited
+        # sibling dunders; (2) edited snippet returns a bare Python literal
+        # in a file with library-singleton evidence -> name the line. Fires
+        # only when computably true; warns, never blocks.
+        if (os.environ.get("SPEC_PROBE") == "1" and tool == "patch"
+                and isinstance(result, dict) and "edited" in result):
+            try:
+                _spn = handlers["_spec_probe"](
+                    result.get("edited"), args.get("new_snippet"),
+                    result.get("edited_line"))
+                if _spn:
+                    result["spec_probe_warning"] = _spn
+                    log("SPEC_PROBE fired on %s" % result.get("edited"))
+            except Exception as _e:
+                log("SPEC_PROBE error: %s: %s" % (type(_e).__name__, _e))
         # GRAPHIFY INJECT (env GRAPHIFY_INJECT, default off). Same failure as
         # SIBLING_SWEEP above -- fixed one site, missed the sibling -- reached
         # from the other direction. The sweep finds unchanged sites of the same
@@ -1292,6 +1446,38 @@ def score(inst, repo, env_vars, env_kind="uv"):
     # enforce that at the deliverable boundary too, so a scratch script that
     # wrote into tests/ cannot void an otherwise scoreable source patch.
     revert_test_paths(repo)
+    # COMPILE GATE (2026-08-03, django-11630): the end-of-walk fallback can
+    # reapply a banked candidate without the patch path's compile check, and
+    # the scorer then graded a tree that did not even PARSE. Zero-trust
+    # applies to our own plumbing: every changed .py must compile before the
+    # deliverable diff is taken. One deterministic repair attempt on failure;
+    # if that fails too, scoring proceeds and fails honestly.
+    try:
+        import py_compile as _pyc
+        _chg = [f.strip() for f in
+                (sh("git -C %s diff --name-only" % repo, timeout=60).stdout
+                 or "").splitlines() if f.strip().endswith(".py")]
+        for _f in _chg:
+            _fp = os.path.join(repo, _f)
+            try:
+                _pyc.compile(_fp, doraise=True)
+            except Exception as _ce:
+                print(" -- COMPILE GATE: %s does not parse (%s); attempting "
+                      "deterministic repair" % (_f, type(_ce).__name__),
+                      flush=True)
+                try:
+                    import diff_hygiene as _dhm
+                    _nfix = _dhm.repair_syntax(repo, _f)
+                    _nfix += _dhm.repair_wrap_block(repo, _f)
+                    _pyc.compile(_fp, doraise=True)
+                    print(" -- COMPILE GATE: repaired %s (%d fix(es))"
+                          % (_f, _nfix), flush=True)
+                except Exception:
+                    print(" -- COMPILE GATE: %s STILL broken; grading will "
+                          "fail honestly" % _f, flush=True)
+    except Exception as _ge:
+        print(" -- COMPILE GATE error (non-fatal): %s" % type(_ge).__name__,
+              flush=True)
     diff = sh(f"git -C {repo} diff", timeout=60).stdout
     open(os.path.join(TRACES, inst["instance_id"] + ".patch"), "w").write(diff)
     open(os.path.join(repo, "_t.patch"), "w").write(inst["test_patch"])
@@ -1324,6 +1510,28 @@ def score(inst, repo, env_vars, env_kind="uv"):
             p2p_ok, p2p_tail = bool(r2["ok"]), _clean_tail(r2["tail"])
         except Exception as e:
             p2p_ok, p2p_tail = True, "p2p run failed: %s" % type(e).__name__
+    if res["ok"] and p2p and not p2p_ok:
+        # BASE CONTROL (2026-08-02): the GOLD patch itself failed this P2P leg
+        # on xarray-5131 ("3 failed" -- env-sensitive doctests), so every
+        # refusal ever issued there was the ENVIRONMENT, not the model.
+        # referee.py has run base controls since day one; the in-env oracle
+        # now gets the same rule: a P2P failure only counts against the model
+        # if the same P2P set PASSES on the clean base tree.
+        try:
+            sh("git stash -q --include-untracked", cwd=repo)
+            rb = _tr.run_tests(repo, env_kind, p2p, env_vars=env_vars,
+                               repo=inst["repo"], timeout=600,
+                               log_path=os.path.join(
+                                   SCORE_LOGS, inst["instance_id"] + ".p2pbase.log"))
+            sh("git stash pop -q", cwd=repo)
+            if not rb["ok"]:
+                p2p_ok = True
+                p2p_tail = "P2P fails at BASE too -> env-broken, excused"
+        except Exception as _e:
+            try:
+                sh("git stash pop -q", cwd=repo)
+            except Exception:
+                pass
     ok = bool(res["ok"]) and p2p_ok
     tail = _clean_tail(res["tail"])
     if res["ok"] and not p2p_ok:
@@ -1358,6 +1566,7 @@ def oracle_probe(inst, repo, env_vars, env_kind="uv"):
             os.remove(tp)
     except Exception as e:
         print(" -- ORACLE restore error: %s: %s" % (type(e).__name__, e), flush=True)
+    oracle_probe.last_tail = tail or ""
     if ok is None or "did not apply" in (tail or ""):
         return None
     return bool(ok)
@@ -1622,7 +1831,15 @@ def _load_atlas(repo, exclude_iid=None):
                 rows.append(r)
     except OSError:
         pass
-    if not rows:
+    _idio = ""
+    try:
+        with open(os.path.join(adir, "idioms",
+                               repo.replace("/", "__") + ".md"),
+                  encoding="utf-8") as _f:
+            _idio = _f.read().strip()
+    except OSError:
+        pass
+    if not rows and not _idio:
         return ""
     lines = ["CODE ATLAS for %s — where past issues were actually fixed" % repo,
              "(from this system's own resolved runs; treat as evidence, "
@@ -1630,7 +1847,13 @@ def _load_atlas(repo, exclude_iid=None):
     for r in sorted(rows, key=lambda x: x.get("ts", 0)):
         lines.append("- %s\n    -> %s" % (r.get("title", ""),
                                            ", ".join((r.get("files") or [])[:4])))
-    return "\n".join(lines)[:3500]
+    out = "\n".join(lines)
+    if _idio:
+        head = ("PACKAGE IDIOMS for %s (hand-curated from past "
+                "failures; follow unless the code you read "
+                "contradicts them):\n" % repo) + _idio
+        out = head + ("\n\n" + out if rows else "")
+    return out[:4000]
 
 
 def _archive_prior_trace(inst):
@@ -2076,6 +2299,16 @@ def _seed_churn(iid, f_state):
         top = max(files_hit, key=files_hit.get) if files_hit else "?"
         note = ("%d prior FAILED attempts on this instance; their patches "
                 "went to %s (%d edits)" % (misses, top, files_hit.get(top, 0)))
+        # FILE-LEVEL EXHAUSTION (django-16820, measured): 14 failed attempts,
+        # 30+ patches, every one into squashmigrations.py -- the issue SAYS
+        # squash, but the mechanism lives in the optimizer it calls. When
+        # every attempt dug one hole and none resolved, say the hole is dry.
+        if misses >= 6 and files_hit.get(top, 0) >= misses:
+            note += (". Every one of those attempts patched %s and every one "
+                     "FAILED: treat that file as EXHAUSTED. The real "
+                     "mechanism most likely lives in a module it imports or "
+                     "calls -- follow the imports one level down and make "
+                     "your fix there instead." % top)
         if seeded:
             fn = max(seeded, key=seeded.get)
             note += (". The function %s has been condition-edited %d time(s) "
