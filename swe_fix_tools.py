@@ -1993,7 +1993,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         try:
             import spec_probe as _sp
             return _sp.probe(repo_dir, rel_path, edited_line, written_text)
-        except Exception:
+        except Exception as _e:
+            # Never swallow silently: a crash and an honest no-fire must not
+            # look the same in the log. COVERAGE_GAP ran as a no-op for a
+            # whole run behind exactly this pattern.
+            print(" -- _spec_probe error: %s: %s" % (type(_e).__name__, _e),
+                  flush=True)
             return None
 
     handlers["_spec_probe"] = _spec_probe                       # runner-only

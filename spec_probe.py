@@ -109,6 +109,57 @@ def _overriding_subclasses(repo_dir, rel_path, cls_name, meth_name, cap=40):
     return hits
 
 
+def _self_calls(node):
+    """Names in `self.<name>(...)` anywhere under node."""
+    out = set()
+    for n in ast.walk(node):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "self"):
+            out.add(n.func.attr)
+    return out
+
+
+def _sibling_helper_gap(src, lo, hi, min_callers=4, cap=2, min_methods=5):
+    """(class, method, [(n_callers, helper), ...]) -- helpers that many sibling
+    methods of the enclosing class call and the edited method does not."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return (None, None, [])
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        methods, target = [], None
+        for m in cls.body:
+            if not isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            methods.append(m)
+            a = m.lineno
+            b = getattr(m, "end_lineno", m.lineno)
+            if not (hi < a or lo > b):
+                target = m
+        if target is None or len(methods) < min_methods:
+            continue
+        if target.name.startswith("__"):
+            return (None, None, [])
+        mine = _self_calls(target)
+        counts = {}
+        for m in methods:
+            if m is target:
+                continue
+            for nm in _self_calls(m):
+                counts[nm] = counts.get(nm, 0) + 1
+        # min_callers=4 and no dunders: measured on 250 random django
+        # methods, 3-caller and __getattr__-shaped hits were the noise.
+        gaps = sorted(((c, nm) for nm, c in counts.items()
+                       if c >= min_callers and nm not in mine
+                       and nm != target.name
+                       and not nm.startswith('__')), reverse=True)
+        return (cls.name, target.name, gaps[:cap])
+    return (None, None, [])
+
+
 def probe(repo_dir, rel_path, edited_line, written_text):
     """Return a warning note (str) or None. Never raises."""
     try:
@@ -229,6 +280,34 @@ def probe(repo_dir, rel_path, edited_line, written_text):
                         "override instead of (or as well as) the base class."
                         % (_c, _m, "a subclass" if len(_ov) == 1
                            else "subclasses", "; ".join(_ov)))
+        # F: CONVENTION GAP. django-12908: the whole accepted fix was one
+        # line -- a guard that ten sibling methods of the same class already
+        # call and this one did not. If the class has a convention and your
+        # method skips it, that omission may BE the bug.
+        if lo and written_text:
+            _fc, _fm, _fg = _sibling_helper_gap(src, lo, hi)
+            if _fc and _fm and _fg:
+                notes.append(
+                    "SPEC PROBE: in class %s, %s -- but %s does not call %s. "
+                    "If that is the class's convention for this kind of "
+                    "method, its ABSENCE may be the bug, and adding the call "
+                    "may be the whole fix."
+                    % (_fc,
+                       "; ".join("self.%s() is called by %d other method(s)"
+                                 % (n, c) for c, n in _fg),
+                       _fm,
+                       "it" if len(_fg) == 1 else "them"))
+
+        # G: numbered migrations are applied history, not live code.
+        if re.search(r"(?:^|/)migrations/\d{3,4}_\w+\.py$", rel_path or ""):
+            notes.append(
+                "SPEC PROBE: %s is a NUMBERED MIGRATION -- an applied "
+                "historical record, not live code. The framework records "
+                "applied migrations by name, so editing this file changes "
+                "nothing for any database that has already run it. The fix "
+                "belongs in the code that GENERATES migrations, or in a NEW "
+                "migration." % rel_path)
+
         return "\n".join(notes) or None
     except Exception:
         return None
