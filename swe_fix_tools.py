@@ -1793,11 +1793,101 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 % "; ".join(unmet))
         return out
 
+    def h_edit_line(pcb, args):
+        """LINE-SCOPED FRAGMENT EDIT (2026-08-08, gated EDIT_LINE=1).
+
+        describe-don't-transcribe. The model names ONE line and the fragment
+        on it to change; the harness writes the bytes. The model never retypes
+        the line's indentation or its untouched remainder -- which is where
+        xarray-5131 died: the working fix was produced 31 times across 12
+        attempts and every green was refused because re-typing drifted
+        whitespace, with hints proven powerless (4 of 4 failed).
+
+        WHY NOT THE EXISTING patch MODES: old_snippet needs GLOBAL uniqueness,
+        which a short fragment like '<' or 'None' never has; line mode makes
+        you retype the whole line including indentation. Scoping uniqueness to
+        ONE line makes short fragments safe -- and "change a comparison
+        operator" is 73 of the 300 gold patches.
+
+        FAILURE IS A LOUD NO-OP: a fragment that is missing, or repeated on
+        that line, writes NOTHING and returns the line's exact bytes via
+        repr() so tabs and trailing spaces are visible. Wrong input yields no
+        edit rather than a corrupt file -- the opposite of line-range
+        replacement, where a mistyped indent is written happily and surfaces
+        later as an IndentationError.
+
+        The candidate file is compiled IN MEMORY first, so an edit that would
+        break the parse is refused rather than applied then reverted. The
+        write itself is delegated to h_patch in line mode, so verification
+        invalidation, neighbour baselines, sibling sweeps and trigger firing
+        behave exactly as for a normal patch.
+        """
+        path = str(args.get("file", ""))
+        try:
+            ln = int(args.get("line"))
+        except (TypeError, ValueError):
+            return {"error": "line must be an integer (1-based); read_range "
+                             "gives you the number"}
+        old = str(args.get("old") or "")
+        new = str(args.get("new", ""))
+        if not old:
+            return {"error": "old must be a non-empty fragment on that line"}
+        if _is_test_path(path):
+            return {"error": "refusing to edit a test file - fix the source, "
+                             "not the tests"}
+        full = os.path.join(repo_dir, path)
+        if not os.path.isfile(full):
+            return {"error": _missing_file_hint(path, repo_dir)}
+        try:
+            with open(full, encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except OSError as e:
+            return {"error": str(e)}
+        _lines = text.splitlines(True)
+        if ln < 1 or ln > len(_lines):
+            return {"error": ("line %d is outside %s (file has %d lines). "
+                              "read_range first." % (ln, path, len(_lines)))}
+        raw = _lines[ln - 1]
+        body = raw.rstrip(chr(10))
+        eol = raw[len(body):]
+        hits = body.count(old)
+        if hits == 0:
+            return {"error": "fragment not found on line %d" % ln,
+                    "line_is": repr(body),
+                    "hint": "nothing was written; copy the fragment exactly "
+                            "as it appears above"}
+        if hits > 1:
+            return {"error": ("fragment occurs %d times on line %d - lengthen "
+                              "it until it is unique ON THAT LINE"
+                              % (hits, ln)),
+                    "line_is": repr(body),
+                    "hint": "nothing was written"}
+        new_body = body.replace(old, new, 1)
+        if path.endswith(".py"):
+            _cand = ("".join(_lines[:ln - 1]) + new_body + eol
+                     + "".join(_lines[ln:]))
+            try:
+                compile(_cand, path, "exec")
+            except SyntaxError as _se:
+                return {"error": ("refused: that edit would stop %s parsing "
+                                  "(%s at line %s)"
+                                  % (path, _se.msg, _se.lineno)),
+                        "would_have_been": repr(new_body),
+                        "hint": "nothing was written"}
+        res = h_patch(pcb, {"file": path, "start_line": ln, "end_line": ln,
+                            "new_snippet": new_body + eol})
+        if isinstance(res, dict) and not res.get("error"):
+            res["edited_line"] = ln
+            res["before"] = repr(body)
+            res["after"] = repr(new_body)
+        return res
+
     handlers = {
         "swe.reproduce":   h_reproduce,
         "swe.locate":      h_locate,
         "swe.read_range":  h_read_range,
         "swe.patch":       h_patch,
+        "swe.edit_line":   h_edit_line,
         "swe.verify_fix":  h_verify_fix,
         "swe.run_tests":   h_run_tests,
         "swe.neighbor_tests": h_neighbor_tests,
@@ -2188,6 +2278,29 @@ FIX_TOOLS = [
             "end":   {"type": "integer"},
         }, "required": ["file", "start", "end"]}}},
     {"type": "function", "function": {
+        "name": "edit_line",
+        "description": (
+            "Change ONE fragment on ONE line. You give the line number and the "
+            "exact fragment to replace; the harness rewrites the bytes. You do "
+            "NOT retype the line's indentation or the rest of the line, so "
+            "whitespace cannot drift. PREFER THIS over patch for in-place "
+            "edits: changing an argument, an operator, a literal, a name. The "
+            "fragment must occur EXACTLY ONCE on that line - it need NOT be "
+            "unique in the file, which is what makes short fragments like '<' "
+            "or 'None' usable. If it is missing or repeated, NOTHING is "
+            "written and you get the line's exact bytes back. An edit that "
+            "would stop the file parsing is refused, not applied. Any "
+            "successful edit invalidates verification - rerun verify_fix."),
+        "parameters": {"type": "object", "properties": {
+            "file": {"type": "string"},
+            "line": {"type": "integer",
+                     "description": "1-based line number from read_range"},
+            "old":  {"type": "string",
+                     "description": "exact fragment on that line to replace"},
+            "new":  {"type": "string",
+                     "description": "replacement (empty string deletes it)"},
+        }, "required": ["file", "line", "old", "new"]}}},
+    {"type": "function", "function": {
         "name": "patch",
         "description": (
             "Replace source text in a SOURCE file (test files are refused). "
@@ -2235,6 +2348,14 @@ FIX_TOOLS = [
         }, "required": ["summary"]}}},
 ]
 
+# EDIT_LINE gate (2026-08-08, default OFF). The tool menu is a behaviour
+# surface -- adding a tool changes routing for every instance -- so this ships
+# switched off like BANK_AUDIT and RANK_ORACLE. The handler stays registered
+# either way; only the advertised schema is withheld.
+if os.environ.get("EDIT_LINE", "0") != "1":
+    FIX_TOOLS = [_t for _t in FIX_TOOLS
+                 if _t.get("function", {}).get("name") != "edit_line"]
+
 
 FIX_TOOL2SYS = {
     "check": "swe.check",
@@ -2242,6 +2363,7 @@ FIX_TOOL2SYS = {
     "locate":      "swe.locate",
     "read_range":  "swe.read_range",
     "patch":       "swe.patch",
+    "edit_line":   "swe.edit_line",
     "verify_fix":  "swe.verify_fix",
     "run_tests":   "swe.run_tests",
     "neighbor_tests": "swe.neighbor_tests",
