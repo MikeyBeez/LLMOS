@@ -486,6 +486,14 @@ def render_worksheet(state):
     lines.append("  patches tried : %s" % pline)
     if state.get("format_warning"):
         lines.append("  format check  : %s" % state["format_warning"][:220])
+    # WORKSHEET_VARIANT (2026-08-08, default "control" = byte-identical).
+    # "evidence" re-surfaces the last failure text next to the request for the
+    # next patch. Everything else about the template is unchanged so the two
+    # arms differ by exactly one line.
+    if (os.environ.get("WORKSHEET_VARIANT", "control") == "evidence"
+            and state.get("last_verify_tail")):
+        lines.append("  last failure  : %s   [observed]"
+                     % state["last_verify_tail"])
     lines.append("  next          : %s" % nxt)
     if state.get("triage_goal") or state.get("chain_mechanism"):
         lines.append("  --")
@@ -1605,6 +1613,14 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["probe_green"] = (pr.returncode == 0)
         regressed = _check_regressions() if green else []
         gate_ok = _gate()
+        # WORKSHEET EVIDENCE (2026-08-08). verify_fix already RETURNS stdout to
+        # the model, but only once -- it then decays into history while the
+        # worksheet, which is regenerated every turn, reports only that the
+        # failure repeated ("same failure x2") and never what it said. Persist
+        # the last meaningful line so the evidence variant can re-surface it.
+        _tl = [_l for _l in ((r.stdout or "") + chr(10)
+                             + (r.stderr or "")).splitlines() if _l.strip()]
+        state["last_verify_tail"] = _tl[-1].strip()[:160] if _tl else ""
         result = {"ok": green, "exit": r.returncode,
                   "stdout": (r.stdout or "")[-2000:],
                   "stderr": (r.stderr or "")[-1500:],
