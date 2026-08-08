@@ -1033,6 +1033,48 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         return {"path": path, "start": start, "end": end, "total_lines": total,
                 "content": window[:6000]}
 
+    def _region_now(path, center=None, snippet=None, span=10):
+        """Read the CURRENT bytes around a target and return them numbered.
+
+        Every repeat/undo refusal in h_patch tells the model to go and look.
+        Measured on sympy: 192 of 390 patch calls failed, and 145 of those
+        were repeats or undos -- the model does not go and look. Worse, the
+        must_observe branch DEADLOCKS: the harness demands an observation,
+        the model patches again instead, and both sides repeat until the
+        walk gives up. Handing back the bytes IS the observation, so the
+        loop cannot survive on a stale mental model.
+
+        Gated THRASH_ECHO, default off. Returns None when disabled or when
+        the region cannot be located, in which case callers fall through to
+        their original refusal unchanged.
+        """
+        if os.environ.get("THRASH_ECHO", "0") != "1":
+            return None
+        try:
+            with open(os.path.join(repo_dir, path), encoding="utf-8",
+                      errors="ignore") as _fh:
+                _ls = _fh.read().splitlines()
+            if center is None and snippet:
+                _first = next((s.strip() for s in snippet.splitlines()
+                               if s.strip()), "")
+                if _first:
+                    for _i, _l in enumerate(_ls, 1):
+                        if _first in _l:
+                            center = _i
+                            break
+            if center is None:
+                return None
+            _a = max(1, int(center) - span)
+            _b = min(len(_ls), int(center) + span)
+            if _b < _a:
+                return None
+            return {"file": path, "lines": "%d-%d" % (_a, _b),
+                    "text": chr(10).join("%5d| %s" % (_n, _ls[_n - 1])
+                                         for _n in range(_a, _b + 1))}
+        except Exception as _e:
+            print(" -- region echo failed: %s" % type(_e).__name__, flush=True)
+            return None
+
     def h_patch(pcb, args):
         """Surgical edit. Any successful patch invalidates prior verification —
         the reproduction must be rerun."""
@@ -1321,6 +1363,24 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         "whitespace. Only patch once you have SEEN the real "
                         "text.")}
         if state.get("must_observe"):
+            # THRASH BREAK (2026-08-08, gated THRASH_ECHO). This branch used to
+            # deadlock: it demands an observation the model will not spend a
+            # turn making, so it patches again and is refused again. Observe
+            # FOR it -- hand back the current bytes and count that as the
+            # observation, clearing the flag so the walk can progress.
+            _reg = _region_now(path, snippet=old)
+            if _reg is not None:
+                state["must_observe"] = False
+                return {"error": ("a previous anchor was refused as a repeat. "
+                                  "Below is what that region ACTUALLY "
+                                  "contains on disk right now. Your snippet "
+                                  "did not match THIS text."),
+                        "already_tried": _anchor_record(state),
+                        "current_file_region": _reg,
+                        "do_this_instead": ("anchor on text you can SEE above, "
+                                            "or use edit_line with a line "
+                                            "number taken from it. Do not "
+                                            "resend the old snippet.")}
             return {"error": ("a previous anchor was refused as a repeat and "
                               "nothing has been observed since."),
                     "already_tried": _anchor_record(state),
