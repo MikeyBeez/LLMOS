@@ -447,8 +447,48 @@ def render_worksheet(state):
         nxt = "register a failing reproduction"
     elif not state.get("repro_green"):
         if state.get("same_verify_count", 0) >= 2:
-            nxt = ("your patch is not reaching the failing code path - re-read "
-                   "fault_locations and change the PATCH, not the reproduction")
+            # PROMPT REPERTOIRE (2026-08-08, gated PROMPT_ROTATE, default off).
+            #
+            # The old behaviour fired ONE alternate imperative and then repeated
+            # it forever. Measured today: "NECESSARY BUT NOT SUFFICIENT" was
+            # issued 1767 times and "go and read_range" 145 times, and neither
+            # changed what the model did. A request the model has already
+            # ignored is not evidence of anything -- repeating it is.
+            #
+            # So rotate, in the order the failure classes actually occur:
+            #   0 incomplete  - 58% of multi-hunk misses are right-place,
+            #                   second location never found
+            #   1 misdiagnosis- the class a fresh retry NEVER rescues (22.9% of
+            #                   failed-both were a clean single assertion)
+            #   2 revert      - escalation when neither framing moved anything
+            # Same select-then-exhaust discipline as the edit repertoire:
+            # intelligence picks the order, exhaustion decides when to stop.
+            _ROT = (
+                ("incomplete",
+                 "your reproduction still fails and your edit IS in place. The "
+                 "fix is more likely INCOMPLETE than wrong: the accepted fix "
+                 "for this kind of bug usually changes more than one place in "
+                 "the same file. Find the sibling that needs the same change "
+                 "and patch it too, keeping the edit you already made."),
+                ("misdiagnosis",
+                 "the same failure again. Consider that your edit is CORRECT "
+                 "and your THEORY is wrong. Re-read the issue and state in one "
+                 "sentence the property it claims should hold, then check "
+                 "whether your patch establishes THAT property rather than the "
+                 "one you assumed."),
+                ("revert",
+                 "stop patching. Say which facts you have OBSERVED by running "
+                 "something and which you ASSUMED, revert any edit you cannot "
+                 "justify from an observation, and re-approach from the "
+                 "reproduction."),
+            )
+            if os.environ.get("PROMPT_ROTATE", "0") == "1":
+                _i = (int(state.get("same_verify_count", 2)) - 2) % len(_ROT)
+                state["prompt_frame"] = _ROT[_i][0]
+                nxt = _ROT[_i][1]
+            else:
+                nxt = ("your patch is not reaching the failing code path - re-read "
+                       "fault_locations and change the PATCH, not the reproduction")
         elif ph:
             nxt = "verify_fix (or improve the patch)"
         else:
@@ -494,6 +534,32 @@ def render_worksheet(state):
             and state.get("last_verify_tail")):
         lines.append("  last failure  : %s   [observed]"
                      % state["last_verify_tail"])
+    # SWEBENCH_MODE (2026-08-08, default off). Once edits are landing and the
+    # reproduction is still red, the open question is WHERE ELSE in this file,
+    # not which file. List the candidate sites rather than exhorting.
+    if (os.environ.get("SWEBENCH_MODE", "0") == "1"
+            and state.get("seen_red") and not state.get("repro_green")
+            and state.get("patch_history") and state.get("_sibling_fn")):
+        _sib = state["_sibling_fn"](state.get("last_edit_file") or "",
+                                    state.get("last_edit_frag") or "")
+        _f = state.get("last_edit_file") or "this file"
+        _defs = state["_defs_fn"](state.get("last_edit_file") or "") \
+            if state.get("_defs_fn") else []
+        if _sib or _defs:
+            lines.append("  your edit may be NECESSARY BUT NOT SUFFICIENT: the "
+                         "accepted fix for this kind of bug usually changes "
+                         "MORE THAN ONE place in %s." % _f)
+        if _sib:
+            lines.append("      same symbol reused at: %s"
+                         % ", ".join("line %d" % _n for _n, _t in _sib))
+        if _defs:
+            lines.append("      NOW LOOK FOR SIBLINGS WITH DIFFERENT NAMES - "
+                         "members of the same family needing the same change "
+                         "(the other operator dunders, the other _print_* "
+                         "methods, the other branch of the same rule). Every "
+                         "definition in this file:")
+            lines.append("      " + ", ".join("%s:%d" % (_nm, _n)
+                                              for _n, _nm in _defs))
     lines.append("  next          : %s" % nxt)
     if state.get("triage_goal") or state.get("chain_mechanism"):
         lines.append("  --")
@@ -1083,12 +1149,65 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             print(" -- region echo failed: %s" % type(_e).__name__, flush=True)
             return None
 
+    _SIB_KW = set(
+        "def class return if else elif for while in not and or is None True "
+        "False self import from as with try except pass raise lambda print "
+        "len str int float bool dict list set tuple type object".split())
+
+    def _sibling_sites(path, frag, limit=5):
+        """SWEBENCH_MODE: deterministic within-file scan for OTHER places the
+        same concept lives.
+
+        Measured 2026-08-08 over 593 archived failed patches: on multi-hunk
+        gold instances 58% are PARTIAL -- the model edited one correct site
+        and never found the second -- against only 20% that missed entirely.
+        Wrong-location rates are identical for wins and misses (12% each), so
+        on multi-hunk bugs the failure is not misplacement, it is abandonment.
+
+        The harness ALREADY tells the model its edit is "NECESSARY BUT NOT
+        SUFFICIENT" on every undo refusal -- that message fired 1767 times and
+        did not work, the same way "go and read_range" failed 145 times.
+        Advice is not the missing piece; LOCATIONS are. So hand back the lines.
+
+        This is Mikey's own sibling-site corollary made mechanical: a single
+        grep of a file already open would have handed ornith the second site.
+        """
+        if os.environ.get("SWEBENCH_MODE", "0") != "1":
+            return []
+        try:
+            toks = [t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}",
+                                          frag or "") if t not in _SIB_KW]
+            if not toks:
+                return []
+            toks = list(dict.fromkeys(toks))
+            with open(os.path.join(repo_dir, path), encoding="utf-8",
+                      errors="ignore") as _fh:
+                _ls = _fh.read().splitlines()
+            done = {l.strip() for l in (frag or "").splitlines() if l.strip()}
+            scored = []
+            for _n, _l in enumerate(_ls, 1):
+                if _l.strip() in done or not _l.strip():
+                    continue
+                hits = sum(1 for t in toks if t in _l)
+                if hits:
+                    scored.append((hits, -_n, _n, _l.strip()[:100]))
+            scored.sort(reverse=True)
+            return [(n, txt) for _h, _neg, n, txt in scored[:limit]]
+        except Exception as _e:
+            print(" -- sibling scan failed: %s" % type(_e).__name__, flush=True)
+            return []
+
     def h_patch(pcb, args):
         """Surgical edit. Any successful patch invalidates prior verification —
         the reproduction must be rerun."""
         path = str(args.get("file", ""))
         old = str(args.get("old_snippet") or "")
         new = str(args.get("new_snippet", ""))
+        state["last_edit_file"] = path
+        # BOTH sides. After the edit lands, the line on disk matches "new",
+        # not "old" -- excluding only old made the just-edited site come
+        # back top-ranked as its own sibling. Caught end-to-end 2026-08-08.
+        state["last_edit_frag"] = (old or "") + chr(10) + (new or "")
         if _is_test_path(path):
             return {"error": "refusing to edit a test file — fix the source, "
                              "not the tests"}
@@ -1958,6 +2077,34 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             res["after"] = repr(new_body)
         return res
 
+    def _file_defs(path, limit=40):
+        """Every def/class in the edited file, with line numbers.
+
+        The harness cannot tell which names are SIBLINGS -- _print_sinc shares
+        no token with _print_sinh, __mul__ none with __truediv__ -- and a token
+        scan that tries to guess finds only re-uses of the SAME symbol. That
+        semantic judgement is the model's strength, not the harness's. So split
+        the work: the harness supplies the complete, mechanical list of names in
+        the file; the model decides which of them are family.
+        """
+        if os.environ.get("SWEBENCH_MODE", "0") != "1":
+            return []
+        try:
+            with open(os.path.join(repo_dir, path), encoding="utf-8",
+                      errors="ignore") as _fh:
+                out = []
+                for _n, _l in enumerate(_fh.read().splitlines(), 1):
+                    m = re.match(r"\s*(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)",
+                                 _l)
+                    if m:
+                        out.append((_n, m.group(2)))
+                return out[:limit]
+        except Exception as _e:
+            print(" -- defs scan failed: %s" % type(_e).__name__, flush=True)
+            return []
+
+    state["_sibling_fn"] = _sibling_sites
+    state["_defs_fn"] = _file_defs
     handlers = {
         "swe.reproduce":   h_reproduce,
         "swe.locate":      h_locate,
