@@ -62,6 +62,59 @@ TRACES = os.path.expanduser("~/swe/traces_v2")
 INJECTED_LOG = os.path.join(os.path.dirname(TRACES), "research", "injected.jsonl")
 
 
+def _entry_key(_e):
+    """Stable key for one accumulated-knowledge entry. SINGLE SOURCE OF TRUTH:
+    the attribution log and the ablation sampler both derive keys here, so a
+    withheld pattern and its logged key can never drift apart."""
+    import hashlib
+    if isinstance(_e, dict):
+        _k = (_e.get("id") or _e.get("key") or _e.get("title")
+              or _e.get("name") or _e.get("pattern") or "")
+    else:
+        _k = str(_e)
+    _k = str(_k).strip().replace("\n", " ")[:120]
+    if not _k:
+        _k = "sha:" + hashlib.sha1(
+            repr(_e).encode("utf-8", "replace")).hexdigest()[:12]
+    return _k
+
+
+def _pattern_ablate(pats, iid):
+    """DETERMINISTIC PATTERN ABLATION (2026-08-08, gated, default OFF).
+
+    patterns_load() returns the SAME global list for every instance, so the
+    attribution log can never attribute anything to an individual pattern:
+    with no instance that lacked pattern N, there is nothing to compare it
+    against. PATTERN_ABLATE=k withholds each pattern INDEPENDENTLY with
+    probability ~k percent, keyed on sha1(instance_id + entry key), so across
+    a corpus every pattern accumulates both a with- and a without- arm while
+    any single instance stays reproducible and resume-safe.
+
+    Independent per-pattern withholding, NOT a fixed held-out subset: a fixed
+    subset confounds each pattern with the instances it happened to miss.
+
+    Returns (kept, withheld). With PATTERN_ABLATE unset this returns
+    (pats, []) and behaviour is bit-identical to before.
+    """
+    try:
+        k = int(os.environ.get("PATTERN_ABLATE", "0"))
+    except ValueError:
+        k = 0
+    if k <= 0 or not pats:
+        return pats, []
+    import hashlib
+    k = min(k, 100)
+    kept, held = [], []
+    for _p in pats:
+        _h = hashlib.sha1(
+            ("%s|%s" % (iid, _entry_key(_p))).encode("utf-8", "replace"))
+        if int(_h.hexdigest()[:8], 16) % 100 < k:
+            held.append(_p)
+        else:
+            kept.append(_p)
+    return kept, held
+
+
 def _attrib_log(iid, repo, source, entries, blob=None):
     """PER-ENTRY ATTRIBUTION (2026-08-08). Record WHICH accumulated knowledge
     entries were injected into WHICH instance, so a later join against the run
@@ -80,16 +133,7 @@ def _attrib_log(iid, repo, source, entries, blob=None):
         if isinstance(entries, dict):
             entries = [entries]
         for _e in (entries or []):
-            if isinstance(_e, dict):
-                _k = (_e.get("id") or _e.get("key") or _e.get("title")
-                      or _e.get("name") or _e.get("pattern") or "")
-            else:
-                _k = str(_e)
-            _k = str(_k).strip().replace("\n", " ")[:120]
-            if not _k:
-                _k = "sha:" + hashlib.sha1(
-                    repr(_e).encode("utf-8", "replace")).hexdigest()[:12]
-            keys.append(_k)
+            keys.append(_entry_key(_e))
         rec = {
             "instance_id": iid,
             "repo": repo,
@@ -2127,10 +2171,16 @@ def run_one(inst):
         print(" -- injected code atlas", flush=True)
         _attrib_log(inst["instance_id"], inst["repo"], "atlas", None, blob=_atlas)
     pats = patterns_load()
+    pats, _pat_held = _pattern_ablate(pats, inst["instance_id"])
     if pats:
         fix_goal += "\n\n" + format_patterns_context(pats)
         print(f" -- injected {len(pats)} engineering patterns", flush=True)
         _attrib_log(inst["instance_id"], inst["repo"], "pattern", pats)
+    if _pat_held:
+        print(f" -- ABLATION withheld {len(_pat_held)} of "
+              f"{len(pats) + len(_pat_held)} engineering patterns", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "pattern_withheld",
+                    _pat_held)
     if _kb:
         fix_goal += "\n\n" + _kb
     from swe_fix_tools import render_worksheet as _rw
