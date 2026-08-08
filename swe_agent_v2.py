@@ -58,6 +58,56 @@ WORK = os.path.expanduser("~/swe/work")
 import spec_env
 
 TRACES = os.path.expanduser("~/swe/traces_v2")
+
+INJECTED_LOG = os.path.join(os.path.dirname(TRACES), "research", "injected.jsonl")
+
+
+def _attrib_log(iid, repo, source, entries, blob=None):
+    """PER-ENTRY ATTRIBUTION (2026-08-08). Record WHICH accumulated knowledge
+    entries were injected into WHICH instance, so a later join against the run
+    results can say whether any given atlas idiom, remedy, playbook or
+    engineering pattern ever changes an outcome. Until now the harness injected
+    e.g. 45 patterns into every instance and measured none of them singly --
+    the same unobservability the harness punishes in the model.
+
+    TELEMETRY ONLY: appends one JSONL row; never touches the prompt or score.
+    Failures PRINT rather than passing silently (the COVERAGE_GAP lesson).
+    """
+    try:
+        import hashlib
+        import json as _json
+        keys = []
+        if isinstance(entries, dict):
+            entries = [entries]
+        for _e in (entries or []):
+            if isinstance(_e, dict):
+                _k = (_e.get("id") or _e.get("key") or _e.get("title")
+                      or _e.get("name") or _e.get("pattern") or "")
+            else:
+                _k = str(_e)
+            _k = str(_k).strip().replace("\n", " ")[:120]
+            if not _k:
+                _k = "sha:" + hashlib.sha1(
+                    repr(_e).encode("utf-8", "replace")).hexdigest()[:12]
+            keys.append(_k)
+        rec = {
+            "instance_id": iid,
+            "repo": repo,
+            "source": source,
+            "n": len(keys) if keys else (1 if blob else 0),
+            "entries": keys,
+            "blob_sha": (hashlib.sha1(
+                blob.encode("utf-8", "replace")).hexdigest()[:12]
+                if isinstance(blob, str) and blob.strip() else None),
+            "blob_chars": len(blob) if isinstance(blob, str) else None,
+        }
+        os.makedirs(os.path.dirname(INJECTED_LOG), exist_ok=True)
+        with open(INJECTED_LOG, "a") as _fh:
+            _fh.write(_json.dumps(rec) + "\n")
+    except Exception as _e:
+        print(" -- attrib log FAILED: %s: %s" % (type(_e).__name__, _e),
+              flush=True)
+
 SCORE_LOGS = os.path.expanduser("~/swe/score_logs")  # full final-scorer output (telemetry only)
 
 
@@ -1934,14 +1984,17 @@ def run_one(inst):
         goal += "\n\n" + format_playbook_context(pb)
         print(f" -- injected build playbook for {inst['repo']} "
               f"(validated {pb['validated_runs']}x)", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "playbook", [pb])
     rems = remedies_for(inst["repo"])
     if rems:
         goal += "\n\n" + format_remedy_context(rems)
         print(f" -- injected {len(rems)} known remedies for {inst['repo']}", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "remedy", rems)
     _kb = _load_repo_knowledge(inst["repo"])
     if _kb:
         goal += "\n\n" + _kb
         print(f" -- injected package knowledge base for {inst['repo']}", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "knowledge_base", None, blob=_kb)
     print(" -- phase 1: bootstrap --", flush=True)
     _emit1 = make_emitter(inst["instance_id"], "bootstrap")
     _emit1("phase_start", {"budget": BOOTSTRAP_BUDGET, "repo": inst["repo"]})
@@ -2072,10 +2125,12 @@ def run_one(inst):
         fix_goal += ("\n\nWHERE TO LOOK FIRST — read_range these before any "
                      "locate/grep:\n" + _atlas)
         print(" -- injected code atlas", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "atlas", None, blob=_atlas)
     pats = patterns_load()
     if pats:
         fix_goal += "\n\n" + format_patterns_context(pats)
         print(f" -- injected {len(pats)} engineering patterns", flush=True)
+        _attrib_log(inst["instance_id"], inst["repo"], "pattern", pats)
     if _kb:
         fix_goal += "\n\n" + _kb
     from swe_fix_tools import render_worksheet as _rw
