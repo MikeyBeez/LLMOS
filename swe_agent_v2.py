@@ -676,10 +676,14 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             seg_goal += (
                 "\n\nFACT: the patch you produced for %s was BYTE-IDENTICAL "
                 "to the one you produced for %s in segment %d. Both were "
-                "reverted and neither made the reproduction pass. That edit "
-                "is spent -- writing it a third time cannot help. Leave the "
-                "line(s) you have already changed twice alone, and change a "
-                "DIFFERENT line, somewhere else, in the manner named above."
+                "reverted and neither made the reproduction pass. Writing "
+                "the same bytes under a different instruction means one of "
+                "exactly two things, and you must decide which BEFORE you "
+                "edit again. Either that edit is RIGHT and your "
+                "REPRODUCTION is checking the wrong thing -- then fix the "
+                "reproduction, not the source. Or the edit is wrong and you "
+                "are repeating it -- then change a different line. Say which "
+                "one it is, then act on it."
                 % (_cn.upper(), _pn.upper(), _pi))
             _repeat_note = None
         log(" -- REPERTOIRE segment %d/%d: %s" % (i + 1, len(ops), name))
