@@ -507,6 +507,14 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     # what the un-segmented harness would have submitted. Worst case we tie
     # the old behaviour; we can no longer lose to it.
     candidates = []
+    # SEG_ECHO (2026-08-08, gated SEG_ECHO, default off). Measured on
+    # sympy-17022: segments 2, 3, 4 and 5 each produced a candidate of exactly
+    # 746 bytes -- the tree is reverted between segments and the model walks
+    # straight back to the identical edit while being told to try a DIFFERENT
+    # KIND of fix. Hash every candidate; when one repeats, state that as a
+    # fact in the next segment goal instead of exhorting a third time.
+    _diff_seen = {}
+    _repeat_note = None
     # WALL CLOCK FOR THE WHOLE WALK (env REPERTOIRE_WALL seconds, 0 = off).
     # PHASE_WALL_CAP below bounds ONE phase_run. This walk calls phase_run
     # once per segment and again for every extension, so PHASE_WALL_CAP
@@ -663,6 +671,17 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 "hold a crash your reproduction cannot see. Either extend "
                 "the reproduction so it actually crosses those lines, or "
                 "delete them if the fix does not need them." % _cgap)
+        if _repeat_note:
+            _pi, _pn, _cn = _repeat_note
+            seg_goal += (
+                "\n\nFACT: the patch you produced for %s was BYTE-IDENTICAL "
+                "to the one you produced for %s in segment %d. Both were "
+                "reverted and neither made the reproduction pass. That edit "
+                "is spent -- writing it a third time cannot help. Leave the "
+                "line(s) you have already changed twice alone, and change a "
+                "DIFFERENT line, somewhere else, in the manner named above."
+                % (_cn.upper(), _pn.upper(), _pi))
+            _repeat_note = None
         log(" -- REPERTOIRE segment %d/%d: %s" % (i + 1, len(ops), name))
         # Give this segment no more time than the WALK has left. Without this
         # the wall is only a floor: measured 2026-08-01, segment 1 ended at
@@ -789,6 +808,18 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                     candidates.append((name, _cand, bool(state.pop("green_seen", False))))
                     log(" -- segment %d (%s): candidate saved (%d bytes)"
                         % (i, name, len(_cand)))
+                    if os.environ.get("SEG_ECHO") == "1":
+                        import hashlib as _hl
+                        _h = _hl.sha1(
+                            _cand.encode("utf-8", "replace")).hexdigest()
+                        _prev = _diff_seen.get(_h)
+                        if _prev:
+                            _repeat_note = (_prev[0], _prev[1], name)
+                            log(" -- SEG_ECHO: segment %d (%s) reproduced the "
+                                "byte-identical diff from segment %d (%s)"
+                                % (i, name, _prev[0], _prev[1]))
+                        else:
+                            _diff_seen[_h] = (i, name)
             except Exception as e:
                 log(" -- candidate capture failed (%s)" % type(e).__name__)
 

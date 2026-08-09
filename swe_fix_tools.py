@@ -1204,10 +1204,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         old = str(args.get("old_snippet") or "")
         new = str(args.get("new_snippet", ""))
         state["last_edit_file"] = path
-        # BOTH sides. After the edit lands, the line on disk matches "new",
-        # not "old" -- excluding only old made the just-edited site come
-        # back top-ranked as its own sibling. Caught end-to-end 2026-08-08.
-        state["last_edit_frag"] = (old or "") + chr(10) + (new or "")
+        # THE NEW SIDE ONLY. After the edit lands the site on disk matches
+        # "new", so excluding new is what stops the just-edited line coming
+        # back top-ranked as its own sibling (the bug caught end-to-end on
+        # 2026-08-08).  Excluding "old" as well looks symmetric and is
+        # actively harmful: a genuine sibling is usually a line whose text is
+        # IDENTICAL to the one just fixed -- the same guard inside the next
+        # operator dunder, the same comparison in the next _print_* method --
+        # so excluding the old text suppresses exactly the lines the scan
+        # exists to surface.  edit_line reaches h_patch in line mode with no
+        # old_snippet, so it never hit this; snippet mode did.
+        state["last_edit_frag"] = new or ""
         if _is_test_path(path):
             return {"error": "refusing to edit a test file — fix the source, "
                              "not the tests"}
