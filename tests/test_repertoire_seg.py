@@ -58,11 +58,13 @@ def walk(diffs, segments=4, **env):
     budget ran out, which is what a segment that fails to fix anything does.
     """
     goals, logs = [], []
+    del CAPS[:]
     seq = {"n": 0}
 
     def fake_phase_run(cpu, tools, tool2sys, handlers, system_prompt, goal,
                        turns, *a, **kw):
         goals.append(goal)
+        CAPS.append(kw.get("wall_cap"))
         return "budget", [], {}
 
     def capture():
@@ -93,6 +95,8 @@ def walk(diffs, segments=4, **env):
         SA.phase_run = real
     return goals, logs
 
+
+CAPS = []          # wall_cap handed to each segment, filled by walk()
 
 SAME = "--- a/x.py\n+++ b/x.py\n@@\n-a\n+b\n"
 OTHER = "--- a/y.py\n+++ b/y.py\n@@\n-c\n+d\n"
@@ -168,6 +172,30 @@ class RepertoireShapeTest(unittest.TestCase):
         self.assertEqual(len(goals), 3)
         self.assertEqual(goals[0], "PLAIN GOAL")
         self.assertIn(SA.REPERTOIRE[2][0].upper(), goals[2])
+
+
+class Seg1BudgetShareTest(unittest.TestCase):
+    """SEG1_WALL_FRAC bounds the safety anchor.
+
+    Segment 1 gets SEG1_TURNS=60 against 20 for the rest, and on fresh32 two
+    instances spent the whole 2400s walk inside it -- twelve operations never
+    ran, and one of the two finished with no patch at all. The anchor has to
+    be a fair baseline, not the entire budget.
+    """
+
+    def test_off_by_default(self):
+        walk([SAME, OTHER, SAME], segments=3, REPERTOIRE_WALL="1000")
+        self.assertGreater(CAPS[0], 900)          # segment 1 gets the lot
+
+    def test_fraction_caps_segment_one_only(self):
+        walk([SAME, OTHER, SAME], segments=3, REPERTOIRE_WALL="1000",
+             SEG1_WALL_FRAC="0.4")
+        self.assertLessEqual(CAPS[0], 400)
+        self.assertGreater(CAPS[1], 400)          # later segments untouched
+
+    def test_no_wall_means_no_cap(self):
+        walk([SAME, OTHER], segments=2, SEG1_WALL_FRAC="0.4")
+        self.assertIsNone(CAPS[0])
 
 
 if __name__ == "__main__":

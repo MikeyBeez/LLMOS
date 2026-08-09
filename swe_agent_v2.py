@@ -696,6 +696,16 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             _left = _walk_cap - (_wt.time() - _walk_t0)
             _env_cap = float(os.environ.get("PHASE_WALL_CAP", "0") or 0)
             _seg_cap = min(_env_cap, _left) if _env_cap else _left
+            # SEG1 BUDGET SHARE (env SEG1_WALL_FRAC, 0 = off). Segment 1 is the
+            # safety anchor and gets SEG1_TURNS=60, ten times what a later
+            # segment gets. Measured on fresh32: 16503 and 15346 spent the
+            # ENTIRE 2400s walk inside segment 1, so the other twelve
+            # operations never ran -- the anchor consumed the walk it exists to
+            # anchor, and 16503 produced patch_bytes=0 for its trouble. Cap the
+            # share so the walk is still a walk.
+            _s1f = float(os.environ.get("SEG1_WALL_FRAC", "0") or 0)
+            if i == 0 and _s1f > 0:
+                _seg_cap = min(_seg_cap, _walk_cap * _s1f)
             if _seg_cap <= 0:
                 _walk_capped = True
                 log(" -- REPERTOIRE wall cap %.0fs exhausted before segment "
