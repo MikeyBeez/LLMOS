@@ -603,6 +603,57 @@ def _missing_file_hint(path, repo_dir):
     return hint
 
 
+def _mpl_force_draw(script, repo):
+    """SYMBOLIC FORCED DRAW (2026-08-11, gated REPRO_FORCE_DRAW, default off).
+
+    Mikey: "You can't just have a rule for drawing. You have to make it
+    deterministic. That means you have to do it with symbolic code. Force it
+    to draw."  The REPRO_CONTRACT hint nudges where the model puts its
+    assertion; THIS makes the draw itself unconditional, harness-side:
+
+      prologue -- pins the Agg backend before anything imports pyplot
+                  (inserted after any __future__/comment lines, which must
+                  stay first);
+      epilogue -- draws EVERY open figure after the model's script body.
+                  A script that exits 0 because the bug is invisible pre-draw
+                  now crashes at the forced draw instead: nonzero exit, a
+                  traceback whose frames point INTO the repo (so
+                  fault_locations fills in), and a deterministic RED that
+                  needed no model cooperation.
+
+    Scripts that already exit nonzero before the epilogue are unchanged in
+    outcome. The wrapped text is what gets REGISTERED, so verify_fix reruns
+    the identical instrumented script and green means green-with-draw.
+    Applied only in script mode -- a pytest-mode file would execute the
+    epilogue at collection time.
+    """
+    if os.environ.get("REPRO_FORCE_DRAW", "0") != "1":
+        return script
+    if repo != "matplotlib/matplotlib":
+        return script
+    pro = ("import matplotlib as _mpl_h\n"
+           "_mpl_h.use('Agg', force=True)\n")
+    epi = ("\n\n# --- harness epilogue: force a draw of every open figure ---\n"
+           "try:\n"
+           "    import matplotlib.pyplot as _plt_h\n"
+           "    for _n_h in _plt_h.get_fignums():\n"
+           "        _plt_h.figure(_n_h).canvas.draw()\n"
+           "except SystemExit:\n"
+           "    raise\n"
+           "except BaseException:\n"
+           "    import traceback as _tb_h\n"
+           "    _tb_h.print_exc()\n"
+           "    import sys as _sys_h\n"
+           "    _sys_h.exit(3)\n")
+    lines = script.splitlines(True)
+    k = 0
+    for k, ln in enumerate(lines):
+        if not (ln.startswith("from __future__") or ln.startswith("#")
+                or not ln.strip()):
+            break
+    return "".join(lines[:k]) + pro + "".join(lines[k:]) + epi
+
+
 def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     """Return handlers bound to this repo checkout. env_vars carries anything
     the bootstrap phase set (e.g. DJANGO_SETTINGS_MODULE). env_kind selects
@@ -955,6 +1006,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _mode = "pytest" if (args.get("as_pytest")
                              or bool(re.search(r"^\s*def test_", script, re.M))
                              ) else "script"
+        if _mode == "script":
+            script = _mpl_force_draw(script, repo)
         r = _exec_repro(script, _mode, timeout=180)
         registered = False
         _invalid_pytest = (_mode == "pytest" and r.returncode == 5)  # no tests

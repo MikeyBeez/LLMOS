@@ -87,5 +87,86 @@ class OtherRepoTest(Base):
         self.assertNotIn("never RENDERS", str(res.get("error", "")))
 
 
+class ForceDrawTest(unittest.TestCase):
+    """REPRO_FORCE_DRAW: the draw is symbolic, not advisory.
+
+    Mikey, 2026-08-11: "You can't just have a rule for drawing. You have to
+    make it deterministic. That means you have to do it with symbolic code.
+    Force it to draw."  The harness wraps every matplotlib script-mode
+    reproduction: Agg pinned in a prologue, every open figure drawn in an
+    epilogue.  A bug invisible before the draw becomes a nonzero exit with
+    repo frames in the traceback, with zero model cooperation.
+    """
+
+    def setUp(self):
+        self._old = os.environ.get("REPRO_FORCE_DRAW")
+        os.environ["REPRO_FORCE_DRAW"] = "1"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("REPRO_FORCE_DRAW", None)
+        else:
+            os.environ["REPRO_FORCE_DRAW"] = self._old
+
+    PLAIN = ("import matplotlib.pyplot as plt\n"
+             "fig, ax = plt.subplots()\n"
+             "print('pre-draw ok')\n")
+
+    def test_off_by_default(self):
+        os.environ.pop("REPRO_FORCE_DRAW", None)
+        self.assertEqual(F._mpl_force_draw(self.PLAIN, "matplotlib/matplotlib"),
+                         self.PLAIN)
+
+    def test_other_repos_untouched(self):
+        self.assertEqual(F._mpl_force_draw(self.PLAIN, "sympy/sympy"),
+                         self.PLAIN)
+
+    def test_wrap_shape(self):
+        w = F._mpl_force_draw(self.PLAIN, "matplotlib/matplotlib")
+        self.assertIn("use('Agg', force=True)", w)
+        self.assertIn("harness epilogue", w)
+        self.assertLess(w.index("Agg"), w.index("import matplotlib.pyplot as plt"))
+        compile(w, "w", "exec")                 # wrapped text must still parse
+
+    def test_future_imports_stay_first(self):
+        s = "from __future__ import annotations\n" + self.PLAIN
+        w = F._mpl_force_draw(s, "matplotlib/matplotlib")
+        self.assertTrue(w.startswith("from __future__"))
+        compile(w, "w", "exec")
+
+    def test_draw_crash_becomes_nonzero_exit(self):
+        """Stub matplotlib whose canvas.draw() raises: plain script exits 0,
+        wrapped script exits 3 with the crash in stderr."""
+        import subprocess, sys, tempfile, textwrap
+        w = F._mpl_force_draw(self.PLAIN, "matplotlib/matplotlib")
+        stub = tempfile.mkdtemp()
+        os.makedirs(os.path.join(stub, "matplotlib"))
+        open(os.path.join(stub, "matplotlib", "__init__.py"), "w").write(
+            "def use(*a, **k):\n    pass\n")
+        open(os.path.join(stub, "matplotlib", "pyplot.py"), "w").write(
+            textwrap.dedent("""
+            class _Canvas:
+                def draw(self):
+                    raise RuntimeError("draw-time crash")
+            class _Fig:
+                canvas = _Canvas()
+            def subplots():
+                return _Fig(), object()
+            def get_fignums():
+                return [1]
+            def figure(n):
+                return _Fig()
+            """))
+        env = dict(os.environ, PYTHONPATH=stub)
+        r0 = subprocess.run([sys.executable, "-c", self.PLAIN], env=env,
+                            capture_output=True, text=True)
+        r1 = subprocess.run([sys.executable, "-c", w], env=env,
+                            capture_output=True, text=True)
+        shutil.rmtree(stub, ignore_errors=True)
+        self.assertEqual(r0.returncode, 0)
+        self.assertEqual(r1.returncode, 3)
+        self.assertIn("draw-time crash", r1.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
