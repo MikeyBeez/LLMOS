@@ -891,6 +891,33 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
         state["stuck"] = 0   # a probe ran -> unstick
+        # REPRO CONTRACT (2026-08-11, gated REPRO_CONTRACT, default off).
+        # Measured on the idiom retest: ADVICE ADOPTION IS PROPORTIONAL TO
+        # HOW MECHANICAL THE ADVICE IS. The one-line "use Agg" idiom was
+        # adopted from the first reproduction (5/7 instances); the structural
+        # "render before asserting" idiom was adopted 2/7 -- one instance
+        # wrote EIGHT non-rendering reproductions with the rule in CAPITALS
+        # in its context. Same lesson as the 1767 ignored undo-refusal
+        # advisories. So enforce the structure at the TOOL, the way h_patch
+        # refuses test edits: the FIRST pyplot reproduction with no render is
+        # refused with the reason; a resubmission is accepted unchanged,
+        # because some matplotlib bugs (constructor raises) genuinely need no
+        # draw and a hard block would trap those.
+        if (os.environ.get("REPRO_CONTRACT", "0") == "1"
+                and repo == "matplotlib/matplotlib"
+                and not state.get("_contract_hinted")
+                and re.search(r"pyplot|plt\.", script)
+                and not re.search(r"savefig|canvas\.draw|draw_idle"
+                                  r"|print_figure|draw\(\)", script)):
+            state["_contract_hinted"] = True
+            return {"error": (
+                "not run: this reproduction never RENDERS. In matplotlib "
+                "nothing is observable until the canvas draws -- property "
+                "reads before a draw see the pre-render state and cannot go "
+                "green over a correct fix. Add fig.canvas.draw() or "
+                "fig.savefig(io.BytesIO(), format=png) before the "
+                "assertion and resubmit. If this bug truly raises before "
+                "any draw, resubmit the script UNCHANGED and it will run.")}
         if state.get("repro_locked") and _format_objects_to_repro(state):
             # One narrow exemption to the latch. The harness's own format
             # check has flagged a coined label, and that same label is the
