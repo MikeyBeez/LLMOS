@@ -121,6 +121,10 @@ class ForceDrawTest(unittest.TestCase):
         self.assertEqual(F._mpl_force_draw(self.PLAIN, "sympy/sympy"),
                          self.PLAIN)
 
+    def test_seaborn_is_matplotlib(self):
+        w = F._mpl_force_draw(self.PLAIN, "mwaskom/seaborn")
+        self.assertIn("harness epilogue", w)
+
     def test_wrap_shape(self):
         w = F._mpl_force_draw(self.PLAIN, "matplotlib/matplotlib")
         self.assertIn("use('Agg', force=True)", w)

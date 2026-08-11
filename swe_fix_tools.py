@@ -629,7 +629,8 @@ def _mpl_force_draw(script, repo):
     """
     if os.environ.get("REPRO_FORCE_DRAW", "0") != "1":
         return script
-    if repo != "matplotlib/matplotlib":
+    if repo not in ("matplotlib/matplotlib", "mwaskom/seaborn"):
+        # seaborn IS matplotlib -- its figures need the same forced draw.
         return script
     pro = ("import matplotlib as _mpl_h\n"
            "_mpl_h.use('Agg', force=True)\n")
