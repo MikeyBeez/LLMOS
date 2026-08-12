@@ -560,6 +560,10 @@ def render_worksheet(state):
                          "definition in this file:")
             lines.append("      " + ", ".join("%s:%d" % (_nm, _n)
                                               for _n, _nm in _defs))
+    if os.environ.get("DIAG_GATE", "0") == "1" and state.get("diag"):
+        lines.append("  diagnosis     : " + " | ".join(
+            "%s %s" % (k.split("_", 1)[0], v)
+            for k, v in sorted(state["diag"].items())))
     lines.append("  next          : %s" % nxt)
     if state.get("triage_goal") or state.get("chain_mechanism"):
         lines.append("  --")
@@ -938,11 +942,88 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
               "your patch -- this is a valid reproduction" % base_rc, flush=True)
         return True
 
+    def h_differential(pcb, args):
+        """DIAGNOSIS LADDER step 2 (2026-08-11, shipped with DIAG_GATE).
+
+        Mikey: the steps must be REQUIRED in the program, and each one either
+        runs or is recorded as unnecessary. This is the discriminating
+        experiment from matplotlib-23299: same operations WITH and WITHOUT the
+        condition the issue names. One comparison carries the diagnosis -- if
+        the control is clean, the defect is in STATE the condition changes,
+        and the fix site is usually the function that WRITES that state.
+        Result is recorded in state["diag"] and shown every turn."""
+        bug = str(args.get("bug_script", ""))
+        ctl = str(args.get("control_script", ""))
+        if not bug.strip() or not ctl.strip():
+            return {"error": (
+                "provide BOTH bug_script (with the issue-named condition) and "
+                "control_script (the SAME operations with that condition "
+                "removed -- no rc_context, no flag, no special mode)")}
+        if bug.strip() == ctl.strip():
+            return {"error": (
+                "control_script is identical to bug_script -- remove the "
+                "condition the issue names so the comparison isolates it")}
+        rb = _exec_repro(bug, "script", timeout=120)
+        rc2 = _exec_repro(ctl, "script", timeout=120)
+        state.setdefault("diag", {})["S2_differential"] = (
+            "done: bug exit %s vs control exit %s"
+            % (rb.returncode, rc2.returncode))
+        state["diag_differential"] = True
+        return {"bug_exit": rb.returncode, "control_exit": rc2.returncode,
+                "bug_tail": ((rb.stdout or "") + (rb.stderr or ""))[-800:],
+                "control_tail": ((rc2.stdout or "") + (rc2.stderr or ""))[-800:],
+                "next": (
+                    "Exits differ -> the removed condition is load-bearing: "
+                    "find the STATE it changes (compare the raw values in "
+                    "both worlds with check), then declare_site the function "
+                    "that WRITES that state. Exits equal -> the condition is "
+                    "not the trigger; revise the comparison.")}
+
+    def h_declare_site(pcb, args):
+        """DIAGNOSIS LADDER step 3: name WHERE the fix goes and WHY, before
+        editing. Writer-over-reader is the measured rule: in 41 of 107
+        analysed misses the agent edited the function where the symptom
+        appears while the accepted fix edits the function that writes the
+        state (38%% -- the largest failure class). The declaration is state,
+        rendered every turn; editing outside it is challenged once."""
+        path = str(args.get("file", ""))
+        func = str(args.get("function", "") or "")
+        role = str(args.get("role", "") or "")
+        why = str(args.get("reason", "") or "")
+        full = os.path.join(repo_dir, path)
+        if not path or not os.path.isfile(full):
+            return {"error": (_missing_file_hint(path, repo_dir)
+                              if path else "file is required")}
+        if func:
+            _txt = open(full, encoding="utf-8", errors="ignore").read()
+            if not re.search(r"^\s*(?:async\s+)?(?:def|class)\s+%s\b"
+                             % re.escape(func), _txt, re.M):
+                _defs = re.findall(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)",
+                                   _txt, re.M)
+                return {"error": "no def/class named %r in %s" % (func, path),
+                        "definitions_in_file": _defs[:40],
+                        "hint": "nothing was recorded; pick a name from the "
+                                "list or omit function"}
+        state["diag_site"] = {"file": path, "function": func, "role": role}
+        note = "declared: %s%s%s -- %s" % (
+            path, (":" + func) if func else "",
+            (" (%s)" % role) if role else "", (why[:120] or "no reason given"))
+        state.setdefault("diag", {})["S3_site"] = note
+        out = {"recorded": note}
+        if role == "reader":
+            out["caution"] = (
+                "readers are usually the SYMPTOM site. If any function "
+                "WRITES the state this reader consumes, the accepted fix is "
+                "usually there -- confirm no writer candidate exists before "
+                "editing here.")
+        return out
+
     def h_reproduce(pcb, args):
         """Run a reproduction script. A script that exits NONZERO because of
         the bug becomes the registered reproduction (RED)."""
         script = str(args.get("python_script", ""))
         state["stuck"] = 0   # a probe ran -> unstick
+        state["repro_attempts"] = state.get("repro_attempts", 0) + 1
         # REPRO CONTRACT (2026-08-11, gated REPRO_CONTRACT, default off).
         # Measured on the idiom retest: ADVICE ADOPTION IS PROPORTIONAL TO
         # HOW MECHANICAL THE ADVICE IS. The one-line "use Agg" idiom was
@@ -1039,6 +1120,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["repro_green"] = False
             state["rejected_repro_streak"] = 0
             registered = True
+            state.setdefault("diag", {})["S1_reproduce"] = (
+                "done: red registered (exit %s)" % r.returncode)
             if state["baseline_pass"] is None:   # pre-patch: valid baseline
                 _hint_paths = [fl.split(":", 1)[0] for fl in
                                _repo_frames(r.stderr or "", repo_dir)]
@@ -1050,6 +1133,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _fl = _repo_frames(r.stderr or "", repo_dir)
         if _fl:
             result["fault_locations"] = _fl
+            state["fault_seen"] = True
         if registered:
             result["repro_tier"] = _tier
             result["note"] = ("This failing script is now the registered "
@@ -1296,6 +1380,78 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         # exists to surface.  edit_line reaches h_patch in line mode with no
         # old_snippet, so it never hit this; snippet mode did.
         state["last_edit_frag"] = new or ""
+        # DIAGNOSIS GATE (2026-08-11, gated DIAG_GATE, default off).
+        # Mikey: "can we make these steps required in the program? ... a
+        # general algorithm that will either try each step or say it's
+        # unnecessary. And the results should be kept as state."
+        # Every step ends in exactly one recorded outcome -- done, waived
+        # with the reason, or skipped-after-warning -- in state["diag"],
+        # which the worksheet renders every turn and the trace persists.
+        # Each refusal is one-shot, so the ladder cannot deadlock: the
+        # model is challenged once per step, never trapped (the
+        # pallets-5063 format-latch lesson).
+        if os.environ.get("DIAG_GATE", "0") == "1":
+            _dg = state.setdefault("diag", {})
+            _w = state.setdefault("_diag_warned", {})
+            if "S1_reproduce" not in _dg:
+                if state.get("seen_red"):
+                    _dg["S1_reproduce"] = "done: red reproduction registered"
+                elif state.get("repro_attempts", 0) >= 2:
+                    _dg["S1_reproduce"] = (
+                        "waived: %d attempts, bug not triggerable here"
+                        % state.get("repro_attempts", 0))
+                elif not _w.get("s1"):
+                    _w["s1"] = True
+                    return {"error": (
+                        "DIAGNOSIS 1/3 -- REPRODUCE FIRST: no red "
+                        "reproduction is registered (%d attempt(s) so far). "
+                        "Write a script that fails BECAUSE of the bug. If it "
+                        "truly cannot be triggered here, two attempts record "
+                        "the waiver and this gate steps aside."
+                        % state.get("repro_attempts", 0))}
+                else:
+                    _dg["S1_reproduce"] = "skipped after warning"
+            if "S2_differential" not in _dg:
+                if state.get("fault_seen"):
+                    _dg["S2_differential"] = (
+                        "waived: crash traceback names in-repo frames -- the "
+                        "stack already points at the state and its writers")
+                elif not _w.get("s2"):
+                    _w["s2"] = True
+                    return {"error": (
+                        "DIAGNOSIS 2/3 -- DIFFERENTIAL: before editing, run "
+                        "differential(bug_script=..., control_script=...) -- "
+                        "the same operations WITHOUT the condition the issue "
+                        "names. If the control is clean, the bug is in STATE "
+                        "that condition changes, and the fix belongs in the "
+                        "function that WRITES it. If a controlled comparison "
+                        "is impossible for this bug, patching again records "
+                        "this step as skipped.")}
+                else:
+                    _dg["S2_differential"] = "skipped after warning"
+            if "S3_site" not in _dg:
+                if not _w.get("s3"):
+                    _w["s3"] = True
+                    return {"error": (
+                        "DIAGNOSIS 3/3 -- DECLARE THE SITE: call "
+                        "declare_site(file=..., function=..., role=writer|"
+                        "reader, reason=...) before editing. Candidate sites "
+                        "are the functions that WRITE the state your "
+                        "diagnosis found, ranked above the function where "
+                        "the symptom appears.")}
+                else:
+                    _dg["S3_site"] = "skipped after warning"
+            else:
+                _site = state.get("diag_site") or {}
+                _sf = _site.get("file")
+                if (_sf and _sf != path
+                        and not _w.get("site_" + path)):
+                    _w["site_" + path] = True
+                    return {"error": (
+                        "declared fix site is %s but you are editing %s -- "
+                        "either edit the declared site or declare_site again "
+                        "(changing sites is allowed; the change is recorded)."
+                        % (_sf, path))}
         if _is_test_path(path):
             return {"error": "refusing to edit a test file — fix the source, "
                              "not the tests"}
@@ -2195,6 +2351,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     state["_defs_fn"] = _file_defs
     handlers = {
         "swe.reproduce":   h_reproduce,
+        "swe.differential": h_differential,
+        "swe.declare_site": h_declare_site,
         "swe.locate":      h_locate,
         "swe.read_range":  h_read_range,
         "swe.patch":       h_patch,
@@ -2657,6 +2815,35 @@ FIX_TOOLS = [
             "summary": {"type": "string",
                         "description": "1-3 sentence summary of the fix."},
         }, "required": ["summary"]}}},
+    {"type": "function", "function": {
+        "name": "differential",
+        "description": (
+            "DIAGNOSIS: run the SAME operations twice -- once under the "
+            "condition the issue names (bug_script) and once WITHOUT it "
+            "(control_script). If the exits differ, that condition is "
+            "load-bearing: the bug lives in STATE it changes, and the fix "
+            "site is usually the function that WRITES that state, not the "
+            "one where the symptom appears."),
+        "parameters": {"type": "object", "properties": {
+            "bug_script": {"type": "string"},
+            "control_script": {"type": "string",
+                               "description": "same operations with the "
+                                              "issue-named condition removed"},
+        }, "required": ["bug_script", "control_script"]}}},
+    {"type": "function", "function": {
+        "name": "declare_site",
+        "description": (
+            "DIAGNOSIS: declare WHERE the fix will go and WHY, before "
+            "patching. role='writer' if the function writes the state your "
+            "diagnosis found, 'reader' if it only consumes it. Recorded as "
+            "state, shown every turn; edits outside the declared file are "
+            "challenged once."),
+        "parameters": {"type": "object", "properties": {
+            "file": {"type": "string"},
+            "function": {"type": "string"},
+            "role": {"type": "string", "enum": ["writer", "reader"]},
+            "reason": {"type": "string"},
+        }, "required": ["file", "reason"]}}},
 ]
 
 # EDIT_LINE gate (2026-08-08, default OFF). The tool menu is a behaviour
@@ -2667,10 +2854,18 @@ if os.environ.get("EDIT_LINE", "0") != "1":
     FIX_TOOLS = [_t for _t in FIX_TOOLS
                  if _t.get("function", {}).get("name") != "edit_line"]
 
+# DIAG_GATE menu gate: the diagnosis tools appear only when the ladder is on.
+if os.environ.get("DIAG_GATE", "0") != "1":
+    FIX_TOOLS = [_t for _t in FIX_TOOLS
+                 if _t.get("function", {}).get("name") not in
+                 ("differential", "declare_site")]
+
 
 FIX_TOOL2SYS = {
     "check": "swe.check",
     "reproduce":   "swe.reproduce",
+    "differential": "swe.differential",
+    "declare_site": "swe.declare_site",
     "locate":      "swe.locate",
     "read_range":  "swe.read_range",
     "patch":       "swe.patch",
