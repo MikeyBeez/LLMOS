@@ -607,6 +607,31 @@ def _missing_file_hint(path, repo_dir):
     return hint
 
 
+def _filter_repo_frames(repo_dir, frames):
+    """Keep only fault frames that point into REAL repo files.
+
+    CYCLE-2 RERUN FINDING (django-11422): the registered reproduction's only
+    frame was <string>:41 -- the repro script itself. It was stored as a
+    fault location anyway, which (a) waived the S2 differential on the claim
+    that the traceback names in-repo writers, and (b) fed the declare_site
+    stack check a frame that resolves to nothing. Junk evidence is worse
+    than no evidence: it silently satisfies gates built to demand the real
+    thing.
+    """
+    out = []
+    for f in frames or []:
+        try:
+            head = str(f).split(" ")[0]
+            path = head.rsplit(":", 1)[0]
+            path = path[2:] if path.startswith("./") else path
+            if path and not path.startswith("<") and os.path.isfile(
+                    os.path.join(repo_dir, path)):
+                out.append(f)
+        except Exception:
+            continue
+    return out
+
+
 def _mpl_force_draw(script, repo):
     """SYMBOLIC FORCED DRAW (2026-08-11, gated REPRO_FORCE_DRAW, default off).
 
@@ -1173,8 +1198,39 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         _fl = _repo_frames(r.stderr or "", repo_dir)
         if _fl:
             result["fault_locations"] = _fl
-            state["fault_seen"] = True
-            state["fault_locations"] = _fl
+            _fl_repo = _filter_repo_frames(repo_dir, _fl)
+            if _fl_repo:
+                state["fault_seen"] = True
+                state["fault_locations"] = _fl_repo
+                # ORDERING HOLE (cycle-2 rerun): declare_site at event 18,
+                # first reproduce at event 20 -- a declaration made before
+                # red exists dodges the declare-time stack check entirely.
+                # So the check also runs HERE, when the evidence arrives:
+                # a standing off-stack declaration gets the stack handed
+                # back in this result and flagged in the diag record.
+                _site = state.get("diag_site") or {}
+                _sfn = _site.get("function")
+                if _sfn and os.environ.get("DIAG_GATE", "0") == "1":
+                    _stk = []
+                    for _fe in _fl_repo[:8]:
+                        try:
+                            _fp, _fln = str(_fe).split(" ")[0].rsplit(":", 1)
+                            _nm = _enclosing_def(_fp, int(_fln))
+                        except Exception:
+                            continue
+                        if _nm and _nm not in _stk:
+                            _stk.append(_nm)
+                    if _stk and _sfn not in _stk:
+                        result["site_check"] = (
+                            "this traceback ran through: %s. Your declared "
+                            "fix site (%s) is NOT among them -- the writer "
+                            "of the buggy state is usually in this stack. "
+                            "Consider declare_site again."
+                            % (", ".join(_stk), _sfn))
+                        state.setdefault("diag", {})["S3_site"] = (
+                            str(state.get("diag", {}).get("S3_site", ""))
+                            + " | OFF-STACK vs registered traceback (%s)"
+                            % ", ".join(_stk))
         if registered:
             result["repro_tier"] = _tier
             result["note"] = ("This failing script is now the registered "
