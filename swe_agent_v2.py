@@ -592,6 +592,60 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             % ("PASS" if r else "FAIL" if r is False else "inconclusive"))
         return r
 
+    def _cap_text(t, limit=4000):
+        t = t or ""
+        if len(t) <= limit:
+            return t
+        return t[:limit] + "\n... [truncated, %d chars total]" % len(t)
+
+    def _ledger():
+        """SEG_COMPACT (2026-08-12): a factual ledger that REPLACES the raw
+        transcript at segment boundaries.
+
+        Motivated by comparing our traces with a frontier harness: it carries
+        state across context boundaries as a structured summary, not as the
+        raw transcript. Our walk threads the ENTIRE conversation into every
+        segment, so by segment 5 the model sits on four verbatim failed
+        attempts -- and repetition-is-conviction (sympy-17022: four segments,
+        four byte-identical 746-byte candidates) says a transcript full of an
+        edit is a PROMPT to produce that edit again. SEG_ECHO patched one
+        symptom; this is the generalization: facts in, imitable history out.
+        Built harness-side from state -- deterministic, no model summary.
+        """
+        L = ["LEDGER -- your earlier conversation in this run was compacted "
+             "away. The facts below replace it; trust them over memory."]
+        _rs = state.get("repro_script")
+        if _rs:
+            L.append("Registered reproduction script (%s; currently %s):\n%s"
+                     % (state.get("repro_mode", "?"),
+                        "GREEN" if state.get("repro_green") else "RED",
+                        _cap_text(_rs)))
+        else:
+            L.append("No reproduction script has been registered yet.")
+        _d = state.get("diag")
+        if _d:
+            L.append("Diagnosis record: " + "; ".join(
+                "%s=%s" % _kv for _kv in sorted(_d.items())))
+        if candidates:
+            L.append("Patches produced by earlier segments (each made and "
+                     "checked already -- do NOT re-produce one of these "
+                     "verbatim): " + "; ".join(
+                         "%s (%d bytes%s)"
+                         % (c[0], len(c[1]),
+                            ", went green but the project hidden tests "
+                            "still FAILED" if len(c) > 2 and c[2] else "")
+                         for c in candidates))
+        try:
+            _cd = handlers["_capture_diff"]()
+        except Exception:
+            _cd = ""
+        if (_cd or "").strip():
+            L.append("CURRENT TREE: the patch below is APPLIED right "
+                     "now:\n%s" % _cap_text(_cd))
+        else:
+            L.append("CURRENT TREE: clean -- no patch is currently applied.")
+        return "\n\n".join(L)
+
     import time as _wt
     _walk_t0 = _wt.time()
     _walk_cap = float(os.environ.get("REPERTOIRE_WALL", "0") or 0)
@@ -750,10 +804,19 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 log(" -- REPERTOIRE wall cap %.0fs exhausted before segment "
                     "%d; stopping the walk and falling back" % (_walk_cap, i + 1))
                 break
+        _init_msgs = msgs
+        if os.environ.get("SEG_COMPACT", "0") == "1" and msgs:
+            # Facts in, imitable history out (see _ledger). The seg_goal
+            # already carries every targeted injection (SEG_ECHO, oracle
+            # refusal hints, GROW) -- those survive compaction untouched.
+            seg_goal = _ledger() + "\n\n" + seg_goal
+            _init_msgs = [m for m in msgs if m.get("role") == "system"][:1]
+            log(" -- SEG_COMPACT: transcript (%d msgs) replaced by system + "
+                "ledger for segment %d" % (len(msgs), i + 1))
         reason, msgs, meta = phase_run(cpu, tools, tool2sys, handlers,
                                        system_prompt, seg_goal, turns_this,
                                        wall_cap=_seg_cap,
-                                       log=log, init_messages=msgs,
+                                       log=log, init_messages=_init_msgs,
                                        success=_corroborated(state, handlers, log),
                                        **kw)
         if reason == "solved" or state.get("repro_green"):

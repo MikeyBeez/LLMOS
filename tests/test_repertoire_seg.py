@@ -300,5 +300,110 @@ class GrowSegTest(unittest.TestCase):
         self.assertFalse([l for l in logs if "GROW" in l])
 
 
+class CompactTest(unittest.TestCase):
+    """SEG_COMPACT (2026-08-12): facts in, imitable history out.
+
+    The walk threads the WHOLE transcript into every segment, so by segment 5
+    the model sits on four verbatim failed attempts -- and
+    repetition-is-conviction says a transcript full of an edit is a prompt to
+    produce that edit again.  With SEG_COMPACT=1 each segment after the first
+    starts from [system prompt] + a harness-built factual LEDGER (repro
+    script + status, diagnosis record, banked candidates, current tree)
+    prepended to the segment goal.  Targeted injections (SEG_ECHO, GROW,
+    oracle hints) live in the goal already, so they survive.  Default off.
+    """
+
+    def compact_walk(self, segments=3, state=None, oracle=False, **env):
+        """Segments return a NONEMPTY 3-message transcript (the real
+        phase_run never returns []); with oracle=True every segment goes
+        green and the probe refuses.  Returns (goals, logs, inits)."""
+        goals, logs, inits = [], [], []
+        st = state if state is not None else {"seen_red": False}
+
+        def fake_phase_run(cpu, tools, tool2sys, handlers, system_prompt,
+                           goal, turns, *a, **kw):
+            goals.append(goal)
+            inits.append(kw.get("init_messages"))
+            transcript = [{"role": "system", "content": "SYS"},
+                          {"role": "user", "content": goal},
+                          {"role": "assistant", "content": "attempt text"}]
+            if oracle:
+                st["repro_green"] = True
+                return "solved", transcript, {}
+            return "budget", transcript, {}
+
+        handlers = {
+            "_diff_nonempty": lambda: True,
+            "_capture_diff": lambda: SAME,
+            "_revert_tree": lambda: None,
+            "_restore_diff": lambda d: {"restored": True},
+            "swe.verify_fix": lambda pcb, args: {"ok": False},
+        }
+        if oracle:
+            handlers["_oracle_probe"] = lambda: False
+            SA.oracle_probe.last_tail = ""
+        real = SA.phase_run
+        SA.phase_run = fake_phase_run
+        try:
+            base = dict(SEG_ECHO=None, REPERTOIRE_WALL="0", PHASE_WALL_CAP="0",
+                        COVERAGE_GAP=None, SEG1_TURNS="1", GROW_SEG=None,
+                        SEG_COMPACT=None, BANK_AUDIT=None,
+                        ORACLE_GATE="1" if oracle else None)
+            base.update(env)
+            with _Env(**base):
+                SA.repertoire_fix(cpu=None, tools=[], tool2sys={},
+                                  handlers=handlers, system_prompt="s",
+                                  goal="PLAIN GOAL", state=st, seg_turns=1,
+                                  max_ops=segments, log=logs.append)
+        finally:
+            SA.phase_run = real
+            if hasattr(SA.oracle_probe, "last_tail"):
+                del SA.oracle_probe.last_tail
+        return goals, logs, inits
+
+    def test_off_by_default_threads_full_transcript(self):
+        """Every behaviour change ships behind a flag, default off."""
+        goals, logs, inits = self.compact_walk()
+        self.assertIsNone(inits[0])              # segment 1: fresh build
+        self.assertEqual(len(inits[1]), 3)       # segment 2: whole transcript
+        for g in goals:
+            self.assertNotIn("LEDGER", g)
+        self.assertFalse([l for l in logs if "SEG_COMPACT" in l])
+
+    def test_compact_replaces_transcript_with_system_plus_ledger(self):
+        goals, logs, inits = self.compact_walk(SEG_COMPACT="1")
+        self.assertIsNone(inits[0])              # segment 1 untouched
+        self.assertEqual(len(inits[1]), 1)       # system message only
+        self.assertEqual(inits[1][0]["role"], "system")
+        self.assertTrue(goals[1].startswith("LEDGER"))
+        self.assertTrue([l for l in logs if "SEG_COMPACT" in l])
+
+    def test_ledger_carries_the_facts(self):
+        st = {"seen_red": False, "repro_script": "import boom_marker",
+              "repro_mode": "pytest",
+              "diag": {"S1_reproduce": "done (red exit 1)"}}
+        goals, logs, inits = self.compact_walk(state=st, SEG_COMPACT="1")
+        led = goals[1]
+        self.assertIn("import boom_marker", led)     # the registered repro
+        self.assertIn("RED", led)                    # and its status
+        self.assertIn("Diagnosis record", led)
+        self.assertIn("bytes", led)                  # banked candidate line
+        self.assertIn("APPLIED right now", led)      # _capture_diff nonempty
+
+    def test_ledger_admits_missing_repro(self):
+        goals, logs, inits = self.compact_walk(SEG_COMPACT="1")
+        self.assertIn("No reproduction script", goals[1])
+
+    def test_compact_and_grow_compose(self):
+        """The grow goal is appended to seg_goal, so it must survive
+        compaction: segment 2 states BOTH the ledger and STILL APPLIED."""
+        goals, logs, inits = self.compact_walk(oracle=True, SEG_COMPACT="1",
+                                               GROW_SEG="1")
+        self.assertEqual(len(inits[1]), 1)
+        self.assertTrue(goals[1].startswith("LEDGER"))
+        self.assertIn("STILL APPLIED", goals[1])
+        self.assertIn("APPLIED right now", goals[1])
+
+
 if __name__ == "__main__":
     unittest.main()
