@@ -145,5 +145,35 @@ class DifferentialValidationTest(Base):
         self.assertIn("identical", r["error"])
 
 
+class StackCheckTest(Base):
+    """CYCLE-2 FINDING (django-11422): the ladder ran end to end and the
+    declaration still ignored the reproduction evidence -- declared
+    BaseReloader.__init__ while the registered traceback ran through
+    iter_modules_and_files, the gold function. declare_site now resolves
+    the registered fault frames to enclosing functions and hands back an
+    off-stack declaration as a stated fact. A fact, not a block."""
+
+    def test_off_stack_declaration_gets_the_stack_back(self):
+        self.state["fault_locations"] = ["./mod.py:2"]   # inside writer()
+        r = self.handlers["swe.declare_site"](None, {
+            "file": "mod.py", "function": "reader", "role": "writer",
+            "reason": "a guess"})
+        self.assertIn("stack_check", r)
+        self.assertIn("writer", r["stack_check"])
+        self.assertIn("recorded", r)          # declaration still recorded
+
+    def test_on_stack_declaration_is_clean(self):
+        self.state["fault_locations"] = ["./mod.py:2"]
+        r = self.handlers["swe.declare_site"](None, {
+            "file": "mod.py", "function": "writer", "role": "writer",
+            "reason": "named by the traceback"})
+        self.assertNotIn("stack_check", r)
+
+    def test_no_fault_frames_no_check(self):
+        r = self.handlers["swe.declare_site"](None, {
+            "file": "mod.py", "function": "reader", "reason": "x"})
+        self.assertNotIn("stack_check", r)
+
+
 if __name__ == "__main__":
     unittest.main()

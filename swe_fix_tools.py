@@ -942,6 +942,21 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
               "your patch -- this is a valid reproduction" % base_rc, flush=True)
         return True
 
+    def _enclosing_def(path, line):
+        """Name of the def/class containing `line` of a repo file, or None."""
+        try:
+            _p = path[2:] if path.startswith("./") else path
+            with open(os.path.join(repo_dir, _p), encoding="utf-8",
+                      errors="ignore") as _fh:
+                _ls = _fh.read().splitlines()
+            for _l in reversed(_ls[:min(line, len(_ls))]):
+                _m = re.match(r"\s*(?:async\s+)?(?:def|class)\s+(\w+)", _l)
+                if _m:
+                    return _m.group(1)
+        except Exception:
+            pass
+        return None
+
     def h_differential(pcb, args):
         """DIAGNOSIS LADDER step 2 (2026-08-11, shipped with DIAG_GATE).
 
@@ -1010,6 +1025,31 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             (" (%s)" % role) if role else "", (why[:120] or "no reason given"))
         state.setdefault("diag", {})["S3_site"] = note
         out = {"recorded": note}
+        # CYCLE-2 FINDING (django-11422): the ladder ran end to end and the
+        # model still declared BaseReloader.__init__ while its own registered
+        # traceback ran through iter_modules_and_files -- the gold function.
+        # S1's evidence and S3's declaration were never connected. Connect
+        # them mechanically: resolve the registered fault frames to their
+        # enclosing functions; a declaration outside that set gets the list
+        # back as a stated fact. A fact, not a block -- declaring elsewhere
+        # stays legal, it just can no longer happen in ignorance.
+        _fls = state.get("fault_locations") or []
+        _stack = []
+        for _fl_ent in _fls[:8]:
+            try:
+                _fp, _fline = str(_fl_ent).rsplit(":", 1)
+                _nm = _enclosing_def(_fp, int(_fline))
+            except Exception:
+                continue
+            if _nm and _nm not in [s.split(" ")[0] for s in _stack]:
+                _stack.append("%s (%s)" % (_nm, _fl_ent))
+        if func and _stack and func not in [s.split(" ")[0] for s in _stack]:
+            out["stack_check"] = (
+                "your registered reproduction's traceback ran through these "
+                "repo functions: %s. Your declared site (%s) is NOT among "
+                "them. The writer of the buggy state is usually in that "
+                "stack -- reconsider the site, or proceed only with a reason "
+                "the stack does not reach it." % ("; ".join(_stack), func))
         if role == "reader":
             out["caution"] = (
                 "readers are usually the SYMPTOM site. If any function "
@@ -1134,6 +1174,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if _fl:
             result["fault_locations"] = _fl
             state["fault_seen"] = True
+            state["fault_locations"] = _fl
         if registered:
             result["repro_tier"] = _tier
             result["note"] = ("This failing script is now the registered "
