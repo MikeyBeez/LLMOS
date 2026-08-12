@@ -2973,6 +2973,30 @@ from repo_bootstrap_tools import RECALL_TOOL as _RECALL_TOOL
 FIX_TOOLS = FIX_TOOLS + [_RECALL_TOOL]
 FIX_TOOL2SYS["recall"] = "recall"
 
+# CYCLE-1 FINDING (2026-08-12, single-example loop, matplotlib-23299 rerun):
+# with DIAG_GATE on, the model never patched at all -- 25 locate calls, zero
+# edits, ladder tools untouched. The gate fires AT the edit, so a run that
+# never edits never meets it, and nothing told the model the ladder exists.
+# Enforcement without navigation. So when the gate is on, the system prompt
+# names the ladder explicitly, up front.
+if os.environ.get("DIAG_GATE", "0") == "1":
+    FIX_SYSTEM_PROMPT = FIX_SYSTEM_PROMPT + (
+        "\n\nDIAGNOSIS LADDER (enforced -- your patches are gated on it): "
+        "BEFORE your first patch, complete or explicitly pass three steps, "
+        "in order, EARLY:\n"
+        "  A. reproduce -- register a RED script (fails because of the bug).\n"
+        "  B. differential -- run the SAME operations WITHOUT the condition "
+        "the issue names; if the control is clean, the bug is in STATE that "
+        "condition changes and the fix belongs in the function that WRITES "
+        "that state. (Auto-waived when a crash traceback already names "
+        "in-repo frames.)\n"
+        "  C. declare_site(file=..., function=..., role=writer|reader, "
+        "reason=...) -- say where the fix goes and why. Writers outrank "
+        "readers.\n"
+        "The worksheet shows the ladder state each turn under diagnosis. "
+        "Long locate/read_range exploration before the ladder is wasted "
+        "budget: run A-B-C, then patch.")
+
 # ---- neighbor_tests tool (BLAST_RADIUS, 2026-07-26): run the existing tests
 # around the changed code so the agent sees and fixes its own regressions -------
 _NEIGHBOR_TOOL = {"type": "function", "function": {

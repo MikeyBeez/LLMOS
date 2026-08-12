@@ -607,6 +607,16 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 "You have not changed any source yet. Stop reading and make the "
                 "edit: %s. %s  Patch the source now, then run your reproduction."
                 % (name.upper(), how))
+            if os.environ.get("DIAG_GATE", "0") == "1":
+                # Navigation for the enforced ladder (cycle-1 finding: a run
+                # that never edits never meets an edit-gated challenge).
+                seg_goal += (
+                    "\n\nYour edits are GATED on the diagnosis ladder. If it "
+                    "is not complete (see the diagnosis line in the "
+                    "worksheet): run differential(bug_script=..., "
+                    "control_script=...) now, then declare_site(file=..., "
+                    "function=..., role=..., reason=...), then patch. No "
+                    "more locate or read_range until the ladder has moved.")
         elif i == 0:
             seg_goal = goal
         else:
