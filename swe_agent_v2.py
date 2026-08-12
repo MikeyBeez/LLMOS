@@ -515,6 +515,17 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     # fact in the next segment goal instead of exhorting a third time.
     _diff_seen = {}
     _repeat_note = None
+    # GROW (2026-08-12, gated GROW_SEG, default off). Cycle 3 of the
+    # single-example loop, sympy-24909: THREE segments went green on the
+    # model's own reproduction and ORACLE_GATE refused all three -- the
+    # under-generalization signature caught live. The walk then REVERTED
+    # each refused candidate and asked for a DIFFERENT kind of fix, so
+    # every segment restarted from zero and every candidate stayed small
+    # (589, 589, 943 bytes vs gold's larger, sibling-covering patch). A
+    # green-but-refused candidate is not wrong, it is INCOMPLETE -- so
+    # keep it applied and grow it instead of starting over. At most two
+    # consecutive grow segments per walk, then normal reverting resumes.
+    _grow_used = 0
     # WALL CLOCK FOR THE WHOLE WALK (env REPERTOIRE_WALL seconds, 0 = off).
     # PHASE_WALL_CAP below bounds ONE phase_run. This walk calls phase_run
     # once per segment and again for every extension, so PHASE_WALL_CAP
@@ -617,6 +628,24 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                     "control_script=...) now, then declare_site(file=..., "
                     "function=..., role=..., reason=...), then patch. No "
                     "more locate or read_range until the ladder has moved.")
+        elif state.pop("grow_pending", False):
+            seg_goal = (
+                "Your fix is STILL APPLIED -- the tree was NOT reverted. It "
+                "made your reproduction pass, but the project's full test "
+                "suite still fails, which means the fix is INCOMPLETE rather "
+                "than wrong. Do not rewrite it and do not shrink it. EXTEND "
+                "it: (1) if you changed an operator method (__mul__, "
+                "__truediv__, __add__...), read its SIBLING operator methods "
+                "now -- they usually embed the same pattern and need the "
+                "IDENTICAL change in this same patch; (2) check the TYPE you "
+                "return against the package idiom -- if neighbouring code "
+                "returns a library object where you return a bare Python "
+                "literal (1, True, None), return the canonical object "
+                "(sympy: S.One, not 1); (3) re-read the issue for the "
+                "GENERAL property behind its one example and cover the other "
+                "sites in this file that assume the opposite. Accepted fixes "
+                "for issues that resist small patches are usually 15-45+ "
+                "lines covering cases the issue never mentions.")
         elif i == 0:
             seg_goal = goal
         else:
@@ -765,6 +794,20 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 state["oracle_refused"] = True
                 if "PASS_TO_PASS regressed" in getattr(oracle_probe, "last_tail", ""):
                     state["oracle_collateral"] = True
+                if (os.environ.get("GROW_SEG", "0") == "1"
+                        and not state.get("oracle_collateral")
+                        and _grow_used < 2):
+                    # Keep the refused candidate APPLIED and grow it. Never
+                    # on collateral (P2P regressed): growing a diff that
+                    # broke neighbours compounds the damage -- that path
+                    # still reverts below.
+                    _grow_used += 1
+                    state["grow_pending"] = True
+                    log(" -- GROW %d/2: keeping the oracle-refused candidate "
+                        "applied; next segment extends it" % _grow_used)
+                    extended = False
+                    i += 1
+                    continue
                 try:
                     handlers["_revert_tree"]()
                 except Exception as _e:

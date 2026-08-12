@@ -198,5 +198,107 @@ class Seg1BudgetShareTest(unittest.TestCase):
         self.assertIsNone(CAPS[0])
 
 
+class GrowSegTest(unittest.TestCase):
+    """GROW_SEG (2026-08-12, cycle 3 of the single-example loop).
+
+    sympy-24909: THREE segments went green on the model's own reproduction
+    and ORACLE_GATE refused every one -- then the walk reverted each refused
+    candidate and asked for a DIFFERENT kind of fix, so every candidate
+    restarted from zero and stayed small (589/589/943 bytes vs gold's
+    sibling-covering patch).  A green-but-refused candidate is INCOMPLETE,
+    not wrong.  With GROW_SEG=1 the walk keeps it applied (max 2 consecutive
+    grows) and the next goal says EXTEND; collateral refusals (PASS_TO_PASS
+    regressed) always revert.  Default stays off.
+    """
+
+    def tearDown(self):
+        if hasattr(SA.oracle_probe, "last_tail"):
+            del SA.oracle_probe.last_tail
+
+    def grow_walk(self, segments=4, accept_after=None, last_tail="", **env):
+        """Every segment goes green; the oracle refuses until `accept_after`
+        greens have been probed (None = refuse forever).  Returns
+        (goals, logs, reverts, result_reason)."""
+        goals, logs, reverts = [], [], []
+        st = {"seen_red": False}
+        probes = {"n": 0}
+
+        def fake_phase_run(cpu, tools, tool2sys, handlers, system_prompt,
+                           goal, turns, *a, **kw):
+            goals.append(goal)
+            st["repro_green"] = True
+            return "solved", [], {}
+
+        def probe():
+            probes["n"] += 1
+            if accept_after is not None and probes["n"] > accept_after:
+                return True
+            return False
+
+        handlers = {
+            "_diff_nonempty": lambda: True,
+            "_capture_diff": lambda: SAME,
+            "_revert_tree": lambda: reverts.append(1),
+            "_restore_diff": lambda d: {"restored": True},
+            "_oracle_probe": probe,
+            "swe.verify_fix": lambda pcb, args: {"ok": False},
+        }
+        SA.oracle_probe.last_tail = last_tail
+        real = SA.phase_run
+        SA.phase_run = fake_phase_run
+        try:
+            base = dict(SEG_ECHO=None, REPERTOIRE_WALL="0", PHASE_WALL_CAP="0",
+                        COVERAGE_GAP=None, ORACLE_GATE="1", SEG1_TURNS="1",
+                        GROW_SEG=None, BANK_AUDIT=None)
+            base.update(env)
+            with _Env(**base):
+                res = SA.repertoire_fix(cpu=None, tools=[], tool2sys={},
+                                        handlers=handlers, system_prompt="s",
+                                        goal="PLAIN GOAL", state=st,
+                                        seg_turns=1, max_ops=segments,
+                                        log=logs.append)
+        finally:
+            SA.phase_run = real
+        return goals, logs, reverts, res[0]
+
+    def test_off_by_default_every_refusal_reverts(self):
+        """Every behaviour change ships behind a flag, default off."""
+        goals, logs, reverts, _ = self.grow_walk()
+        self.assertEqual(len(reverts), 4)
+        for g in goals:
+            self.assertNotIn("STILL APPLIED", g)
+        self.assertFalse([l for l in logs if "GROW" in l])
+
+    def test_grow_keeps_tree_and_emits_extend_goal(self):
+        goals, logs, reverts, _ = self.grow_walk(GROW_SEG="1")
+        # Refusals 1 and 2 grow (tree kept); 3 and 4 hit the cap and revert.
+        self.assertEqual(len(reverts), 2)
+        self.assertIn("STILL APPLIED", goals[1])
+        self.assertIn("EXTEND", goals[1])
+        self.assertIn("STILL APPLIED", goals[2])
+        # After the cap the goal must tell the truth again: tree reverted.
+        self.assertNotIn("STILL APPLIED", goals[3])
+        self.assertIn("reverted", goals[3])
+        self.assertTrue([l for l in logs if "GROW 1/2" in l])
+        self.assertTrue([l for l in logs if "GROW 2/2" in l])
+
+    def test_oracle_accept_after_grow_ends_the_walk(self):
+        goals, logs, reverts, reason = self.grow_walk(GROW_SEG="1",
+                                                      accept_after=1)
+        self.assertEqual(reason, "declared")
+        self.assertEqual(len(goals), 2)   # grow segment ran, then accepted
+        self.assertEqual(len(reverts), 0)
+
+    def test_collateral_refusal_never_grows(self):
+        """P2P regressed: growing a diff that broke neighbours compounds
+        the damage -- that path must keep reverting even with GROW_SEG=1."""
+        goals, logs, reverts, _ = self.grow_walk(
+            GROW_SEG="1", last_tail="PASS_TO_PASS regressed: 2 test(s)")
+        self.assertEqual(len(reverts), 4)
+        for g in goals:
+            self.assertNotIn("STILL APPLIED", g)
+        self.assertFalse([l for l in logs if "GROW" in l])
+
+
 if __name__ == "__main__":
     unittest.main()
