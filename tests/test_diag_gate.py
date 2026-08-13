@@ -175,5 +175,59 @@ class StackCheckTest(Base):
         self.assertNotIn("stack_check", r)
 
 
+class SiteAlternativesTest(Base):
+    """WRONG-FILE class (2026-08-13, cycle 5, pytest-7220): the ladder ran
+    end to end and declared code.py:_makepath while gold edits nodes.py --
+    which sat UNREAD in the model's own locate results, with no crash
+    frames to trigger the stack check. declare_site now hands back, as a
+    stated fact, the non-test files the model's own searches matched but
+    it never read."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.repo, "alt.py"), "w") as fh:
+            fh.write("def writer_helper(x):\n    return shared_token(x)\n")
+        with open(os.path.join(self.repo, "mod.py"), "a") as fh:
+            fh.write("\n# shared_token appears here too\n")
+        self._llm = F.llm_call
+        F.llm_call = lambda **kw: (
+            '{"top_hit": "", "reason": "", "discard": []}')
+
+    def tearDown(self):
+        F.llm_call = self._llm
+        super().tearDown()
+
+    def declare(self):
+        return self.handlers["swe.declare_site"](None, {
+            "file": "mod.py", "function": "writer", "role": "writer",
+            "reason": "computes the value"})
+
+    def test_unread_locate_matches_come_back_as_fact(self):
+        self.handlers["swe.locate"](None, {"pattern": "shared_token"})
+        r = self.declare()
+        self.assertIn("alternatives", r)
+        self.assertIn("alt.py", r["alternatives"])
+        self.assertIn("READ NONE", r["alternatives"])
+        self.assertIn("alt.py", self.state["diag"]["S3_site"])
+
+    def test_read_files_are_not_alternatives(self):
+        """Examined-and-rejected is legitimate; only ignorance is confronted."""
+        self.handlers["swe.locate"](None, {"pattern": "shared_token"})
+        self.handlers["swe.read_range"](None, {"file": "alt.py",
+                                               "start": 1, "end": 5})
+        r = self.declare()
+        self.assertNotIn("alternatives", r)
+
+    def test_no_locates_no_fact(self):
+        r = self.declare()
+        self.assertNotIn("alternatives", r)
+
+    def test_off_when_gate_off(self):
+        os.environ.pop("DIAG_GATE", None)
+        self.handlers["swe.locate"](None, {"pattern": "shared_token"})
+        r = self.declare()
+        self.assertNotIn("alternatives", r)
+
+
 if __name__ == "__main__":
     unittest.main()

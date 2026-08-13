@@ -1050,6 +1050,43 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             (" (%s)" % role) if role else "", (why[:120] or "no reason given"))
         state.setdefault("diag", {})["S3_site"] = note
         out = {"recorded": note}
+        # WRONG-FILE CLASS (2026-08-13, cycle 5, pytest-7220): the ladder ran
+        # end to end, S3 declared _code/code.py:_makepath with a plausible
+        # reason, and gold edits nodes.py. fault_locations was EMPTY (pytest-
+        # style failure, no crash frames), so nothing confronted the
+        # declaration -- while nodes.py sat unread in the model's own locate
+        # results (the 66%-of-misses pattern: the gold name passes through
+        # the run). Confront it mechanically: non-test files the model's own
+        # searches matched but it never read come back as a stated fact at
+        # declare time. A fact, not a block -- declaring anyway stays legal,
+        # it just cannot happen in ignorance any more.
+        if os.environ.get("DIAG_GATE", "0") == "1":
+            _read = set(state.get("files_read") or [])
+            _decln = path.lstrip("./")
+            _alts, _apats = [], []
+            for _rec in (state.get("locate_files") or []):
+                _hitp = False
+                for _p in _rec.get("files", []):
+                    if (_p != _decln and _p not in _read
+                            and "test" not in _p.lower()
+                            and _p not in _alts):
+                        _alts.append(_p)
+                        _hitp = True
+                if _hitp and _rec.get("pattern") not in _apats:
+                    _apats.append(_rec.get("pattern"))
+            if _alts:
+                out["alternatives"] = (
+                    "your own locate search(es) (%s) ALSO matched these "
+                    "non-test files, and you have READ NONE of them: %s. "
+                    "The writer of the buggy state is often in one of these. "
+                    "Read the relevant ones and re-declare, or proceed only "
+                    "with a reason the writer cannot be there."
+                    % (", ".join(repr(_x) for _x in _apats[:3]),
+                       ", ".join(_alts[:6])))
+                state["diag"]["S3_site"] = (
+                    state["diag"]["S3_site"]
+                    + " | unread alternatives shown: "
+                    + ", ".join(_alts[:4]))
         # CYCLE-2 FINDING (django-11422): the ladder ran end to end and the
         # model still declared BaseReloader.__init__ while its own registered
         # traceback ran through iter_modules_and_files -- the gold function.
@@ -1326,6 +1363,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         or hit_path.endswith(norm))
             lines = [ln for ln in lines if _hit_ok(ln)]
         lines = lines[:40]
+        _lf = []
+        for _ln in lines:
+            _p = _ln.split(":", 1)[0].lstrip("./")
+            if _p.endswith(".py") and _p not in _lf:
+                _lf.append(_p)
+        if _lf:
+            _hist = state.setdefault("locate_files", [])
+            _hist.append({"pattern": pat, "files": _lf[:12]})
+            del _hist[:-6]
         result = {"matches": lines, "match_count": len(lines),
                   "truncated": len(lines) == 40}
         if len(lines) > 1:
@@ -1358,6 +1404,11 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         full = os.path.join(repo_dir, path)
         if not os.path.isfile(full):
             return {"error": _missing_file_hint(path, repo_dir)}
+        _fr = state.setdefault("files_read", [])
+        _np = path.lstrip("./")
+        if _np not in _fr:
+            _fr.append(_np)
+            del _fr[:-50]
         try:
             with open(full, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
