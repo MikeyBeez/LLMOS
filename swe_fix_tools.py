@@ -1019,6 +1019,61 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     "that WRITES that state. Exits equal -> the condition is "
                     "not the trigger; revise the comparison.")}
 
+    def _issue_seed_files():
+        """Issue-seeded independent search (CYCLE-7, pytest-7220).
+
+        The model's own search terms are DOWNSTREAM of its hypothesis, so a
+        fixated model never greps the gold file before it declares: on
+        pytest-7220 it searched only _makepath/FormattedExcinfo and never
+        getcwd -- though `os.getcwd()`/`os.chdir()` sit in its OWN issue text
+        and grep straight to the gold file nodes.py. Seed the search from the
+        ISSUE TEXT instead of the model's chosen terms. Deterministic per run,
+        cached. Returns repo (non-junk, non-test) files ranked by how many
+        distinct issue symbols they match.
+        """
+        if "_issue_seed_cache" in state:
+            return state["_issue_seed_cache"]
+        _text = state.get("problem_statement") or ""
+        _JUNK = ("venv/", "site-packages/", ".tox/", "node_modules/",
+                 ".egg-info", "__pycache__/", "build/lib", "dist/")
+        _STOP = {"self", "True", "False", "None", "__init__", "__name__",
+                 "return", "import", "class", "print", "assert", "errno",
+                 "shutil", "pytest", "python", "output", "error", "Error",
+                 "Exception", "AssertionError", "fixture", "yield", "None",
+                 "raise", "except", "def", "the", "and", "for", "not"}
+        _syms = set()
+        for _m in re.findall(r"`([^`]+)`", _text):
+            _syms.update(re.findall(r"[A-Za-z_]\w{2,}", _m))
+        for _m in re.findall(r"[a-zA-Z_][\w.]*\.[A-Za-z_]\w+", _text):
+            _syms.update(_p for _p in _m.split(".") if len(_p) > 2)
+        for _m in re.findall(r"\b[A-Za-z_]\w*\b", _text):
+            if ("_" in _m and len(_m) > 3) or re.search(r"[a-z][A-Z]", _m):
+                _syms.add(_m)
+        _syms = [s for s in _syms
+                 if s not in _STOP and not s.startswith("test_")]
+        _syms.sort(key=lambda s: (-len(s), s))
+        _syms = _syms[:12]
+        _out = []
+        if _syms:
+            _pat = "|".join(re.escape(s) for s in _syms)
+            _r = _run("grep -RInE --include=*.py %s ." % shlex.quote(_pat),
+                      timeout=60)
+            _counts = {}
+            for _ln in (_r.stdout or "").splitlines()[:3000]:
+                _fp = _ln.split(":", 1)[0].lstrip("./")
+                if not _fp.endswith(".py"):
+                    continue
+                if any(_j in _fp for _j in _JUNK):
+                    continue
+                if "test" in _fp.lower():
+                    continue
+                _hit = set(m for m in _syms
+                           if re.search(r"\b%s\b" % re.escape(m), _ln))
+                _counts.setdefault(_fp, set()).update(_hit)
+            _out = sorted(_counts, key=lambda f: (-len(_counts[f]), f))
+        state["_issue_seed_cache"] = _out
+        return _out
+
     def h_declare_site(pcb, args):
         """DIAGNOSIS LADDER step 3: name WHERE the fix goes and WHY, before
         editing. Writer-over-reader is the measured rule: in 41 of 107
@@ -1087,6 +1142,24 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     state["diag"]["S3_site"]
                     + " | unread alternatives shown: "
                     + ", ".join(_alts[:4]))
+            # CYCLE-7: break the hypothesis->search coupling. The block above
+            # can only surface files the MODEL chose to grep; a fixated model
+            # greps near its fixation. This seeds an INDEPENDENT search from
+            # the issue text and surfaces unread repo files the model never
+            # thought to look for.
+            _seed = [f for f in _issue_seed_files()
+                     if f != _decln and f not in _read][:6]
+            if _seed:
+                out["issue_seeded"] = (
+                    "an independent search seeded from the ISSUE TEXT (not "
+                    "your search terms) points at these repo files you have "
+                    "NOT read: %s. Your own searches follow your current "
+                    "hypothesis and cannot surface a file you have not "
+                    "thought of -- these can. Read the top one before you "
+                    "commit to this site." % ", ".join(_seed))
+                state["diag"]["S3_site"] = (
+                    state["diag"]["S3_site"]
+                    + " | issue-seeded unread: " + ", ".join(_seed[:4]))
         # CYCLE-2 FINDING (django-11422): the ladder ran end to end and the
         # model still declared BaseReloader.__init__ while its own registered
         # traceback ran through iter_modules_and_files -- the gold function.

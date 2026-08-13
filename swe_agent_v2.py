@@ -2305,6 +2305,10 @@ def run_one(inst):
     f_handlers, f_state = make_fix_handlers(
         repo, env_vars=b_state["env_vars"],
         env_kind=b_state.get("active_env_kind", "uv"), repo=inst["repo"])
+    # CYCLE-7: the declare-time issue-seeded search reads this (the model's
+    # own search terms follow its hypothesis and never surface an unthought-of
+    # file; the issue text is an independent seed).
+    f_state["problem_statement"] = inst.get("problem_statement", "")
     # ORACLE GATE (env ORACLE_GATE, default off): harness-side probe the walk
     # consults when a green reproduction would stop the search. Verdict-only;
     # content never reaches the context (see oracle_probe).

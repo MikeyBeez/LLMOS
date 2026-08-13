@@ -239,6 +239,38 @@ class SiteAlternativesTest(Base):
         r = self.declare()
         self.assertNotIn("alternatives", r)
 
+    def test_issue_seed_surfaces_unread_file_no_locate_needed(self):
+        """CYCLE-7: the model's searches are downstream of its hypothesis, so
+        the model's-own-locate fact cannot surface a file it never grepped.
+        An independent search seeded from the ISSUE TEXT can. Here the model
+        ran NO locate at all, yet the issue mentions `shared_token`, which
+        greps to the unread alt.py."""
+        self.state["problem_statement"] = (
+            "the value is wrong because `shared_token` is computed badly")
+        r = self.declare()
+        self.assertNotIn("alternatives", r)          # no locate -> no own fact
+        self.assertIn("issue_seeded", r)
+        self.assertIn("alt.py", r["issue_seeded"])
+        self.assertIn("ISSUE TEXT", r["issue_seeded"])
+        self.assertIn("issue-seeded unread", self.state["diag"]["S3_site"])
+
+    def test_issue_seed_skips_read_and_declared_files(self):
+        self.state["problem_statement"] = "about `shared_token` behaviour"
+        self.handlers["swe.read_range"](None, {"file": "alt.py",
+                                               "start": 1, "end": 5})
+        r = self.declare()
+        self.assertNotIn("issue_seeded", r)          # only alt.py hit, now read
+
+    def test_issue_seed_off_when_gate_off(self):
+        os.environ.pop("DIAG_GATE", None)
+        self.state["problem_statement"] = "about `shared_token`"
+        r = self.declare()
+        self.assertNotIn("issue_seeded", r)
+
+    def test_issue_seed_empty_without_problem_statement(self):
+        r = self.declare()
+        self.assertNotIn("issue_seeded", r)
+
     def test_off_when_gate_off(self):
         os.environ.pop("DIAG_GATE", None)
         self.handlers["swe.locate"](None, {"pattern": "shared_token"})
