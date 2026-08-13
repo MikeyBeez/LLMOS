@@ -218,6 +218,23 @@ class SiteAlternativesTest(Base):
         r = self.declare()
         self.assertNotIn("alternatives", r)
 
+    def test_venv_junk_never_pollutes_alternatives(self):
+        """CYCLE-6 (pytest-7220 rerun): the alternatives fact fired and was
+        consumed by venv/site-packages matches, burying the gold file. Only
+        repo source files may be recorded or shown."""
+        vdir = os.path.join(self.repo, "venv", "lib", "site-packages", "sx")
+        os.makedirs(vdir)
+        with open(os.path.join(vdir, "junk.py"), "w") as fh:
+            fh.write("# shared_token in installed junk\n")
+        self.handlers["swe.locate"](None, {"pattern": "shared_token"})
+        recs = self.state.get("locate_files") or []
+        flat = [p for r in recs for p in r["files"]]
+        self.assertTrue(all("venv" not in p for p in flat), flat)
+        r = self.declare()
+        self.assertIn("alternatives", r)
+        self.assertIn("alt.py", r["alternatives"])
+        self.assertNotIn("venv", r["alternatives"])
+
     def test_no_locates_no_fact(self):
         r = self.declare()
         self.assertNotIn("alternatives", r)

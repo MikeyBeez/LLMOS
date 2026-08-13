@@ -1363,10 +1363,21 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         or hit_path.endswith(norm))
             lines = [ln for ln in lines if _hit_ok(ln)]
         lines = lines[:40]
+        # CYCLE-6 (2026-08-13, pytest-7220 rerun): the alternatives fact
+        # FIRED and was POISONED -- the locates had also matched across
+        # venv/site-packages, and the capped alternatives list was consumed
+        # entirely by setuptools internals, burying nodes.py (the gold file,
+        # present in TWO of the model's own locate records). Third instance
+        # of the junk-evidence law (_filter_repo_frames, GROW_ECHO): junk
+        # silently drowns gates built to demand the real thing. Only repo
+        # source files count.
+        _JUNK = ("venv/", "site-packages/", ".tox/", "node_modules/",
+                 ".egg-info", "__pycache__/", "build/lib", "dist/")
         _lf = []
         for _ln in lines:
             _p = _ln.split(":", 1)[0].lstrip("./")
-            if _p.endswith(".py") and _p not in _lf:
+            if (_p.endswith(".py") and _p not in _lf
+                    and not any(_j in _p for _j in _JUNK)):
                 _lf.append(_p)
         if _lf:
             _hist = state.setdefault("locate_files", [])
