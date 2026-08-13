@@ -271,6 +271,32 @@ class SiteAlternativesTest(Base):
         r = self.declare()
         self.assertNotIn("issue_seeded", r)
 
+    def test_pip_freeze_noise_does_not_beat_code_span_api(self):
+        """CYCLE-8 (pytest-7220): rank issue symbols by code-ness, not length,
+        and drop version-pin lines -- so a pasted pip-freeze dump cannot bury
+        the short discriminating API call. The fenced code block calls
+        `os.getcwd()`, which greps to src/api.py; the freeze lines
+        (importlib-metadata==..., virtualenv==...) and the scripts/ dir must
+        NOT win."""
+        os.makedirs(os.path.join(self.repo, "scripts"))
+        with open(os.path.join(self.repo, "scripts", "release.py"), "w") as fh:
+            fh.write("importlib_metadata = 1\nvirtualenv = 1\n"
+                     "packaging = 1\nmore_itertools = 1\n")
+        os.makedirs(os.path.join(self.repo, "src"))
+        with open(os.path.join(self.repo, "src", "api.py"), "w") as fh:
+            fh.write("import os\n\ndef f():\n    return os.getcwd()\n")
+        self.state["problem_statement"] = (
+            "Wrong path when the working directory changes.\n\n"
+            "```python\nold = os.getcwd()\nos.chdir(d)\n```\n\n"
+            "pip freeze:\nimportlib-metadata==1.3.0\nvirtualenv==20.0.2\n"
+            "packaging==20.0\nmore-itertools==8.0.2\n")
+        r = self.declare()
+        self.assertIn("issue_seeded", r)
+        self.assertIn("src/api.py", r["issue_seeded"])
+        self.assertNotIn("scripts/release.py", r["issue_seeded"])
+        # the freeze/package tokens never became driving symbols
+        self.assertNotIn("virtualenv", r["issue_seeded"])
+
     def test_off_when_gate_off(self):
         os.environ.pop("DIAG_GATE", None)
         self.handlers["swe.locate"](None, {"pattern": "shared_token"})

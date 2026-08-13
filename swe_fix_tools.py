@@ -1041,25 +1041,68 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                  "shutil", "pytest", "python", "output", "error", "Error",
                  "Exception", "AssertionError", "fixture", "yield", "None",
                  "raise", "except", "def", "the", "and", "for", "not"}
-        _syms = set()
-        for _m in re.findall(r"`([^`]+)`", _text):
-            _syms.update(re.findall(r"[A-Za-z_]\w{2,}", _m))
-        for _m in re.findall(r"[a-zA-Z_][\w.]*\.[A-Za-z_]\w+", _text):
-            _syms.update(_p for _p in _m.split(".") if len(_p) > 2)
-        for _m in re.findall(r"\b[A-Za-z_]\w*\b", _text):
+        # CYCLE-8 (learned from NVIDIA NOOA's code-as-action framing: make the
+        # investigation a composable, tested routine, not a length-ranked
+        # regex). Cycle 7 MISFIRED on pytest-7220: symbols were ranked by
+        # -len and capped at 12, so the long tokens from the issue's pasted
+        # nox/pip-freeze dump (importlib-metadata, virtualenv, packaging)
+        # dominated and pointed the seed at scripts/*.py, while the SHORT
+        # discriminating API calls os.getcwd()/os.chdir() -- which grep to the
+        # gold file nodes.py -- were dropped. Fix: (1) drop pip-freeze/version
+        # lines wholesale; (2) rank by CODE-NESS not length -- what the
+        # reporter wrote as code (`spans`, fenced blocks, dotted-attribute and
+        # call names) leads, prose identifiers fill; (3) exclude non-source
+        # dirs; (4) score files by weighted distinct hits (code symbol = 2).
+        _lines = _text.splitlines()
+        _prose_txt = "\n".join(
+            l for l in _lines if not re.match(r"\s*[\w.-]+\s*==\s*\d", l))
+        # CYCLE-8b: a fenced ```block``` is ONE span to a naive `([^`]+)`
+        # regex, so tokenising it wholesale pulled the pasted
+        # compilation/pip-freeze dump into the symbol set -- capitalised noise
+        # (Command, OSError) and package names then outranked the real API.
+        # Extract from fenced blocks ONLY call/attribute names, keep priority
+        # ORDER (calls lead), and take inline spans from text with the fences
+        # removed. No alphabetical sort (that re-buried getcwd under capitals).
+        _nofence = re.sub(r"```.*?```", " ", _text, flags=re.S)
+        _rank = []
+        for _blk in re.findall(r"```.*?```", _text, re.S):
+            _rank += re.findall(r"\.([a-z_]\w{2,})\s*\(", _blk)
+            _rank += re.findall(r"\b([a-z_]\w{2,})\s*\(", _blk)
+            _rank += re.findall(r"\.([a-z_]\w{2,})\b", _blk)
+        _rank += re.findall(r"\.([a-z_]\w{2,})\s*\(", _nofence)
+        for _m in re.findall(r"`([^`\n]+)`", _nofence):
+            _rank += re.findall(r"[A-Za-z_]\w{2,}", _m)
+
+        def _ok(s):
+            return (s not in _STOP and not s.startswith("test_")
+                    and "-" not in s and not re.search(r"\d", s))
+
+        _code, _cseen = [], set()
+        for s in _rank:
+            if _ok(s) and s not in _cseen:
+                _cseen.add(s)
+                _code.append(s)
+        _codeset = set(_code)
+        _prose = set()
+        for _m in re.findall(r"\b[A-Za-z_]\w*\b", _prose_txt):
             if ("_" in _m and len(_m) > 3) or re.search(r"[a-z][A-Z]", _m):
-                _syms.add(_m)
-        _syms = [s for s in _syms
-                 if s not in _STOP and not s.startswith("test_")]
-        _syms.sort(key=lambda s: (-len(s), s))
-        _syms = _syms[:12]
+                _prose.add(_m)
+        _prose = sorted(s for s in _prose if _ok(s) and s not in _codeset)
+        _seen, _syms = set(), []
+        for s in _code + _prose:           # code symbols lead, never by length
+            if s not in _seen:
+                _seen.add(s)
+                _syms.append(s)
+        _syms = _syms[:15]
+        _EXCLDIRS = {"scripts", "doc", "docs", "examples", "benchmarks",
+                     "tools", "ci", ".github", "changelog"}
         _out = []
         if _syms:
             _pat = "|".join(re.escape(s) for s in _syms)
             _r = _run("grep -RInE --include=*.py %s ." % shlex.quote(_pat),
                       timeout=60)
             _counts = {}
-            for _ln in (_r.stdout or "").splitlines()[:3000]:
+            for _ln in (_r.stdout or "").splitlines()[:4000]:
                 _fp = _ln.split(":", 1)[0].lstrip("./")
                 if not _fp.endswith(".py"):
                     continue
@@ -1067,10 +1110,16 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     continue
                 if "test" in _fp.lower():
                     continue
+                if _fp.split("/", 1)[0] in _EXCLDIRS:
+                    continue
                 _hit = set(m for m in _syms
                            if re.search(r"\b%s\b" % re.escape(m), _ln))
                 _counts.setdefault(_fp, set()).update(_hit)
-            _out = sorted(_counts, key=lambda f: (-len(_counts[f]), f))
+
+            def _score(f):
+                return sum(2 if s in _codeset else 1 for s in _counts[f])
+
+            _out = sorted(_counts, key=lambda f: (-_score(f), f))
         state["_issue_seed_cache"] = _out
         return _out
 
