@@ -99,6 +99,7 @@ def walk(diffs, segments=4, **env):
 CAPS = []          # wall_cap handed to each segment, filled by walk()
 
 SAME = "--- a/x.py\n+++ b/x.py\n@@\n-a\n+b\n"
+GROWN = SAME + "@@\n-c\n+d\n"          # SAME plus new hunks: a real extension
 OTHER = "--- a/y.py\n+++ b/y.py\n@@\n-c\n+d\n"
 
 
@@ -215,7 +216,8 @@ class GrowSegTest(unittest.TestCase):
         if hasattr(SA.oracle_probe, "last_tail"):
             del SA.oracle_probe.last_tail
 
-    def grow_walk(self, segments=4, accept_after=None, last_tail="", **env):
+    def grow_walk(self, segments=4, accept_after=None, last_tail="",
+                  grow_bytes=False, **env):
         """Every segment goes green; the oracle refuses until `accept_after`
         greens have been probed (None = refuse forever).  Returns
         (goals, logs, reverts, result_reason)."""
@@ -237,12 +239,17 @@ class GrowSegTest(unittest.TestCase):
 
         handlers = {
             "_diff_nonempty": lambda: True,
-            "_capture_diff": lambda: SAME,
+            # GROW_ECHO made byte-identity meaningful: a walk whose capture
+            # never changes models a model that never extends. grow=True in
+            # the capture models a REAL extension after the first refusal.
+            "_capture_diff": (lambda: (GROWN if len(goals) > 1 else SAME))
+                             if grow_bytes else (lambda: SAME),
             "_revert_tree": lambda: reverts.append(1),
             "_restore_diff": lambda d: {"restored": True},
             "_oracle_probe": probe,
             "swe.verify_fix": lambda pcb, args: {"ok": False},
         }
+        self._probes = probes
         SA.oracle_probe.last_tail = last_tail
         real = SA.phase_run
         SA.phase_run = fake_phase_run
@@ -284,7 +291,8 @@ class GrowSegTest(unittest.TestCase):
 
     def test_oracle_accept_after_grow_ends_the_walk(self):
         goals, logs, reverts, reason = self.grow_walk(GROW_SEG="1",
-                                                      accept_after=1)
+                                                      accept_after=1,
+                                                      grow_bytes=True)
         self.assertEqual(reason, "declared")
         self.assertEqual(len(goals), 2)   # grow segment ran, then accepted
         self.assertEqual(len(reverts), 0)
@@ -297,7 +305,23 @@ class GrowSegTest(unittest.TestCase):
         self.assertEqual(len(reverts), 4)
         for g in goals:
             self.assertNotIn("STILL APPLIED", g)
-        self.assertFalse([l for l in logs if "GROW" in l])
+        self.assertFalse([l for l in logs if "GROW 1/2" in l])
+
+    def test_echo_skips_probe_and_states_the_no_edit(self):
+        """GROW_ECHO (cycle 4): sklearn-13497 banked 645/645/645 -- the grow
+        segments made NO edit and each identical candidate cost a full
+        hidden-test probe. Identical bytes get identical verdicts: one probe
+        total, the fact stated in the next goal."""
+        goals, logs, reverts, _ = self.grow_walk(GROW_SEG="1")
+        self.assertEqual(self._probes["n"], 1)     # first green only
+        self.assertTrue([l for l in logs if "GROW_ECHO" in l])
+        self.assertIn("BYTE-IDENTICAL", goals[2])  # the fact, next goal
+        self.assertIn("NEW edit", goals[2])
+
+    def test_echo_off_when_grow_off(self):
+        goals, logs, reverts, _ = self.grow_walk()   # GROW_SEG unset
+        self.assertEqual(self._probes["n"], 4)       # every green probed
+        self.assertFalse([l for l in logs if "GROW_ECHO" in l])
 
 
 class CompactTest(unittest.TestCase):

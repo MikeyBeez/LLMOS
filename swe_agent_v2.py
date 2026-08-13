@@ -755,6 +755,15 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 "maintainers would reject. When the issue conflicts with "
                 "the codebase own conventions (deprecation-before-removal, "
                 "API style, naming), prefer the conventions.")
+        if state.pop("grow_echo_note", False):
+            seg_goal += (
+                "\n\nFACT: after being told to EXTEND your fix, you "
+                "submitted a patch BYTE-IDENTICAL to the one the project's "
+                "hidden tests already failed. Identical bytes get identical "
+                "verdicts -- re-running the reproduction changed nothing and "
+                "never will. You must ADD lines to the patch: open the "
+                "SIBLING operator/method sites and the canonical-object "
+                "idiom now, make a NEW edit, then re-verify.")
         _cgap = state.pop("coverage_gap_note", None)
         if _oref and _cgap:
             seg_goal += (
@@ -836,7 +845,30 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                 log(" -- COVERAGE GAP: added lines never executed by the "
                     "reproduction -- %s" % _gtxt)
                 state["coverage_gap_note"] = _gtxt
-            _orc = _oracle_ok()
+            # GROW_ECHO (2026-08-13, cycle 4, under GROW_SEG). never28
+            # measured GROW on 4 instances with ZERO extensions: sklearn-13497
+            # banked 645/645/645 -- the grow segment made NO edit, re-ran the
+            # reproduction on the kept tree (trivially green), and the walk
+            # spent a FULL hidden-test probe to learn what identical bytes
+            # already guaranteed. Identical bytes get identical verdicts:
+            # skip the probe, reuse the refusal, and say the no-edit out loud.
+            _orc_known = False
+            if os.environ.get("GROW_SEG", "0") == "1":
+                _lrd = state.get("last_refused_diff")
+                if _lrd:
+                    try:
+                        _nowd = handlers["_capture_diff"]()
+                    except Exception:
+                        _nowd = ""
+                    if _nowd and _nowd == _lrd:
+                        _orc_known = True
+            if _orc_known:
+                log(" -- GROW_ECHO: candidate is byte-identical to the "
+                    "already-refused patch; verdict known, probe skipped")
+                state["grow_echo_note"] = True
+                _orc = False
+            else:
+                _orc = _oracle_ok()
             if _orc is False:
                 # The graded tests disagree with the model's green: the
                 # incomplete-fix class, caught in the act. Bank the candidate
@@ -848,6 +880,7 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                     _cand = handlers["_capture_diff"]()
                     if _cand.strip():
                         candidates.append((name, _cand, True))
+                        state["last_refused_diff"] = _cand
                         log(" -- segment %d (%s): oracle-refused candidate "
                             "banked (%d bytes)" % (i + 1, name, len(_cand)))
                 except Exception as _e:
