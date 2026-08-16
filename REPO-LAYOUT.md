@@ -5,7 +5,7 @@ The canonical repository is git@github.com:MikeyBeez/LLMOS.git (branch main).
 There are exactly two checkouts:
 
 1. Mac mini ~/Code/LLMOS — a normal clone. Review, docs, backup.
-2. pop (192.168.12.174) ~/Code/LLMOS — a normal clone. THIS IS WHERE CODE
+2. pop (192.168.12.232) ~/Code/LLMOS — a normal clone. THIS IS WHERE CODE
    RUNS. The SWE agent imports from here (PYTHONPATH), and llama-server
    launch scripts live here.
 

@@ -129,7 +129,7 @@ This is MemGPT's insight, generalized into a real VM subsystem: the context wind
 ### 4.10 Device drivers
 **Linux:** drivers present hardware behind a uniform interface (`/dev/sda`, char/block devices).
 **LLMOS:** devices are external capabilities, each behind a driver:
-- `/dev/cpu0` → the model backend itself (gemma on pop, ornith:35b, Claude API). **The CPU is a hot-swappable device** — you can change or fine-tune the model without rewriting programs. This is a genuinely new idea with no silicon analog.
+- `/dev/cpu0` → the model backend itself (ornith on pop via llama-server, Claude API). **The CPU is a hot-swappable device** — you can change or fine-tune the model without rewriting programs. This is a genuinely new idea with no silicon analog.
 - `/dev/web` → web search/fetch
 - `/dev/browser` → the Chrome/computer-use device
 - `/dev/clock` → wall-clock time (`get-current-time`)
