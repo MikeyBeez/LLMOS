@@ -42,22 +42,39 @@ _RXL_LIT = re.compile(r"(?<![\w])r([\"\x27])((?:\\.|(?!\1).)*)\1")
 
 def _regex_lint(text):
     """Return [{pattern, regex_error}] for raw-string regex literals in
-    text that do not compile. Advisory, never a refusal: f-strings are
-    skipped (interpolation), and cross-line concatenations are invisible
-    here, so absence of a report is not proof of health."""
+    text that do not compile. Advisory, never a refusal. v2: implicit
+    continuations are JOINED first -- an open re.compile( at end of
+    line, or a literal ending one line with another literal opening the
+    next -- and the CONCATENATED pattern is compiled, never the parts
+    (parts of a split pattern are frequently invalid alone and would
+    false-alarm). f-strings are skipped (interpolation)."""
+    lines = (text or "").split("\n")
+    merged = []
+    for ln in lines:
+        if merged:
+            prev = merged[-1].rstrip()
+            nxt = ln.lstrip()
+            if (re.search(r"re\.compile\(\s*$", prev)
+                    or (re.search(r"[\"\x27]\s*$", prev)
+                        and re.match(r"(?:[rRfF]{1,2})?[\"\x27]", nxt))):
+                merged[-1] = prev + " " + nxt
+                continue
+        merged.append(ln)
     found = []
-    for ln in (text or "").split("\n"):
+    for ln in merged:
         if not _RXL_LINE.search(ln):
             continue
         if _RXL_FSTR.search(ln):
             continue
-        for m in _RXL_LIT.finditer(ln):
-            pat = m.group(2)
-            try:
-                re.compile(pat)
-            except re.error as e:
-                found.append({"pattern": pat[:160],
-                              "regex_error": str(e)})
+        lits = [m.group(2) for m in _RXL_LIT.finditer(ln)]
+        if not lits:
+            continue
+        pat = "".join(lits)
+        try:
+            re.compile(pat)
+        except re.error as e:
+            found.append({"pattern": pat[:160],
+                          "regex_error": str(e)})
     return found
 
 from repo_bootstrap_tools import llm_call, _extract_json
