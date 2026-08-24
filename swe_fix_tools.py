@@ -31,6 +31,35 @@ import fnmatch, os, re, shlex, shutil, signal, subprocess, time
 # clamped to the budget that actually remains.
 PHASE_DEADLINE = None
 
+# REGEX LINT (2026-08-24, astropy-14365): a regex literal is valid Python
+# whether or not it compiles as a regex, so the parse guard cannot catch a
+# broken pattern. Compile every raw-string literal on regex-bearing lines
+# of an edit and surface the compile error in the SAME tool result.
+_RXL_LINE = re.compile(r"re\.compile|_re\b\s*=|_regex\b\s*=")
+_RXL_FSTR = re.compile(r"(?<![\w])(?:[rR][fF]|[fF][rR])[\"\x27]")
+_RXL_LIT = re.compile(r"(?<![\w])r([\"\x27])((?:\\.|(?!\1).)*)\1")
+
+
+def _regex_lint(text):
+    """Return [{pattern, regex_error}] for raw-string regex literals in
+    text that do not compile. Advisory, never a refusal: f-strings are
+    skipped (interpolation), and cross-line concatenations are invisible
+    here, so absence of a report is not proof of health."""
+    found = []
+    for ln in (text or "").split("\n"):
+        if not _RXL_LINE.search(ln):
+            continue
+        if _RXL_FSTR.search(ln):
+            continue
+        for m in _RXL_LIT.finditer(ln):
+            pat = m.group(2)
+            try:
+                re.compile(pat)
+            except re.error as e:
+                found.append({"pattern": pat[:160],
+                              "regex_error": str(e)})
+    return found
+
 from repo_bootstrap_tools import llm_call, _extract_json
 
 
@@ -1915,6 +1944,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                     out["magic_strings"] = _ms
             except Exception:
                 pass
+            _rxl = _regex_lint(new or "")
+            if _rxl:
+                _fired(state, "regex_lint")
+                out["regex_check"] = {
+                    "broken_patterns": _rxl,
+                    "note": ("a regex literal you just wrote does NOT "
+                             "compile -- this exact error will occur at "
+                             "runtime. Fix THIS before anything else; "
+                             "do not re-apply the same edit.")}
             if _syn:
                 out["syntax"] = _syn
             try:
@@ -2114,6 +2152,15 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 out["magic_strings"] = _ms
         except Exception:
             pass
+        _rxl = _regex_lint(new or "")
+        if _rxl:
+            _fired(state, "regex_lint")
+            out["regex_check"] = {
+                "broken_patterns": _rxl,
+                "note": ("a regex literal you just wrote does NOT "
+                         "compile -- this exact error will occur at "
+                         "runtime. Fix THIS before anything else; do "
+                         "not re-apply the same edit.")}
         # THE MAP, built right before/with every patch (Mikey): mechanical AST,
         # cached per checkout, outside the repo tree. No choice point -- the
         # agent cannot patch without receiving an observation of what it changed.
