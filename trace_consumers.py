@@ -92,11 +92,26 @@ def events_from_messages(messages):
     return events
 
 
-def _events_digest(events, max_chars=6000):
+def _events_digest(events, max_chars=6000, arg_chars=150, full_arg_chars=2000):
+    # 2026-08-24: the old [:100] chop cut args mid-word with no marker, and
+    # the critic reported "the snippet is truncated" about a complete
+    # 1746-char program -- it was diagnosing this function, not the agent.
+    # Now: a call that FAILED or that verbatim-repeats an earlier call in
+    # the window is shown near-full; every clip is marked honestly; and
+    # repeats are flagged mechanically so the reviewer need not guess.
     lines = []
+    seen = {}
     for n, ev in enumerate(events):
-        args = json.dumps(ev.get("args"), default=str)[:100]
-        s = f"[{n}] {ev['tool']}({args}) ok={ev['ok']}"
+        raw = json.dumps(ev.get("args"), default=str)
+        budget = full_arg_chars if (ev.get("error") or raw in seen) else arg_chars
+        shown = raw[:budget]
+        if len(raw) > budget:
+            shown += " ...(+%d chars clipped)" % (len(raw) - budget)
+        if raw in seen:
+            shown += "  [args IDENTICAL to turn %d]" % seen[raw]
+        else:
+            seen[raw] = n
+        s = f"[{n}] {ev['tool']}({shown}) ok={ev['ok']}"
         if ev.get("error"):
             s += f"  err={ev['error']}"
         lines.append(s)
@@ -115,7 +130,9 @@ def critic_review(messages, last_n=12):
     if not events:
         return ""
     recent = events[-last_n:]
-    digest = _events_digest(recent, max_chars=4000)
+    # 2026-08-24, Mikey: get it working first, worry about time later --
+    # the critic sees every call near-full, not just failed/repeated ones.
+    digest = _events_digest(recent, max_chars=40000, arg_chars=2000)
     last_err = next((e["error"] for e in reversed(recent) if e.get("error")),
                     None)
     web_blob = ""

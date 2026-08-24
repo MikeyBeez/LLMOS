@@ -1476,7 +1476,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
             except Exception:
                 advice = ""
             if advice:
-                log(f"  [critic] {advice[:100]}")
+                log(f"  [critic] {advice[:300]}")
                 if emit:
                     emit("critic", {"turn": turn, "advice": advice})
                 messages.append({"role": "user",
