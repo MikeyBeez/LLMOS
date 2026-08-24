@@ -2635,6 +2635,41 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             print(" -- defs scan failed: %s" % type(_e).__name__, flush=True)
             return []
 
+    def h_symbol(pcb, args):
+        # 2026-08-24 (Mikey: "standard stuff that gets used ... pull it
+        # out and put it into some object"): the symbol map IS that
+        # object, built mechanically per checkout (~2s, stdlib ast).
+        name = str((args or {}).get("name", "")).strip()
+        if not name:
+            return {"error": "give name: a function, class or method "
+                             "name, e.g. __mul__ or Prefix"}
+        try:
+            import symmap as _symm
+            _m = _symm._load(repo_dir)
+            _hits = (_m.get("symbols") or {}).get(name)
+            if not _hits:
+                _near = [k for k in (_m.get("symbols") or {})
+                         if name.lower() in k.lower()][:10]
+                return {"name": name, "hits": [], "near_matches": _near,
+                        "note": "no exact definition with that name; "
+                                "try a near_match, or locate for "
+                                "non-definition text"}
+            _out = []
+            for _h in _hits[:12]:
+                _ps = ((_m.get("pseudo") or {}).get(_h.get("qual"))
+                       or {})
+                _out.append({"kind": _h.get("kind"),
+                             "loc": _h.get("loc"),
+                             "sig": _ps.get("sig", ""),
+                             "doc": _ps.get("doc", "")})
+            _fired(state, "symbol_lookup")
+            return {"name": name, "hits": _out,
+                    "hit_count": len(_hits)}
+        except Exception as _e:
+            return {"error": "symbol map unavailable (%s: %s); use "
+                             "locate instead"
+                             % (type(_e).__name__, _e)}
+
     state["_sibling_fn"] = _sibling_sites
     state["_defs_fn"] = _file_defs
     handlers = {
@@ -2642,6 +2677,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.differential": h_differential,
         "swe.declare_site": h_declare_site,
         "swe.locate":      h_locate,
+        "swe.symbol":      h_symbol,
         "swe.read_range":  h_read_range,
         "swe.patch":       h_patch,
         "swe.edit_line":   h_edit_line,
@@ -3085,6 +3121,21 @@ FIX_TOOLS = [
             "passes on a script that previously FAILED."),
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "symbol",
+        "description": (
+            "Instant lookup of a function/class/method by NAME from a "
+            "mechanical map of the whole repo: every definition site as "
+            "file:line plus signature and first docstring line. Use this "
+            "FIRST when you know the name -- it replaces the "
+            "locate('def X')-then-read_range hunt in one call. locate "
+            "is still right for non-definition text (strings, calls, "
+            "comments)."),
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string",
+                     "description": "exact symbol name, e.g. __mul__ "
+                                    "or Prefix or _print_Tuple"},
+        }, "required": ["name"]}}},
+    {"type": "function", "function": {
         "name": "run_tests",
         "description": (
             "Run an existing test file or test id from the repo's suite as a "
@@ -3155,6 +3206,7 @@ FIX_TOOL2SYS = {
     "differential": "swe.differential",
     "declare_site": "swe.declare_site",
     "locate":      "swe.locate",
+    "symbol":      "swe.symbol",
     "read_range":  "swe.read_range",
     "patch":       "swe.patch",
     "edit_line":   "swe.edit_line",
