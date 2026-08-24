@@ -650,6 +650,11 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     _walk_t0 = _wt.time()
     _walk_cap = float(os.environ.get("REPERTOIRE_WALL", "0") or 0)
     _walk_capped = False
+    # EXT-BUDGET (2026-08-24): wall seconds already spent per segment
+    # index, so an extension pass is charged against the SAME budget
+    # instead of receiving a fresh cap (django-11910: seg 1 ran twice,
+    # 2059s of the 2400s walk, and segments 3-6 never ran).
+    _seg_spent = {}
     while i < len(ops):
         if _walk_cap and (_wt.time() - _walk_t0) > _walk_cap:
             _walk_capped = True
@@ -807,7 +812,15 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             # share so the walk is still a walk.
             _s1f = float(os.environ.get("SEG1_WALL_FRAC", "0") or 0)
             if i == 0 and _s1f > 0:
-                _seg_cap = min(_seg_cap, _walk_cap * _s1f)
+                _share_left = _walk_cap * _s1f - _seg_spent.get(0, 0.0)
+                if extended and _share_left <= 60:
+                    log(" -- segment 1: share %.0fs already spent "
+                        "(%.0fs); skipping the extension and moving on"
+                        % (_walk_cap * _s1f, _seg_spent.get(0, 0.0)))
+                    extended = False
+                    i += 1
+                    continue
+                _seg_cap = min(_seg_cap, max(_share_left, 60))
             if _seg_cap <= 0:
                 _walk_capped = True
                 log(" -- REPERTOIRE wall cap %.0fs exhausted before segment "
@@ -822,12 +835,14 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             _init_msgs = [m for m in msgs if m.get("role") == "system"][:1]
             log(" -- SEG_COMPACT: transcript (%d msgs) replaced by system + "
                 "ledger for segment %d" % (len(msgs), i + 1))
+        _t_segstart = _wt.time()
         reason, msgs, meta = phase_run(cpu, tools, tool2sys, handlers,
                                        system_prompt, seg_goal, turns_this,
                                        wall_cap=_seg_cap,
                                        log=log, init_messages=_init_msgs,
                                        success=_corroborated(state, handlers, log),
                                        **kw)
+        _seg_spent[i] = _seg_spent.get(i, 0.0) + (_wt.time() - _t_segstart)
         if reason == "solved" or state.get("repro_green"):
             log(" -- REPERTOIRE solved at segment %d (%s)" % (i + 1, name))
             # COVERAGE GAP (django-11910): green only proves the lines the
@@ -954,6 +969,14 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
         # applying a single patch -- consuming a branch of the search while
         # never trying that kind of fix. Grant one extension, then move on.
         if not _changed and not extended:
+            _rem_walk = ((_walk_cap - (_wt.time() - _walk_t0))
+                         if _walk_cap else None)
+            if _rem_walk is not None and _rem_walk < 120:
+                log(" -- segment %d (%s): no source change and only "
+                    "%.0fs of walk left; skipping the extension"
+                    % (i + 1, name, _rem_walk))
+                i += 1
+                continue
             log(" -- segment %d (%s): no source change; extending once"
                 % (i + 1, name))
             extended = True
