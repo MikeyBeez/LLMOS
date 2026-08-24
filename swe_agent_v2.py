@@ -626,6 +626,11 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
         if _d:
             L.append("Diagnosis record: " + "; ".join(
                 "%s=%s" % _kv for _kv in sorted(_d.items())))
+        _learned = state.get("learned")
+        if _learned:
+            L.append("LEARNED in earlier segments (facts observed and "
+                     "kept; turn numbers refer to transcripts that were "
+                     "compacted away):\n- " + "\n- ".join(_learned))
         if candidates:
             L.append("Patches produced by earlier segments (each made and "
                      "checked already -- do NOT re-produce one of these "
@@ -843,6 +848,55 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                                        success=_corroborated(state, handlers, log),
                                        **kw)
         _seg_spent[i] = _seg_spent.get(i, 0.0) + (_wt.time() - _t_segstart)
+        # LEARNED extraction (2026-08-24, Mikey): "look through that mess
+        # and say: is there anything in here that needs to go into the
+        # context window for what has to happen further down the line?"
+        # One extra pass per segment, accepted deliberately -- getting it
+        # right outranks the time. Guards from the critic-digest lesson:
+        # full transcript honestly marked, turn citations required, empty
+        # output allowed and expected.
+        if (os.environ.get("SEG_COMPACT", "0") == "1"
+                and os.environ.get("LEARNED", "1") == "1"):
+            try:
+                from repo_bootstrap_tools import llm_call as _lcall
+                from repo_bootstrap_tools import _extract_json as _exj
+                from trace_consumers import (events_from_messages as _efm,
+                                             _events_digest as _edg)
+                _lev = _efm(msgs)
+                if _lev:
+                    _ldg = _edg(_lev[-40:], max_chars=40000, arg_chars=2000)
+                    _lraw = _lcall(
+                        system=("You extract only facts that a future "
+                                "step will need. Respond ONLY with a "
+                                "JSON array of strings; an empty array "
+                                "is a good answer."),
+                        prompt=("Full transcript digest of one work "
+                                "segment (operation: %s):\n%s\n\n"
+                                "Is there anything in here that must be "
+                                "carried forward for what has to happen "
+                                "next? Keep only things LEARNED: an "
+                                "environment fact, a located file/"
+                                "function/line, a verified behavior, an "
+                                "approach that failed and why. Only "
+                                "facts actually observed above -- end "
+                                "each with its turn like [turn 12]. No "
+                                "advice, no plans, no summaries. If "
+                                "nothing qualifies, return []."
+                                % (name, _ldg)),
+                        max_tokens=800)
+                    _litems = _exj(_lraw)
+                    if isinstance(_litems, list) and _litems:
+                        _lst = state.setdefault("learned", [])
+                        for _li in _litems[:8]:
+                            _li = str(_li).strip()[:300]
+                            if _li and _li not in _lst:
+                                _lst.append(_li)
+                        del _lst[:-40]
+                        log(" -- LEARNED: kept %d fact(s) from segment %d"
+                            % (min(len(_litems), 8), i + 1))
+            except Exception as _le:
+                log(" -- LEARNED extraction skipped (%s: %s)"
+                    % (type(_le).__name__, _le))
         if reason == "solved" or state.get("repro_green"):
             log(" -- REPERTOIRE solved at segment %d (%s)" % (i + 1, name))
             # COVERAGE GAP (django-11910): green only proves the lines the
