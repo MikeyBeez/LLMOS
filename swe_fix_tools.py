@@ -26,6 +26,11 @@ The gate is now red -> green on the agent's OWN reproduction:
 """
 import fnmatch, os, re, shlex, shutil, signal, subprocess, time
 
+# PHASE_DEADLINE (2026-08-24): see test_runner.PHASE_DEADLINE. Set by
+# swe_agent_v2 before each tool dispatch so every shelled-out tool call is
+# clamped to the budget that actually remains.
+PHASE_DEADLINE = None
+
 from repo_bootstrap_tools import llm_call, _extract_json
 
 
@@ -712,6 +717,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
              "triage_repro": ""}        # repro_criteria from the understanding pass
 
     def _run(cmd, timeout=300):
+        if PHASE_DEADLINE:
+            timeout = max(20, min(timeout, PHASE_DEADLINE - time.time()))
         env = os.environ.copy()
         env.update(env_vars)
         venv_bin = os.path.join(repo_dir, env_dir, "bin")

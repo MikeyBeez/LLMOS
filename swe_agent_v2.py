@@ -1234,6 +1234,18 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
             return "budget", messages, meta_log
 
         # Normal tool: dispatch.
+        # PHASE_DEADLINE (2026-08-24): hand the remaining budget down so a
+        # single slow tool call cannot overshoot the phase wall. The check
+        # above only runs BETWEEN turns; measured overshoot was 28-42%
+        # (worst 178s against a 23s cap), which consumed the whole 2400s
+        # repertoire wall in one segment and produced zero-byte patches.
+        try:
+            import test_runner as _tr_mod, swe_fix_tools as _sft_mod
+            _dl = (_phase_t0 + _wall_cap) if _wall_cap else None
+            _tr_mod.PHASE_DEADLINE = _dl
+            _sft_mod.PHASE_DEADLINE = _dl
+        except Exception:
+            pass
         h = handlers.get(target)
         if h is None:
             result = {"error": f"unknown tool {tool!r}"}

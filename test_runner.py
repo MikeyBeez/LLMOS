@@ -17,7 +17,21 @@ Guarantees on every run:
     label via docstring lookup)
   * missing external module -> install once and retry (name via alias map)
 """
-import os, re, subprocess
+import os, re, subprocess, time
+
+# PHASE_DEADLINE (2026-08-24): unix ts by which the current agent phase must
+# end. Set by swe_agent_v2's turn loop. run_tests clamps its own timeout to
+# what is left, because the loop can only notice the wall BETWEEN turns -- a
+# 600s test run started with 100s of budget left overshot the cap by 28-42%
+# and ate the whole repertoire wall, so 5 of 6 mutation segments never ran.
+PHASE_DEADLINE = None
+
+
+def _clamp_timeout(timeout, floor=20):
+    if not PHASE_DEADLINE:
+        return timeout
+    left = PHASE_DEADLINE - time.time()
+    return max(floor, min(timeout, left))
 
 _PKG_ALIASES = {
     "cv2": "opencv-python", "yaml": "pyyaml", "PIL": "pillow",
@@ -256,6 +270,7 @@ def run_tests(repo_dir, kind, node_ids, env_vars=None, repo=None,
               timeout=600, max_installs=4, diagnose=False, log_path=None):
     """Run the given test node ids and report pass/fail. THE single test
     execution path. Returns dict: ok, exit, passed, tail, installed."""
+    timeout = _clamp_timeout(timeout)
     env = _env(repo_dir, kind, env_vars)
     ensure_pytest(repo_dir, kind, env)
     subprocess.run("rm -rf .hypothesis", shell=True, cwd=repo_dir,
