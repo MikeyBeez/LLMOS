@@ -837,7 +837,16 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             # already carries every targeted injection (SEG_ECHO, oracle
             # refusal hints, GROW) -- those survive compaction untouched.
             seg_goal = _ledger() + "\n\n" + seg_goal
-            _init_msgs = [m for m in msgs if m.get("role") == "system"][:1]
+            # SEG_COMPACT KEEPS THE TASK (2026-08-25): the purge dropped every
+            # non-system message, and the PROBLEM STATEMENT lives in the first
+            # user message of the phase -- so from segment 2 on the model did
+            # not know what bug it was fixing. django-11422 (a previously
+            # resolved instance) ran all six segments blind: 10 turns, zero
+            # source changes, patch_bytes=0. Facts in, history out -- but the
+            # task is not history.
+            _keep_sys  = [m for m in msgs if m.get("role") == "system"][:1]
+            _keep_task = [m for m in msgs if m.get("role") != "system"][:1]
+            _init_msgs = _keep_sys + _keep_task
             log(" -- SEG_COMPACT: transcript (%d msgs) replaced by system + "
                 "ledger for segment %d" % (len(msgs), i + 1))
         _t_segstart = _wt.time()
