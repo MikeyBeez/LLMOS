@@ -325,9 +325,33 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                          active_env_kind=active)
                 state["net_retries"] = state.get("net_retries", 0) + 1
         ok = r.returncode == 0
+        # CONDA VERIFY (2026-08-24, astropy-6938): micromamba can exit 0
+        # while the package is invisible to the env's python. Verify the
+        # DISTRIBUTION (not the module -- names differ) with the env's own
+        # interpreter; a claimed success that fails verification is a
+        # FAILURE, reported with what to do instead.
+        conda_unverified = False
+        if ok and backend == "conda":
+            _vpy = os.path.join(repo_dir, ".condaenv", "bin", "python")
+            if os.path.isfile(_vpy):
+                _chk = subprocess.run(
+                    [_vpy, "-c",
+                     "import importlib.metadata as m; m.distribution(%r)"
+                     % name],
+                    capture_output=True, timeout=60)
+                if _chk.returncode != 0:
+                    ok = False
+                    conda_unverified = True
         entry = {"name": name, "version_spec": vspec, "backend": backend,
                  "no_build_isolation": no_iso, "ok": ok}
         state["installed"].append(entry)
+        if conda_unverified:
+            return {"ok": False, "name": name, "backend": "conda",
+                    "error": ("micromamba exited 0 but %r is NOT visible "
+                              "to this env's python -- treat as NOT "
+                              "installed. Retry with backend='pip' "
+                              "(installs with the env's own pip)." % name),
+                    "goal_stack": _stack_snapshot(state)}
         return {"ok": ok, "name": name, "version_spec": vspec,
                 "backend": backend, "no_build_isolation": no_iso,
                 "exit": r.returncode,
