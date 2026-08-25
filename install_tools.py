@@ -74,6 +74,28 @@ def _run(cmd, cwd, env_vars=None, timeout=900, active_env_kind="uv"):
 
 
 
+def ensure_numpy(repo_dir, kind):
+    """Guaranteed numpy in every env (Mikey, 2026-08-24), mirroring
+    ensure_pytest: python -m pip from inside the env, the one way that
+    always works. Pinned <2 -- numpy 2.x breaks old checkouts; pip's
+    python_requires metadata picks the right 1.x for old pythons.
+    Best-effort: False is recorded, never fatal (a spec pin or the
+    model can still install an exact version over it)."""
+    bin_dir = _venv_bin(repo_dir, kind)
+    py = os.path.join(bin_dir, "python")
+    if not os.path.isfile(py):
+        return False
+    if subprocess.run([py, "-c", "import numpy"],
+                      capture_output=True).returncode == 0:
+        return True
+    subprocess.run([py, "-m", "ensurepip", "--upgrade"],
+                   cwd=repo_dir, capture_output=True, timeout=180)
+    subprocess.run([py, "-m", "pip", "install", "numpy<2", "-q"],
+                   cwd=repo_dir, capture_output=True, timeout=300)
+    return subprocess.run([py, "-c", "import numpy"],
+                          capture_output=True).returncode == 0
+
+
 def ensure_pytest(repo_dir, kind):
     """Canonical, always-works pytest install: ensurepip (bootstraps pip
     into uv venvs, idempotent on conda) then `python -m pip install pytest`
@@ -180,6 +202,7 @@ def make_install_handlers(repo_dir, base_env_vars=None):
                      active_env_kind=None)
         ok = r.returncode == 0
         pytest_ready = False
+        numpy_ready = False
         if ok:
             state["active_env_kind"] = backend
             state["python_version"]  = pyv
@@ -189,8 +212,11 @@ def make_install_handlers(repo_dir, base_env_vars=None):
             state["repo_installed"]  = False
             # Guarantee pytest in every env, the one way that always works.
             pytest_ready = ensure_pytest(repo_dir, backend)
+            # Guarantee numpy too (Mikey, 2026-08-24) -- see ensure_numpy.
+            numpy_ready = ensure_numpy(repo_dir, backend)
         return {"ok": ok, "backend": backend, "python_version": pyv,
                 "pytest_ready": pytest_ready,
+                "numpy_ready": numpy_ready,
                 "exit": r.returncode,
                 "stderr": (r.stderr or "")[-1500:],
                 "goal_stack": _stack_snapshot(state)}
