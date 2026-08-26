@@ -565,8 +565,12 @@ def render_worksheet(state):
         lines.append("  valid repro   : %s   [assumed at turn 0]"
                      % state["triage_repro"][:200])
     if state.get("prior_attempts_note"):
+        # 220 cut the real notes (549 and 562 chars measured) mid-word, which
+        # kept "treat that file as EXHAUSTED" and threw away the sentence that
+        # said what to do instead. A truncated instruction is worse than
+        # either the whole thing or none of it.
         lines.append("  prior attempts: %s   [observed]"
-                     % state["prior_attempts_note"][:220])
+                     % state["prior_attempts_note"][:700])
     if state.get("chain_mechanism"):
         lines.append("  must be true  : %s   [assumed at turn 0 -- check() it]"
                      % state["chain_mechanism"][:200])

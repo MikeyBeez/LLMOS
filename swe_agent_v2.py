@@ -2682,7 +2682,20 @@ def _seed_churn(iid, f_state):
         misses += 1
         fs = t.get("fix_state") or {}
         for fn, n in (fs.get("func_edits") or {}).items():
-            seeded[fn] = seeded.get(fn, 0) + n
+            # COUNT ATTEMPTS, NOT EDITS (2026-08-26). The old code summed
+            # func_edits across traces, but every trace ALREADY stores the
+            # seed that attempt was handed, so the sum compounded
+            # geometrically: 11564's seven traces read 1,1,1,3,6,12,24 -> a
+            # seed of 48; 11019's eleven reached 288 -> a seed of 576, against
+            # a true per-attempt count of ~1-3. Taking the max is not enough
+            # either -- the traces already on disk carry the poisoned values,
+            # so a max would plateau at 288 forever. What the churn signal
+            # actually wants (4bf2ed7: "the model churns one predicate edit
+            # per attempt") is HOW MANY ATTEMPTS touched this function. That
+            # is bounded by `misses`, cannot compound, and is immune to the
+            # historical corruption.
+            if n:
+                seeded[fn] = seeded.get(fn, 0) + 1
         for e in (t.get("phase2_events") or []):
             if e.get("tool") == "patch" and e.get("ok"):
                 a = e.get("args")
@@ -2704,16 +2717,39 @@ def _seed_churn(iid, f_state):
         # 30+ patches, every one into squashmigrations.py -- the issue SAYS
         # squash, but the mechanism lives in the optimizer it calls. When
         # every attempt dug one hole and none resolved, say the hole is dry.
-        if misses >= 6 and files_hit.get(top, 0) >= misses:
-            note += (". Every one of those attempts patched %s and every one "
-                     "FAILED: treat that file as EXHAUSTED. The real "
-                     "mechanism most likely lives in a module it imports or "
-                     "calls -- follow the imports one level down and make "
-                     "your fix there instead." % top)
+        # CHURN_EXHAUST (2026-08-26): this verdict was generalised from ONE
+        # instance (django-16820) and it inverts a signal that is usually
+        # correct -- on a benchmark, the file every attempt patched is
+        # normally the file the bug is in. Measured blast radius: 41 of the
+        # 300 instances get it, 28 of them in the 124-instance never-resolved
+        # set, i.e. we tell a quarter of the hardest set to avoid the right
+        # file. Worse, render_worksheet truncated the note mid-sentence, so
+        # the model got "treat that file as EXHAUSTED. The rea" -- the
+        # prohibition without the redirect that justified it.
+        #   soft (default): keep the observation, drop the prohibition.
+        #   hard          : the original 2026-08-06 wording.
+        #   off           : say nothing about exhaustion.
+        _xmode = os.environ.get("CHURN_EXHAUST", "soft").lower()
+        if (misses >= 6 and files_hit.get(top, 0) >= misses
+                and _xmode != "off"):
+            if _xmode == "hard":
+                note += (". Every one of those attempts patched %s and every "
+                         "one FAILED: treat that file as EXHAUSTED. The real "
+                         "mechanism most likely lives in a module it imports "
+                         "or calls -- follow the imports one level down and "
+                         "make your fix there instead." % top)
+            else:
+                note += (". All %d attempts patched %s and none resolved. "
+                         "That is probably still the right file -- do NOT "
+                         "avoid it. But before you commit to another edit "
+                         "there, spend one read checking whether the "
+                         "mechanism actually lives one level down, in a "
+                         "module it imports or calls."
+                         % (misses, top))
         if seeded:
             fn = max(seeded, key=seeded.get)
-            note += (". The function %s has been condition-edited %d time(s) "
-                     "across attempts -- if your plan is another edit to its "
+            note += (". The function %s was condition-edited in %d of those "
+                     "attempts -- if your plan is another edit to its "
                      "conditions, that move is EXHAUSTED: widen the fix to "
                      "the branch it routes to." % (fn, seeded[fn]))
         f_state["prior_attempts_note"] = note
