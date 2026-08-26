@@ -1558,8 +1558,79 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             _hist = state.setdefault("locate_files", [])
             _hist.append({"pattern": pat, "files": _lf[:12]})
             del _hist[:-6]
+        # LOCATE-ZERO HELP (2026-08-26, zero-byte autopsy): on 0 matches
+        # tell the model WHICH failure this is -- glob matched nothing
+        # (path wrong), glob matched files that lack the string (file
+        # exists), or a filename hunt done with a content grep (name
+        # matches listed). Also flag exact repeats of a zero search.
+        _zero_extra = {}
+        if not lines:
+            try:
+                _tok = ""
+                for _t in re.sub(r"[^A-Za-z0-9_.-]+", " ", pat).split():
+                    if len(_t) > len(_tok):
+                        _tok = _t
+                _tok = _tok.lower()
+                _globn = 0
+                _names = []
+                _norm = glob_pat.lstrip("./") if glob_pat else ""
+                for _r, _dl, _fl in os.walk(repo_dir):
+                    # junk-evidence law (CYCLE-6): env internals drown
+                    # real hits -- skip dot-dirs and installed packages.
+                    _dl[:] = [x for x in _dl
+                              if not x.startswith(".")
+                              and not x.endswith(".egg-info")
+                              and x not in ("node_modules", "__pycache__",
+                                            "venv", "site-packages",
+                                            "build", "dist")]
+                    for _f in _fl:
+                        _rp = os.path.relpath(os.path.join(_r, _f),
+                                              repo_dir)
+                        if glob_pat:
+                            if path_glob:
+                                if (fnmatch.fnmatch(_rp, _norm)
+                                        or fnmatch.fnmatch(_rp,
+                                                           "*/" + _norm)
+                                        or _rp.endswith(_norm)):
+                                    _globn += 1
+                            elif fnmatch.fnmatch(_f, glob_pat):
+                                _globn += 1
+                        if (len(_tok) >= 3 and _tok in _f.lower()
+                                and len(_names) < 10):
+                            _names.append(_rp)
+                if glob_pat:
+                    _zero_extra["glob_matched_files"] = _globn
+                if _names:
+                    _zero_extra["files_matching_name"] = _names
+                _zk = "%s\x00%s" % (pat, glob_pat)
+                _zs = state.setdefault("_locate_zero_seen", {})
+                _zs[_zk] = _zs.get(_zk, 0) + 1
+                if glob_pat and _globn == 0:
+                    _note = ("0 matches: NO file matches that glob -- "
+                             "the path/glob is wrong, not the pattern.")
+                elif glob_pat:
+                    _note = ("0 matches: the glob matched %d file(s) "
+                             "but NONE contain the pattern -- the file "
+                             "exists; your string is not in it."
+                             % _globn)
+                else:
+                    _note = ("0 content matches anywhere. locate greps "
+                             "file CONTENTS, not names.")
+                if _names:
+                    _note += (" Files whose NAME matches the pattern "
+                              "are in files_matching_name -- read one "
+                              "instead of re-searching.")
+                if _zs[_zk] > 1:
+                    _note += (" You already ran this EXACT search (%d "
+                              "times, 0 matches every time) -- do "
+                              "something different." % _zs[_zk])
+                _zero_extra["note"] = _note
+                _fired(state, "locate_zero_help")
+            except Exception:
+                pass
         result = {"matches": lines, "match_count": len(lines),
                   "truncated": len(lines) == 40}
+        result.update(_zero_extra)
         if len(lines) > 1:
             hits_blob = "\n".join(lines[:30])
             ranking = llm_call(
@@ -3117,8 +3188,11 @@ FIX_TOOLS = [
     {"type": "function", "function": {
         "name": "locate",
         "description": (
-            "grep across the repo for a symbol/message/pattern. Returns file:line "
-            "matches (up to 40) plus an LLM ranking of the likeliest bug site."),
+            "grep across the repo for a symbol/message/pattern. Searches file "
+            "CONTENTS only, never file names. Returns file:line matches (up to "
+            "40) plus an LLM ranking of the likeliest bug site; on 0 matches it "
+            "reports whether the glob matched any files and lists files whose "
+            "NAME matches the pattern."),
         "parameters": {"type": "object", "properties": {
             "pattern": {"type": "string"},
             "file_glob": {"type": "string",
