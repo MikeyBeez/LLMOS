@@ -1572,6 +1572,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         _tok = _t
                 _tok = _tok.lower()
                 _globn = 0
+                _globfiles = []
                 _names = []
                 _norm = glob_pat.lstrip("./") if glob_pat else ""
                 for _r, _dl, _fl in os.walk(repo_dir):
@@ -1593,8 +1594,12 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                                                            "*/" + _norm)
                                         or _rp.endswith(_norm)):
                                     _globn += 1
+                                    if len(_globfiles) < 5:
+                                        _globfiles.append(_rp)
                             elif fnmatch.fnmatch(_f, glob_pat):
                                 _globn += 1
+                                if len(_globfiles) < 5:
+                                    _globfiles.append(_rp)
                         if (len(_tok) >= 3 and _tok in _f.lower()
                                 and len(_names) < 10):
                             _names.append(_rp)
@@ -1626,6 +1631,95 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                               "something different." % _zs[_zk])
                 _zero_extra["note"] = _note
                 _fired(state, "locate_zero_help")
+                # LOCATE-ASSIST (2026-08-26): the help text above FIRES and
+                # is IGNORED -- measured on the all300 reruns (11564: 152
+                # locates, 78 zero, help delivered 39x, one identical
+                # failing search repeated 15x, 0 bytes of patch in 45min).
+                # Same lesson as _region_now: an instruction to go and look
+                # does not make the model look, but bytes in the result are
+                # already looked at. So on a dead-end search, hand back the
+                # target file itself -- an outline first, the head of the
+                # file once the model has repeated itself.
+                if os.environ.get("LOCATE_ASSIST", "1") == "1":
+                    _tgt = None
+                    if _names:
+                        _tgt = _names[0]
+                    elif _globfiles and _globn <= 3:
+                        _tgt = _globfiles[0]
+                    _zt = state.setdefault("_locate_zero_total", 0) + 1
+                    state["_locate_zero_total"] = _zt
+                    if _tgt:
+                        _full = os.path.join(repo_dir, _tgt)
+                        try:
+                            with open(_full, encoding="utf-8",
+                                      errors="ignore") as _fh:
+                                _src_lines = _fh.read().splitlines()
+                        except OSError:
+                            _src_lines = []
+                        if _src_lines:
+                            _outline = []
+                            for _i, _ln in enumerate(_src_lines, 1):
+                                if re.match(r"\s*(def |class |async def )",
+                                            _ln):
+                                    _outline.append("%d: %s"
+                                                    % (_i, _ln.strip()[:120]))
+                                if len(_outline) >= 60:
+                                    break
+                            _zero_extra["outline_of"] = _tgt
+                            if _outline:
+                                _zero_extra["outline"] = _outline
+                                _zero_extra["note"] += (
+                                    " The defs/classes actually in %s are in"
+                                    " outline -- use a name from there, do"
+                                    " not re-search." % _tgt)
+                            # Hand over the bytes when advice cannot help:
+                            # the model already repeated this dead search, or
+                            # the target has no outline to give (a data/text
+                            # file -- which is the filename-hunt case), or it
+                            # is short enough to just show.
+                            _given = state.setdefault(
+                                "_locate_head_given", [])
+                            if (_zs[_zk] > 1 or not _outline
+                                    or len(_src_lines) <= 200):
+                                # Context budget: hand a file over ONCE, and
+                                # at most 6 times per instance. Re-dumping the
+                                # same file on every repeat would flood the
+                                # window -- the point is to end the loop, not
+                                # to pay for it twice.
+                                if _tgt in _given:
+                                    _zero_extra["note"] += (
+                                        " %s was ALREADY given to you earlier"
+                                        " in this session -- scroll back and"
+                                        " use it; do not search again."
+                                        % _tgt)
+                                    _fired(state, "locate_assist_repeat")
+                                elif len(_given) < 6:
+                                    _head = "\n".join(
+                                        "%d: %s" % (_i, _l)
+                                        for _i, _l in enumerate(
+                                            _src_lines[:150], 1))[:6000]
+                                    _zero_extra["file_head"] = _head
+                                    _given.append(_tgt)
+                                    _zero_extra["note"] += (
+                                        " You have now been GIVEN %s above."
+                                        " Read it here and act; another"
+                                        " locate call adds nothing." % _tgt)
+                                    _fired(state, "locate_assist_head")
+                                else:
+                                    _fired(state, "locate_assist_capped")
+                            else:
+                                _fired(state, "locate_assist_outline")
+                    if _zt >= 12:
+                        _zero_extra["search_budget_exhausted"] = True
+                        _zero_extra["files_already_read"] = list(
+                            state.get("files_read", []))[-12:]
+                        _zero_extra["note"] += (
+                            " SEARCH BUDGET SPENT: %d locate calls in this"
+                            " instance have returned 0. Searching is not"
+                            " working. Open a file you have already read"
+                            " with read_range and write the patch with the"
+                            " information you have." % _zt)
+                        _fired(state, "locate_budget_spent")
             except Exception:
                 pass
         result = {"matches": lines, "match_count": len(lines),
