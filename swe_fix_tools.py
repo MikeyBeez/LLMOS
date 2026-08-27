@@ -404,7 +404,7 @@ def _fired(state, feature):
         pass
 
 
-def capture_readiness(state, text):
+def capture_readiness(state, text, force=False):
     """Record VERBATIM what the model said it needs, when a readiness question
     is outstanding.
 
@@ -417,7 +417,7 @@ def capture_readiness(state, text):
     anything left in the conversation is gone by the time anyone looks. State
     is serialised into the trace JSON and read back out by _postmortem.
     """
-    if not state.get("_readiness_pending"):
+    if not state.get("_readiness_pending") and not force:
         return False
     text = (text or "").strip()
     if not text:
@@ -740,13 +740,16 @@ def render_worksheet(state):
         _fired(state, "readiness_asked")
         lines.append(
             "  QUESTION      : you have made %d searches/reads and attempted "
-            "0 edits. Are you ready to make an edit? Answer in one short "
-            "paragraph, no tool call: say YES and which file and function you "
-            "will change, or say NO and state WHAT YOU NEED in order to be "
-            "ready. Be concrete about the thing that is missing -- a file's "
-            "contents, a failing reproduction, the names actually defined in "
-            "a module, the value of some expression at runtime. It will be "
-            "fetched for you." % _probes)
+            "0 edits. Are you ready to make an edit? %s Say YES and which "
+            "file and function you will change, or say NO and state WHAT YOU "
+            "NEED in order to be ready. Be concrete about the thing that is "
+            "missing -- a file's contents, a failing reproduction, the names "
+            "actually defined in a module, the value of some expression at "
+            "runtime."
+            % (_probes,
+               ("Call the ready tool."
+                if os.environ.get("READINESS_TOOL", "0") == "1"
+                else "Answer in one short paragraph, no tool call.")))
     elif state.get("readiness"):
         _last = state["readiness"][-1]
         lines.append("  you said you need: %s" % _last["answer"][:300])
@@ -3259,9 +3262,59 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                              "locate instead"
                              % (type(_e).__name__, _e)}
 
+    def h_ready(pcb, args):
+        """Answer the readiness question THROUGH THE CHANNEL THE MODEL USES.
+
+        Measured 2026-08-27, and this is why the tool exists. The readiness
+        question was asked in the worksheet and could only be answered on a
+        turn with NO tool call, because that is the only place phase_run
+        calls capture_readiness. Across the visible transcripts the model
+        emits a bare prose turn 9 times in 488 assistant turns -- 1.8% -- and
+        the harness answers every one of them with "Call one of the provided
+        tools now". So the question was routed down the one channel this
+        harness actively trains the model out of using.
+
+        django-13265 is the whole story: _readiness_asked True,
+        _readiness_pending still True at the end, readiness null, 139 probe
+        calls, 0 bytes submitted. Asked, and never able to answer.
+
+        Same lesson as insert_lines: the model had no way to SAY the thing,
+        so it did not say it. Put the capability in the menu.
+
+        Records into state, which is serialised into the trace -- not into
+        the transcript, which SEG_COMPACT purges at segment boundaries.
+        """
+        state["must_observe"] = False
+        _ready = args.get("ready")
+        if isinstance(_ready, str):
+            _ready = _ready.strip().lower() in ("1", "true", "yes", "y")
+        _need = str(args.get("what_you_need", "") or "").strip()
+        _where = str(args.get("where", "") or "").strip()
+        if _ready and not _where:
+            return {"error": ("say WHERE you will edit, as file.py:function. "
+                              "If you cannot name it you are not ready -- "
+                              "answer ready=false and say what is missing.")}
+        if not _ready and not _need:
+            return {"error": ("say WHAT YOU NEED, concretely: a file's "
+                              "contents, a failing reproduction, the names "
+                              "defined in a module, the value of some "
+                              "expression at runtime.")}
+        _answer = ("YES -- will edit %s" % _where if _ready
+                   else "NO -- needs: %s" % _need)
+        capture_readiness(state, _answer, force=True)
+        if _ready:
+            return {"recorded": _answer,
+                    "next": ("make that edit now -- patch, edit_line, "
+                             "insert_lines or rewrite_function.")}
+        return {"recorded": _answer,
+                "next": ("nothing fetches this for you yet, so go get it: "
+                         "read_range for a file's contents, symbol for the "
+                         "names in a module, reproduce for a runtime value.")}
+
     state["_sibling_fn"] = _sibling_sites
     state["_defs_fn"] = _file_defs
     handlers = {
+        "swe.ready":       h_ready,
         "swe.reproduce":   h_reproduce,
         "swe.differential": h_differential,
         "swe.declare_site": h_declare_site,
@@ -3832,6 +3885,31 @@ FIX_TOOLS = [
 # surface -- adding a tool changes routing for every instance -- so this ships
 # switched off like BANK_AUDIT and RANK_ORACLE. The handler stays registered
 # either way; only the advertised schema is withheld.
+FIX_TOOLS.append({"type": "function", "function": {
+    "name": "ready",
+    "description": (
+        "Answer the readiness QUESTION the worksheet asks you. Call this "
+        "with ready=true and where='file.py:function' if you know what to "
+        "change, or ready=false and what_you_need='...' if you do not. "
+        "Saying you are NOT ready is a correct and useful answer -- it is "
+        "recorded, not penalised. Be concrete about the missing thing: a "
+        "file's contents, a failing reproduction, the names actually "
+        "defined in a module, the value of some expression at runtime."),
+    "parameters": {"type": "object", "properties": {
+        "ready": {"type": "boolean"},
+        "where": {"type": "string"},
+        "what_you_need": {"type": "string"},
+    }, "required": ["ready"]}}})
+
+# READINESS_TOOL gate (2026-08-27). Ships OFF, like EDIT_LINE and
+# EDIT_SURFACE before it: the tool menu is a BEHAVIOUR SURFACE and one more
+# entry changes routing for all 300 instances, including the 176 that
+# already pass. The handler stays registered either way; only the advertised
+# schema is withheld. Turn on in run_all300.sh at the next restart.
+if os.environ.get("READINESS_TOOL", "0") != "1":
+    FIX_TOOLS = [_t for _t in FIX_TOOLS
+                 if _t.get("function", {}).get("name") != "ready"]
+
 if os.environ.get("EDIT_LINE", "0") != "1":
     FIX_TOOLS = [_t for _t in FIX_TOOLS
                  if _t.get("function", {}).get("name") != "edit_line"]
@@ -3854,6 +3932,7 @@ if os.environ.get("DIAG_GATE", "0") != "1":
 
 
 FIX_TOOL2SYS = {
+    "ready":       "swe.ready",
     "check": "swe.check",
     "reproduce":   "swe.reproduce",
     "differential": "swe.differential",
