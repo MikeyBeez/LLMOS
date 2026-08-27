@@ -659,16 +659,24 @@ def render_worksheet(state):
     # django-11019 made 15 locates, 9 read_ranges and 0 patch calls in 48
     # minutes. The model could not see a local edit, so it attempted nothing.
     # Name the situation and point at the tool that fits it.
-    if len(state.get("files_read") or []) >= 4 and not ph:
+    # THRESHOLD CORRECTED 2026-08-26 21:40. The first version counted DISTINCT
+    # FILES READ and never fired: django-11019's fix_state shows files_read =
+    # ['django/forms/widgets.py', 'tests/forms_tests/tests/test_media.py'] --
+    # exactly TWO -- against 44 zero-result locates. The failure mode is many
+    # probes into FEW files, so distinct files is the one number that does not
+    # move. Count the probe CALLS instead. (Same mistake as the morning's
+    # features_fired read: I picked a proxy without checking its distribution.)
+    _probes = state.get("_probe_calls", 0)
+    if _probes >= 8 and not ph:
+        _fired(state, "no_edit_yet_shown")
         lines.append(
-            "  NO EDIT YET   : %d files read, 0 edits attempted. That pattern "
-            "means the fix is probably NOT a small swap. Ask whether the "
-            "function you declared has the WRONG ALGORITHM rather than a "
+            "  NO EDIT YET   : %d searches/reads, 0 edits attempted. That "
+            "pattern means the fix is probably NOT a small swap. Ask whether "
+            "the function you declared has the WRONG ALGORITHM rather than a "
             "wrong condition. If the fix is new code, insert_lines ADDS "
             "lines; if the function's whole approach is wrong, "
             "rewrite_function replaces it outright. Neither is a snippet "
-            "swap, which is why patch may have looked unusable."
-            % len(state.get("files_read") or []))
+            "swap, which is why patch may have looked unusable." % _probes)
     if state.get("prior_attempts_note"):
         # 220 cut the real notes (549 and 562 chars measured) mid-word, which
         # kept "treat that file as EXHAUSTED" and threw away the sentence that
@@ -1621,6 +1629,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
 
     def h_locate(pcb, args):
         state["must_observe"] = False
+        state["_probe_calls"] = state.get("_probe_calls", 0) + 1
         """grep for a pattern, then ask the LLM which hit is most likely the
         actual site to investigate."""
         pat = str(args.get("pattern", ""))
@@ -1858,6 +1867,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     def h_read_range(pcb, args):
         state["must_observe"] = False
         state["rejected_repro_streak"] = 0
+        state["_probe_calls"] = state.get("_probe_calls", 0) + 1
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
@@ -3742,6 +3752,16 @@ FIX_TOOLS = [
 if os.environ.get("EDIT_LINE", "0") != "1":
     FIX_TOOLS = [_t for _t in FIX_TOOLS
                  if _t.get("function", {}).get("name") != "edit_line"]
+
+# EDIT_SURFACE gate (2026-08-26). Same reasoning as the EDIT_LINE gate above,
+# which I should have followed when I added these: the tool menu is a BEHAVIOUR
+# SURFACE, so two new entries change routing for all 300 instances including
+# the 176 that already pass. The handlers stay registered either way; only the
+# advertised schema is withheld. run_all300.sh sets EDIT_SURFACE=1.
+if os.environ.get("EDIT_SURFACE", "0") != "1":
+    FIX_TOOLS = [_t for _t in FIX_TOOLS
+                 if _t.get("function", {}).get("name")
+                 not in ("insert_lines", "rewrite_function")]
 
 # DIAG_GATE menu gate: the diagnosis tools appear only when the ladder is on.
 if os.environ.get("DIAG_GATE", "0") != "1":
