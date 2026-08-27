@@ -24,7 +24,7 @@ The gate is now red -> green on the agent's OWN reproduction:
      (seen RED), (b) the same script now passes (GREEN), and (c) the
      git diff of non-test source files is non-empty.
 """
-import ast, fnmatch, os, re, shlex, shutil, signal, subprocess, textwrap, time
+import ast, fnmatch, os, re, shlex, shutil, signal, subprocess, tempfile, textwrap, time
 
 # PHASE_DEADLINE (2026-08-24): see test_runner.PHASE_DEADLINE. Set by
 # swe_agent_v2 before each tool dispatch so every shelled-out tool call is
@@ -427,6 +427,39 @@ def _anchor_record(state):
         return []
     return ["turn %s  %s  |%s|  -> %s" % (v["turn"], v["file"], v["head"], v["why"])
             for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
+
+
+def _atomic_write(path, text):
+    """Replace a file's contents without ever leaving a truncated file behind.
+
+    open(path, "w") TRUNCATES THE FILE IMMEDIATELY. A crash, a full disk, an
+    OOM kill or a wall-clock timeout between that truncation and the write
+    leaves the source file EMPTY -- the agent's own edit tools destroying the
+    checkout they are editing, in a way no syntax check afterwards can catch
+    because there is nothing left to check. So: write a sibling temp file,
+    flush and fsync it, carry the original's permissions over, then
+    os.replace(), which is atomic within a filesystem. A reader at any instant
+    sees either the whole old file or the whole new one, never nothing.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".swe-tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            # mkstemp creates 0600; keep whatever the repo file had.
+            shutil.copymode(path, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _function_names(source):
@@ -2169,8 +2202,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 "already_tried": _anchor_record(state)}
             if not _hist:
                 _remember_state(state, path, text)   # the pre-edit baseline
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(_newtext)
+            _atomic_write(full, _newtext)
             _remember_state(state, path, _newtext)
             state["repro_green"] = False
             state["fix_verified"] = False
@@ -2368,8 +2400,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {"error": _how, "already_tried": _anchor_record(state)}
         if not state.get("state_history", {}).get(path):
             _remember_state(state, path, text)   # pre-edit baseline
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(new_text)
+        _atomic_write(full, new_text)
         _remember_state(state, path, new_text)
         state["stuck"] = 0
         state["repro_green"] = False
@@ -2592,17 +2623,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if block == old_block:
             return {"error": "new_source is identical to what is already "
                              "there -- nothing was written"}
-        backup = full + ".rewritefn.bak"
+        # The undo lives in memory, not in a .bak beside the source: a stray
+        # backup file inside the checkout is litter that `git checkout -- .`
+        # will not clean up, and it is one more thing that can be clobbered.
         try:
-            shutil.copyfile(full, backup)
-            with open(full, "w", encoding="utf-8") as _fh:
-                _fh.write("".join(lines[:start]) + block
+            _atomic_write(full, "".join(lines[:start]) + block
                           + "".join(lines[end:]))
         except OSError as e:
             return {"error": str(e)}
         bad = _syntax_check(full, rel)
         if bad:
-            shutil.copyfile(backup, full)
+            _atomic_write(full, src_text)
             bad["reverted"] = True
             bad["what_to_do"] = (
                 "The rewrite left %s unparseable, so it was REVERTED and the "
@@ -2670,16 +2701,14 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {"error": ("after_line %d is outside %s, which has %d lines"
                               % (after, rel, len(lines)))}
         block = [l + "\n" for l in new_lines.rstrip("\n").split("\n")]
-        backup = full + ".insert.bak"
+        before = "".join(lines)
         try:
-            shutil.copyfile(full, backup)
-            with open(full, "w", encoding="utf-8") as _fh:
-                _fh.write("".join(lines[:after] + block + lines[after:]))
+            _atomic_write(full, "".join(lines[:after] + block + lines[after:]))
         except OSError as e:
             return {"error": str(e)}
         bad = _syntax_check(full, rel)
         if bad:
-            shutil.copyfile(backup, full)
+            _atomic_write(full, before)
             bad["reverted"] = True
             bad["what_to_do"] = (
                 "The insertion left %s unparseable, so it was REVERTED and "
