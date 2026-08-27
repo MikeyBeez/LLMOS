@@ -1219,9 +1219,22 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 time.sleep(20 * (attempt + 1))
         if msg is None:
             return "cpu_error", messages, meta_log + [{"error": err}]
+        # KEEP WHAT _chat ALREADY COMPUTED (2026-08-27). This dict used to
+        # hold turn/prompt_tokens/eval_tokens and drop the rest, so
+        # finish_reason, trunc_grow, max_tokens and eval_ms were calculated
+        # every turn and thrown away at the boundary. Consequence, found the
+        # hard way: having just identified the anti-truncation regrow loop as
+        # the worst unbounded path in the harness, I could not measure how
+        # often it fires, because the counter existed only inside the call
+        # that made it. Fourth measurement this week that was computed and
+        # discarded -- see the patch counter and phase2_reason.
         meta_log.append({"turn": turn,
                           "prompt_tokens": meta.get("prompt_tokens"),
-                          "eval_tokens":   meta.get("eval_tokens")})
+                          "eval_tokens":   meta.get("eval_tokens"),
+                          "finish_reason": meta.get("finish_reason"),
+                          "trunc_grow":    meta.get("trunc_grow"),
+                          "max_tokens":    meta.get("max_tokens"),
+                          "eval_ms":       meta.get("eval_ms")})
         if emit:
             emit("generation", {"turn": turn,
                                 "content": msg.get("content") or "",
@@ -1355,9 +1368,16 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
         # repertoire wall in one segment and produced zero-byte patches.
         try:
             import test_runner as _tr_mod, swe_fix_tools as _sft_mod
+            import tool_call_cpu as _cpu_mod
             _dl = (_phase_t0 + _wall_cap) if _wall_cap else None
             _tr_mod.PHASE_DEADLINE = _dl
             _sft_mod.PHASE_DEADLINE = _dl
+            # The MODEL call, added 2026-08-27. It was the only blocking step
+            # left that ignored the deadline, and the longest one: a single
+            # turn could reach ~1900s against a 960s segment budget through
+            # request_timeout x the anti-truncation regrow x phase_run's own
+            # retries. Tool calls have been deadline-aware since 2026-08-24.
+            _cpu_mod.PHASE_DEADLINE = _dl
         except Exception:
             pass
         h = handlers.get(target)

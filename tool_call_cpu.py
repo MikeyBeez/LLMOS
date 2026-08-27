@@ -21,6 +21,33 @@ from llmos.cpu import OllamaCPU
 from llmos.isa import Instruction, Op
 
 
+# PHASE_DEADLINE (2026-08-27). Unix ts by which the current agent phase must
+# end, set by phase_run before every turn -- the same module-global mechanism
+# already used for test_runner and swe_fix_tools, which is why this file gets
+# no new machinery.
+#
+# WHY IT WAS NEEDED HERE AND NOT ONLY THERE. The tool call was made
+# deadline-aware on 2026-08-24; the MODEL call never was, and it is the one
+# that can block longest. _chat sends stream:False and one blocking urlopen
+# with request_timeout=600, inside an anti-truncation loop of up to 3
+# max_tokens doublings x 6 HTTP attempts, and phase_run wraps THAT in 3 more
+# attempts with 20/40/60s sleeps. Worst case for a SINGLE TURN is ~1900s
+# against a 960s segment budget and a 2400s repertoire wall, and the wall
+# check only runs BETWEEN turns -- so one hung llama-server eats most of an
+# instance and the harness only finds out afterwards.
+#
+# This is the timer interrupt: a phase can now stop an instruction, not just
+# notice after it returned.
+PHASE_DEADLINE = None
+
+
+def _budget_left():
+    """Seconds until the phase deadline, or None when no deadline is set."""
+    if not PHASE_DEADLINE:
+        return None
+    return PHASE_DEADLINE - time.time()
+
+
 class ToolCallCPU(OllamaCPU):
     """Drop-in replacement for OllamaCPU that uses /api/chat + tools.
 
@@ -241,17 +268,40 @@ class ToolCallCPU(OllamaCPU):
             for _attempt in range(6):
                 try:
                     req = urllib.request.Request(_url, data=body, headers=_headers)
-                    with urllib.request.urlopen(req, timeout=self.request_timeout) as r:
+                    # Never wait past the phase deadline. The floor is 30s
+                    # rather than 0 because a request that is cancelled before
+                    # the model can answer wastes the turn without ending the
+                    # phase; phase_run's own check ends it on the next pass.
+                    _to = self.request_timeout
+                    _left = _budget_left()
+                    if _left is not None:
+                        _to = max(30, min(_to, _left))
+                    with urllib.request.urlopen(req, timeout=_to) as r:
                         resp = json.loads(r.read())
                     break
                 except urllib.error.HTTPError as _e:
                     if _e.code == 429 and _attempt < 5:
-                        time.sleep(min(90, 10 * (_attempt + 1))); continue
+                        _nap = min(90, 10 * (_attempt + 1))
+                        _left = _budget_left()
+                        if _left is not None and _left <= _nap:
+                            # Sleeping through the deadline and then asking
+                            # again is the worst of both: the phase is over
+                            # and we spent its last seconds waiting.
+                            raise
+                        time.sleep(_nap); continue
                     raise
             _choice = (resp.get("choices") or [{}])[0]
             _fr = _choice.get("finish_reason")
             m = _choice.get("message", {}) or {}
             if _retry and _fr == "length" and _mt < _cap:
+                _left = _budget_left()
+                if _left is not None and _left <= 0:
+                    # A doubled ceiling means a SLOWER regeneration, so the
+                    # anti-truncation retry is the last thing that should run
+                    # past a deadline. Keep the truncated answer; the caller
+                    # is about to end the phase anyway.
+                    _fr = "length_deadline"
+                    break
                 _mt = min(_cap, _mt * 2)
                 _grew += 1
                 continue
