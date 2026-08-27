@@ -24,7 +24,7 @@ The gate is now red -> green on the agent's OWN reproduction:
      (seen RED), (b) the same script now passes (GREEN), and (c) the
      git diff of non-test source files is non-empty.
 """
-import fnmatch, os, re, shlex, shutil, signal, subprocess, time
+import ast, fnmatch, os, re, shlex, shutil, signal, subprocess, textwrap, time
 
 # PHASE_DEADLINE (2026-08-24): see test_runner.PHASE_DEADLINE. Set by
 # swe_agent_v2 before each tool dispatch so every shelled-out tool call is
@@ -429,6 +429,63 @@ def _anchor_record(state):
             for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
 
 
+def _function_names(source):
+    """Every def/method name in a file, qualified, in source order."""
+    out = []
+    try:
+        tree = ast.parse(source)
+    except Exception:
+        return out
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out.append("%s.%s" % (node.name, sub.name))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append(node.name)
+    return out
+
+
+def _function_span(source, name):
+    """Line span of a function/method INCLUDING its decorators.
+
+    Returns (start, end, indent) as 0-based half-open line indices, or None.
+    `name` may be bare ("merge") or qualified ("Media.merge"); a bare name is
+    accepted only when it resolves to exactly one definition, so an ambiguous
+    name is refused rather than rewriting the wrong body.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    want_cls, _, want_fn = name.rpartition(".")
+    hits = []
+
+    def _consider(node, cls):
+        if node.name != want_fn:
+            return
+        if want_cls and cls != want_cls:
+            return
+        hits.append(node)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _consider(sub, node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _consider(node, None)
+    if len(hits) != 1:
+        return None
+    node = hits[0]
+    first = node.lineno
+    for dec in getattr(node, "decorator_list", ()):
+        first = min(first, dec.lineno)
+    line = source.splitlines()[node.lineno - 1]
+    indent = line[:len(line) - len(line.lstrip())]
+    return first - 1, node.end_lineno, indent
+
+
 def _syntax_check(full_path, rel):
     """Does this file still parse? Definitive, no style opinions. Returns None
     when fine, else a dict naming the line and what broke."""
@@ -564,6 +621,18 @@ def render_worksheet(state):
     if state.get("triage_repro"):
         lines.append("  valid repro   : %s   [assumed at turn 0]"
                      % state["triage_repro"][:200])
+    # NO-EDIT-YET (2026-08-26): reads with ZERO edit attempts is its own
+    # failure mode, not a search problem. Measured on the zero-byte class:
+    # django-11019 made 15 locates, 9 read_ranges and 0 patch calls in 48
+    # minutes. The model could not see a local edit, so it attempted nothing.
+    # Name the situation and point at the tool that fits it.
+    if len(state.get("files_read") or []) >= 4 and not ph:
+        lines.append(
+            "  NO EDIT YET   : %d files read, 0 edits attempted. That pattern "
+            "means the fix is probably NOT a small swap. Ask whether the "
+            "function you declared has the WRONG ALGORITHM rather than a "
+            "wrong condition -- if so, replace the whole thing with "
+            "rewrite_function." % len(state.get("files_read") or []))
     if state.get("prior_attempts_note"):
         # 220 cut the real notes (549 and 562 chars measured) mid-word, which
         # kept "treat that file as EXHAUSTED" and threw away the sentence that
@@ -2474,6 +2543,84 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         print(" -- invariant probe exited 0 pre-fix; discarded (bad probe)", flush=True)
         return "green_prefix"
 
+    def h_rewrite_function(pcb, args):
+        """Replace a WHOLE function or method in one call.
+
+        WHY THIS EXISTS (2026-08-26 zero-byte autopsy). On instances whose fix
+        is an ALGORITHM change rather than a local swap, the model made ZERO
+        patch calls in 45 minutes -- django-11019's tool histogram reads
+        locate 15, read_range 9, patch 0. It read the right file and the right
+        function and never attempted an edit. Both existing edit tools frame
+        editing as swapping a fragment (edit_line) or a snippet (patch), and
+        nothing ever told the model that replacing a function outright was
+        allowed. This tool makes that move expressible; its presence in the
+        tool list is half the fix.
+        """
+        state["must_observe"] = False
+        rel = str(args.get("file", "") or "").lstrip("./")
+        name = str(args.get("name", "") or "").strip()
+        new_source = args.get("new_source") or ""
+        if not rel or not name or not str(new_source).strip():
+            return {"error": "file, name and new_source are all required"}
+        if _is_test_path(rel):
+            return {"error": "test files are refused -- patch the source"}
+        full = os.path.join(repo_dir, rel)
+        if not os.path.isfile(full):
+            return {"error": _missing_file_hint(rel, repo_dir)}
+        try:
+            with open(full, encoding="utf-8") as _fh:
+                src_text = _fh.read()
+        except OSError as e:
+            return {"error": str(e)}
+        span = _function_span(src_text, name)
+        if span is None:
+            return {"error": ("no single definition named %r in %s -- give a "
+                              "qualified name (Class.method) if the bare name "
+                              "is ambiguous" % (name, rel)),
+                    "definitions_in_file": _function_names(src_text)[:40]}
+        start, end, indent = span
+        lines = src_text.splitlines(True)
+        old_block = "".join(lines[start:end])
+        body = textwrap.dedent(str(new_source)).rstrip("\n").splitlines()
+        if not body:
+            return {"error": "new_source is empty"}
+        block = "".join((indent + b + "\n") if b.strip() else "\n"
+                        for b in body)
+        if block == old_block:
+            return {"error": "new_source is identical to what is already "
+                             "there -- nothing was written"}
+        backup = full + ".rewritefn.bak"
+        try:
+            shutil.copyfile(full, backup)
+            with open(full, "w", encoding="utf-8") as _fh:
+                _fh.write("".join(lines[:start]) + block
+                          + "".join(lines[end:]))
+        except OSError as e:
+            return {"error": str(e)}
+        bad = _syntax_check(full, rel)
+        if bad:
+            shutil.copyfile(backup, full)
+            bad["reverted"] = True
+            bad["what_to_do"] = (
+                "The rewrite left %s unparseable, so it was REVERTED and the "
+                "file is unchanged. new_source must be a complete definition "
+                "starting at `def` (or its decorator) with its own internal "
+                "indentation; the harness re-indents the whole block for you."
+                % rel)
+            return bad
+        _fr = state.setdefault("files_read", [])
+        if rel not in _fr:
+            _fr.append(rel)
+        state["patch_history"].append({"file": rel, "verdict": "unverified"})
+        _fired(state, "rewrite_function")
+        return {"ok": True, "file": rel, "function": name,
+                "replaced_lines": [start + 1, end],
+                "old_line_count": end - start,
+                "new_line_count": len(body),
+                "next": ("the whole definition was replaced. Run verify_fix "
+                         "now -- a rewrite invalidates any earlier "
+                         "verification.")}
+
     def h_verify_fix(pcb, args):
         """Rerun the registered reproduction. GREEN when it exits 0."""
         shutil.rmtree(os.path.join(repo_dir, ".hypothesis"), ignore_errors=True)
@@ -2913,6 +3060,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.symbol":      h_symbol,
         "swe.read_range":  h_read_range,
         "swe.patch":       h_patch,
+        "swe.rewrite_function": h_rewrite_function,
         "swe.edit_line":   h_edit_line,
         "swe.verify_fix":  h_verify_fix,
         "swe.run_tests":   h_run_tests,
@@ -3307,6 +3455,31 @@ FIX_TOOLS = [
             "end":   {"type": "integer"},
         }, "required": ["file", "start", "end"]}}},
     {"type": "function", "function": {
+        "name": "rewrite_function",
+        "description": (
+            "Replace an ENTIRE function or method with new source. Use this "
+            "when the bug is in the ALGORITHM rather than in one condition or "
+            "literal -- when the code's whole approach to the problem is "
+            "wrong and no sequence of small edits inside it can be right. "
+            "Signals you are in that case: you have read the function and "
+            "cannot point at a single line to change; earlier attempts edited "
+            "its conditions and none worked; the fix needs a different data "
+            "structure or a different traversal. Give the file, the function "
+            "name (qualified as Class.method if the bare name is ambiguous) "
+            "and the complete new definition starting at `def`. The harness "
+            "re-indents the block for you, so write new_source at its own "
+            "natural indentation. If the result would not parse, NOTHING is "
+            "written and the file is restored."),
+        "parameters": {"type": "object", "properties": {
+            "file": {"type": "string"},
+            "name": {"type": "string",
+                     "description": "function or Class.method to replace"},
+            "new_source": {"type": "string",
+                           "description": "the complete new definition, "
+                                          "including decorators and the def "
+                                          "line"},
+        }, "required": ["file", "name", "new_source"]}}},
+    {"type": "function", "function": {
         "name": "edit_line",
         "description": (
             "Change ONE fragment on ONE line. You give the line number and the "
@@ -3445,6 +3618,7 @@ FIX_TOOL2SYS = {
     "symbol":      "swe.symbol",
     "read_range":  "swe.read_range",
     "patch":       "swe.patch",
+    "rewrite_function": "swe.rewrite_function",
     "edit_line":   "swe.edit_line",
     "verify_fix":  "swe.verify_fix",
     "run_tests":   "swe.run_tests",
