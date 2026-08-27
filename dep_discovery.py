@@ -48,13 +48,39 @@ def _walk(repo, max_depth=4):
         yield root, files
 
 
+# Extensions a requirements file never has. Measured across all 300 SWE-bench
+# Lite checkouts on 2026-08-27: relaxing the ".txt" rule to catch astropy's
+# extensionless "pip-requirements" ALSO catches 15 copies of
+# "update_requirements.sh", which is a shell script. Handing the model a
+# shell script as a requirements file is worse than missing one, because it
+# will try to install from it. So the rule loosens the EXTENSION and adds an
+# explicit exclusion rather than matching on the word alone.
+_NOT_REQ_EXT = (".sh", ".bash", ".py", ".pyc", ".cfg", ".ini", ".toml",
+                ".yml", ".yaml", ".json", ".md", ".rst", ".lock", ".bat")
+
+
 def requirements_files(repo, limit=25):
-    """Every requirements-style file, relative to the repo root."""
+    """Every requirements-style file, relative to the repo root.
+
+    NOT just *.txt. astropy's 2018-era checkouts name theirs "pip-requirements"
+    with no extension at all, and its contents are exactly the two lines the
+    bootstrap needed ("numpy>=1.10.0", "pytest>=3.1"). Because nothing matched
+    it, install_deps came back EMPTY, astropy-6938 spent its whole 720s
+    bootstrap budget failing to import numpy, and the run recorded a
+    capability failure for what was a discovery failure. Filed 2026-08-24,
+    fixed 2026-08-27. Affects 4 of the 300 checkouts (all astropy).
+
+    Also accepts .in (pip-compile's source format) and .pip.
+    """
     out = []
     for root, files in _walk(repo):
         for f in files:
-            if f.endswith(".txt") and "requirement" in f.lower():
-                out.append(os.path.relpath(os.path.join(root, f), repo))
+            low = f.lower()
+            if "requirement" not in low:
+                continue
+            if low.endswith(_NOT_REQ_EXT):
+                continue
+            out.append(os.path.relpath(os.path.join(root, f), repo))
     # test/dev deps first -- that is what the agent almost always wants
     def rank(p):
         low = p.lower()

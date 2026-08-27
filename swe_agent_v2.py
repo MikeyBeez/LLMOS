@@ -1234,7 +1234,8 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                           "finish_reason": meta.get("finish_reason"),
                           "trunc_grow":    meta.get("trunc_grow"),
                           "max_tokens":    meta.get("max_tokens"),
-                          "eval_ms":       meta.get("eval_ms")})
+                          "eval_ms":       meta.get("eval_ms"),
+                          "retries":       meta.get("retries")})
         if emit:
             emit("generation", {"turn": turn,
                                 "content": msg.get("content") or "",

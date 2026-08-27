@@ -255,6 +255,13 @@ class ToolCallCPU(OllamaCPU):
         else:
             _url = self.host + "/v1/chat/completions"
         resp = None; m = {}; _fr = None; _grew = 0
+        # RETRIES WAS HARDCODED TO 0 (fixed 2026-08-27, found by preflight.py
+        # on its first run). The retry loop below has existed for months and
+        # meta reported "retries": 0 unconditionally -- a constant wearing the
+        # name of a measurement, the same shape as the patch counter and
+        # phase2_reason. If the server starts rate-limiting or flapping, this
+        # is the number that says so.
+        _retries = 0
         for _grow in range(3):   # initial try + up to 2 doublings
             _payload = {
                 "model": self.model, "stream": False,
@@ -266,6 +273,8 @@ class ToolCallCPU(OllamaCPU):
             body = json.dumps(_payload).encode()
             resp = None
             for _attempt in range(6):
+                if _attempt:
+                    _retries += 1
                 try:
                     req = urllib.request.Request(_url, data=body, headers=_headers)
                     # Never wait past the phase deadline. The floor is 30s
@@ -314,8 +323,7 @@ class ToolCallCPU(OllamaCPU):
         meta = {"prompt_tokens": usage.get("prompt_tokens"),
                 "eval_tokens":   usage.get("completion_tokens"),
                 "eval_ms": timings.get("predicted_ms", 0),
-                "load_ms": 0,
-                "retries": 0,
+                "retries": _retries,
                 "finish_reason": _fr,
                 "trunc_grow": _grew,
                 "max_tokens": _mt}
