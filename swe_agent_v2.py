@@ -1080,6 +1080,21 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
         % ("stopped on the wall cap after" if _walk_capped else "exhausted",
            i, len(ops)))
     # restore the fallback rather than submitting an empty tree
+    # WHY THE WALK ENDED, recorded instead of discarded (2026-08-27).
+    # This function returned the literal "declared" here no matter what
+    # happened -- the same string the two EARLY returns above use when a
+    # segment actually solved the instance. So phase2_reason was
+    # "declared" for all 52 rows of the campaign: a field with four
+    # documented values that reported one, and the two most different
+    # outcomes in the system ("the model submitted a verified fix" and
+    # "the wall ran out and we had nothing") wearing the same label.
+    # Third instrument this week that read as data and was a constant.
+    # Borrowed framing: pi-agents gives every budget a name and records
+    # WHICH limit a run hit, rather than collapsing every ending into one.
+    _end_reason = "%s_%s" % (
+        "wall" if _walk_capped else "exhausted",
+        ("green" if [c for c in candidates if len(c) > 2 and c[2]]
+         else "candidate") if candidates else "nothing")
     if candidates:
         _green = [c for c in candidates if len(c) > 2 and c[2]]
         _pick = _green[0] if _green else candidates[0]
@@ -1140,7 +1155,8 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             log(" -- candidate restore failed (%s)" % type(e).__name__)
     else:
         log(" -- no candidate patch was produced by any operation")
-    return "declared", msgs, meta
+    log(" -- REPERTOIRE ended: %s" % _end_reason)
+    return _end_reason, msgs, meta
 
 
 def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
