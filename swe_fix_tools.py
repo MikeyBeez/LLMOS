@@ -430,6 +430,22 @@ def capture_readiness(state, text, force=False):
     })
     state["_readiness_pending"] = False
     _fired(state, "readiness_answered")
+    # DISPATCH (env READINESS_DISPATCH, default off -- a worksheet change is a
+    # behaviour surface). The answer names a file and a symbol; resolve them to
+    # real lines now, while the text is here, and let the worksheet put those
+    # lines in front of the model. The old question promised "It will be
+    # fetched for you" and nothing fetched; this is that promise, kept.
+    if os.environ.get("READINESS_DISPATCH", "0") == "1" and state.get("_dispatch_fn"):
+        try:
+            site = state["_dispatch_fn"](text)
+        except Exception:
+            site = None
+        if site:
+            state["readiness_site"] = site
+            state["_readiness_site_shown"] = 0
+            _fired(state, "readiness_dispatched")
+        else:
+            _fired(state, "readiness_dispatch_missed")
     return True
 
 
@@ -534,6 +550,148 @@ def mutating_tool_names():
             "literal list, which is what caused the bug this replaces.")
     _MUTATING_CACHE = names
     return names
+
+
+def _class_span(source, name):
+    """Line span of a class body. _function_span resolves methods and
+    functions only, so a bare class name -- which is what a model quoting
+    "class KeyTransformIsNull(lookups.IsNull):" is naming -- resolved to
+    nothing and fell through to the wrong candidate."""
+    want = name.rpartition(".")[2]
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    hits = [n for n in ast.walk(tree)
+            if isinstance(n, ast.ClassDef) and n.name == want]
+    if len(hits) != 1:
+        return None
+    node = hits[0]
+    start = min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1
+    return (start, node.end_lineno, node.col_offset)
+
+
+def _readiness_site(repo_dir, text, max_lines=60):
+    """Turn a readiness ANSWER into the bytes it is about.
+
+    WHY THIS EXISTS, measured 2026-08-27. The readiness question finally got
+    answered, and both answers contained a CORRECT DIAGNOSIS from instances
+    that then submitted ZERO BYTES:
+
+      django-13710: "InlineModelAdmin.__init__ (line 2040-2043) ... when a
+        custom verbose_name is set on the Inline but verbose_name_plural is
+        not, it falls back to the MODEL's plural" -- that is the bug.
+      django-13757: "JSON_EXTRACT returns None for BOTH a present key with
+        JSON null and an absent key ... use JSON_TYPE and check it is not
+        'null'" -- that is the fix.
+
+    13710: 2853s, 78 searches, 3 files read, ZERO patch attempts.
+    13757: 2815s, 85 searches, 3 files read, ZERO patch attempts.
+
+    So the zero-byte class is not a diagnosis failure and not a missing
+    capability. The model arrives at the answer, says it in plain prose, and
+    never writes it. The gap is between KNOWING and WRITING, and every fix
+    shipped this week aimed at an earlier stage.
+
+    The one intervention that has ever worked on this model is HANDING BACK
+    THE BYTES rather than issuing advice (locate-assist, the neighbourhood
+    echo). The answer already names the file and the symbol. So: resolve them
+    to a real span and put that span in front of it.
+
+    Returns {file, name, start, end, text} or None. Refuses test files, stays
+    inside the checkout, and caps what it hands back -- the worksheet is
+    re-rendered EVERY turn and an unbounded paste would crowd out everything
+    else in it.
+    """
+    text = str(text or "")
+    if not text.strip():
+        return None
+
+    # Identifiers the model marked as code. Its answers are dense with
+    # backticks, which is a stronger signal than any heuristic I would invent.
+    # RANK them; first-seen order is wrong. Measured on django-13757: its
+    # answer opens with `JSON_EXTRACT` and `IsNull.as_sql` in backticks and
+    # only later QUOTES THE ACTUAL CLASS in a fenced block --
+    # "class KeyTransformIsNull(lookups.IsNull):" -- which is the class the
+    # real fix edits. First-seen order resolved to the base IsNull in
+    # lookups.py: the right family, the wrong class, and a span that would
+    # have sent it to edit the wrong file.
+    #
+    # A definition the model TYPED OUT beats a name it mentioned, and a name
+    # inside a code fence beats one in prose. That is a claim about what the
+    # model is doing when it quotes code at you, and it is checkable: both
+    # captured answers resolve correctly under this order and one does not
+    # under the other.
+    fences = " ".join(re.findall(r"```.*?```", text, re.S))
+    defined = set(re.findall(r"\b(?:class|def)\s+([A-Za-z_]\w*)", text))
+    cands = set(re.findall(r"`([A-Za-z_][\w.]*)`", text))
+    cands |= set(re.findall(r"\b([A-Z][A-Za-z0-9_]+\.[A-Za-z_]\w*)\b", text))
+    cands |= defined
+
+    def _score(n):
+        return ((100 if n in defined else 0)
+                + (50 if n in fences else 0)
+                + (10 if "." in n else 0)
+                + len(n))
+
+    def _keep(n):
+        bare = n.rpartition(".")[2]
+        if n.startswith(("self.", "cls.")) or len(bare) < 4:
+            return False
+        if n in ("None", "True", "False"):
+            return False
+        return not bare.isupper()      # JSON_EXTRACT is SQL, not a def
+
+    ordered = sorted((c for c in cands if _keep(c)), key=_score, reverse=True)
+
+    def _span_in(rel, ident):
+        full = _inside_repo(repo_dir, rel)
+        if full is None or not os.path.isfile(full) or _is_test_path(rel):
+            return None
+        try:
+            with open(full, encoding="utf-8", errors="ignore") as fh:
+                source = fh.read()
+        except OSError:
+            return None
+        got = _function_span(source, ident)
+        if not got:
+            got = _class_span(source, ident)
+        if not got:
+            return None
+        start, end = got[0], got[1]
+        body = source.splitlines()
+        if end - start > max_lines:
+            end = start + max_lines
+        return {"file": rel, "name": ident, "start": start + 1, "end": end,
+                "text": "\n".join("%6d  %s" % (start + 1 + k, ln)
+                                  for k, ln in enumerate(body[start:end]))}
+
+    # 1. a path the answer named outright
+    for rel in re.findall(r"[\w./-]*[\w-]+\.py", text):
+        rel = rel[2:] if rel.startswith("./") else rel
+        for ident in ordered:
+            got = _span_in(rel, ident)
+            if got:
+                return got
+
+    # 2. no usable path -- go find where the symbol is defined
+    for ident in ordered:
+        bare = ident.rpartition(".")[2]
+        if len(bare) < 4:
+            continue
+        try:
+            out = subprocess.run(
+                ["grep", "-rl", "-E",
+                 r"^\s*(async\s+)?(def|class)\s+%s\b" % re.escape(bare),
+                 "--include=*.py", "."],
+                cwd=repo_dir, capture_output=True, text=True, timeout=45).stdout
+        except Exception:
+            continue
+        for rel in [l.strip().lstrip("./") for l in out.splitlines() if l.strip()]:
+            got = _span_in(rel, ident)
+            if got:
+                return got
+    return None
 
 
 def _inside_repo(repo_dir, rel):
@@ -828,6 +986,25 @@ def render_worksheet(state):
                ("Call the ready tool."
                 if os.environ.get("READINESS_TOOL", "0") == "1"
                 else "Answer in one short paragraph, no tool call.")))
+    elif state.get("readiness_site") and not ph:
+        # THE ANSWER, TURNED BACK INTO BYTES. Shown while no edit has landed,
+        # and only a few times: a block re-rendered forever becomes wallpaper,
+        # which is exactly how the NO-EDIT-YET directive died after 211
+        # firings and zero tool calls.
+        _site = state["readiness_site"]
+        _shown = state.get("_readiness_site_shown", 0)
+        if _shown < 6:
+            state["_readiness_site_shown"] = _shown + 1
+            lines.append(
+                "  YOU SAID THE FIX IS IN %s, at %s. Those lines are below, "
+                "%d-%d. You have everything you asked for. Your next call is "
+                "an edit -- patch, edit_line, insert_lines or "
+                "rewrite_function. Not another search."
+                % (_site["file"], _site["name"], _site["start"], _site["end"]))
+            lines.append(_site["text"])
+        else:
+            lines.append("  you said the fix is in %s at %s -- still no edit."
+                         % (_site["file"], _site["name"]))
     elif state.get("readiness"):
         _last = state["readiness"][-1]
         lines.append("  you said you need: %s" % _last["answer"][:300])
@@ -3391,6 +3568,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
 
     state["_sibling_fn"] = _sibling_sites
     state["_defs_fn"] = _file_defs
+    state["_dispatch_fn"] = lambda _t: _readiness_site(repo_dir, _t)
     handlers = {
         "swe.ready":       h_ready,
         "swe.reproduce":   h_reproduce,
