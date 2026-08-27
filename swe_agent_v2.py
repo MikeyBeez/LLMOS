@@ -1147,7 +1147,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, wall_cap=None,
               gate=None, log=print, checkpoint=None, worksheet=None,
               emit=None, stall_window=None, init_messages=None,
-              success=None):
+              success=None, free_text=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -1226,11 +1226,23 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 pass
         tcs = msg.get("tool_calls") or []
         if not tcs:
-            content = (msg.get("content") or msg.get("reasoning_content")
-                       or msg.get("thinking") or "")[:400]
+            full = (msg.get("content") or msg.get("reasoning_content")
+                    or msg.get("thinking") or "")
+            # A turn with no tool call is where a PROSE ANSWER arrives. The
+            # harness used to truncate it to 400 chars and scold; if something
+            # asked a question, hand it the whole reply first.
+            answered = False
+            if free_text:
+                try:
+                    answered = bool(free_text(full))
+                except Exception:
+                    answered = False
+            content = full[:400]
             messages.append({"role": "assistant", "content": content or "..."})
             messages.append({"role": "user",
-                              "content": "Call one of the provided tools now."})
+                              "content": ("Noted. Continue -- call a tool."
+                                          if answered
+                                          else "Call one of the provided tools now.")})
             continue
         tc = tcs[0]
         fn = tc.get("function", {})
@@ -2480,6 +2492,7 @@ def run_one(inst):
     if _kb:
         fix_goal += "\n\n" + _kb
     from swe_fix_tools import render_worksheet as _rw
+    from swe_fix_tools import capture_readiness as _cap_ready
 
     def _fix_gate():
         """Only the canonical hidden tests decide pass/fail (Mikey's ruling), so
@@ -2602,12 +2615,14 @@ def run_one(inst):
             seg_turns=int(os.environ.get("SEG_TURNS", "10")),
             max_ops=int(os.environ.get("REPERTOIRE_MAX", "6")),
             worksheet=lambda: _rw(f_state), gate=_fix_gate,
+            free_text=lambda _t: _cap_ready(f_state, _t),
             checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL)
     else:
         f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                               f_handlers, FIX_SYSTEM_PROMPT,
                                               fix_goal, FIX_BUDGET,
                                               worksheet=lambda: _rw(f_state),
+                                              free_text=lambda _t: _cap_ready(f_state, _t),
                                               gate=_fix_gate,
                                               checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL)
     _emit2("phase_end", {"reason": f_reason})
@@ -2824,6 +2839,7 @@ def _postmortem(inst, blob):
                                 "probe_green": fs.get("probe_green"),
                                 "fix_verified": fs.get("fix_verified")},
                "features": dict(fs.get("features_fired") or {}),
+               "readiness": list(fs.get("readiness") or []),
                "funcs_edited": dict(fs.get("func_edits") or {}),
                "top_errors": errs.most_common(4)}
         d = os.path.expanduser("~/swe/research/postmortem")

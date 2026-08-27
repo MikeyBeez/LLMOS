@@ -404,6 +404,35 @@ def _fired(state, feature):
         pass
 
 
+def capture_readiness(state, text):
+    """Record VERBATIM what the model said it needs, when a readiness question
+    is outstanding.
+
+    Called by phase_run with the model's reply on a turn where it made no tool
+    call -- which is exactly where a prose answer arrives, and exactly where
+    the harness used to throw it away (truncated to 400 chars, then scolded
+    with "Call one of the provided tools now"). The answer has to land in
+    STATE, not in the transcript: SEG_COMPACT purges the transcript at segment
+    boundaries and the run log truncates tool results at ~150 chars, so
+    anything left in the conversation is gone by the time anyone looks. State
+    is serialised into the trace JSON and read back out by _postmortem.
+    """
+    if not state.get("_readiness_pending"):
+        return False
+    text = (text or "").strip()
+    if not text:
+        return False
+    state.setdefault("readiness", []).append({
+        "probes": state.get("_probe_calls", 0),
+        "edits": len(state.get("patch_history") or []),
+        "seen_red": bool(state.get("seen_red")),
+        "answer": text[:1500],
+    })
+    state["_readiness_pending"] = False
+    _fired(state, "readiness_answered")
+    return True
+
+
 def _seen_before(state, path, new_text):
     """Would this edit RESTORE a file state we have already been in?
     Returns the index of the prior visit, or None. Records nothing."""
@@ -666,17 +695,41 @@ def render_worksheet(state):
     # probes into FEW files, so distinct files is the one number that does not
     # move. Count the probe CALLS instead. (Same mistake as the morning's
     # features_fired read: I picked a proxy without checking its distribution.)
+    # ASK, ONCE -- do not instruct, and do not repeat.
+    #
+    # The previous version of this line was a directive, re-rendered every
+    # turn. Measured 2026-08-27: it fired 211 times across 3 instances -- about
+    # seventy repetitions each -- and rewrite_function and insert_lines were
+    # called ZERO times. A statement repeated every turn stops being read; the
+    # model had already decided editing was not the right move and read past
+    # it. Mikey: "you have to convince the model to do it. It's not going to do
+    # something it thinks is wrong."
+    #
+    # So ask a QUESTION, which has to be answered rather than skimmed, and ask
+    # what it NEEDS rather than offering a menu -- an enumerated list would
+    # force the answer into whichever buckets I happened to think of. The reply
+    # arrives as prose on a turn with no tool call, and capture_readiness()
+    # stores it verbatim in state, which is serialised into the trace.
+    #
+    # ASKED ONCE. If the harness cannot supply what it asks for, asking again
+    # teaches it the question is empty, which is how the last one died.
     _probes = state.get("_probe_calls", 0)
-    if _probes >= 8 and not ph:
-        _fired(state, "no_edit_yet_shown")
+    if _probes >= 8 and not ph and not state.get("_readiness_asked"):
+        state["_readiness_asked"] = True
+        state["_readiness_pending"] = True
+        _fired(state, "readiness_asked")
         lines.append(
-            "  NO EDIT YET   : %d searches/reads, 0 edits attempted. That "
-            "pattern means the fix is probably NOT a small swap. Ask whether "
-            "the function you declared has the WRONG ALGORITHM rather than a "
-            "wrong condition. If the fix is new code, insert_lines ADDS "
-            "lines; if the function's whole approach is wrong, "
-            "rewrite_function replaces it outright. Neither is a snippet "
-            "swap, which is why patch may have looked unusable." % _probes)
+            "  QUESTION      : you have made %d searches/reads and attempted "
+            "0 edits. Are you ready to make an edit? Answer in one short "
+            "paragraph, no tool call: say YES and which file and function you "
+            "will change, or say NO and state WHAT YOU NEED in order to be "
+            "ready. Be concrete about the thing that is missing -- a file's "
+            "contents, a failing reproduction, the names actually defined in "
+            "a module, the value of some expression at runtime. It will be "
+            "fetched for you." % _probes)
+    elif state.get("readiness"):
+        _last = state["readiness"][-1]
+        lines.append("  you said you need: %s" % _last["answer"][:300])
     if state.get("prior_attempts_note"):
         # 220 cut the real notes (549 and 562 chars measured) mid-word, which
         # kept "treat that file as EXHAUSTED" and threw away the sentence that
