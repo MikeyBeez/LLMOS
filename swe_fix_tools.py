@@ -631,8 +631,11 @@ def render_worksheet(state):
             "  NO EDIT YET   : %d files read, 0 edits attempted. That pattern "
             "means the fix is probably NOT a small swap. Ask whether the "
             "function you declared has the WRONG ALGORITHM rather than a "
-            "wrong condition -- if so, replace the whole thing with "
-            "rewrite_function." % len(state.get("files_read") or []))
+            "wrong condition. If the fix is new code, insert_lines ADDS "
+            "lines; if the function's whole approach is wrong, "
+            "rewrite_function replaces it outright. Neither is a snippet "
+            "swap, which is why patch may have looked unusable."
+            % len(state.get("files_read") or []))
     if state.get("prior_attempts_note"):
         # 220 cut the real notes (549 and 562 chars measured) mid-word, which
         # kept "treat that file as EXHAUSTED" and threw away the sentence that
@@ -2621,6 +2624,90 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                          "now -- a rewrite invalidates any earlier "
                          "verification.")}
 
+    def h_insert_lines(pcb, args):
+        """Insert NEW lines after a given line. Adds; replaces nothing.
+
+        WHY THIS EXISTS (2026-08-26, gold-shape survey of all 300 instances).
+        rewrite_function covered the 11019 shape -- replace a whole algorithm
+        -- but that is only part of the zero-byte class. Measuring the SHAPE
+        of the correct fix for every instance shows the rest: django-11910 is
+        +4 lines and -0, django-11564 is +30 and -1, django-11283 is +25 and
+        -5. Those are INSERTIONS, and the model wrote nothing on all three.
+        Every edit tool it had -- patch (old_snippet -> new_snippet) and
+        edit_line (fragment on one line) -- REPLACES existing text; patch
+        explicitly refuses an empty old_snippet. So a fix that is mostly "add
+        these lines here" had no natural expression, and the model responded
+        by not editing at all. Adding is not a special case of replacing.
+
+        Lines go in EXACTLY as written -- indentation is semantic and stays
+        the caller's business. The neighbourhood is echoed back so the result
+        shows what the file now says, and anything that stops the file parsing
+        is reverted.
+        """
+        state["must_observe"] = False
+        rel = str(args.get("file", "") or "").lstrip("./")
+        new_lines = args.get("new_lines")
+        if isinstance(new_lines, list):
+            new_lines = "\n".join(str(x) for x in new_lines)
+        new_lines = str(new_lines or "")
+        if not rel or not new_lines.strip():
+            return {"error": "file and new_lines are required"}
+        if _is_test_path(rel):
+            return {"error": "test files are refused -- patch the source"}
+        full = os.path.join(repo_dir, rel)
+        if not os.path.isfile(full):
+            return {"error": _missing_file_hint(rel, repo_dir)}
+        try:
+            with open(full, encoding="utf-8") as _fh:
+                lines = _fh.read().splitlines(True)
+        except OSError as e:
+            return {"error": str(e)}
+        try:
+            after = int(args.get("after_line", 0))
+        except (TypeError, ValueError):
+            return {"error": "after_line must be an integer (0 = top of file)"}
+        if after < 0 or after > len(lines):
+            return {"error": ("after_line %d is outside %s, which has %d lines"
+                              % (after, rel, len(lines)))}
+        block = [l + "\n" for l in new_lines.rstrip("\n").split("\n")]
+        backup = full + ".insert.bak"
+        try:
+            shutil.copyfile(full, backup)
+            with open(full, "w", encoding="utf-8") as _fh:
+                _fh.write("".join(lines[:after] + block + lines[after:]))
+        except OSError as e:
+            return {"error": str(e)}
+        bad = _syntax_check(full, rel)
+        if bad:
+            shutil.copyfile(backup, full)
+            bad["reverted"] = True
+            bad["what_to_do"] = (
+                "The insertion left %s unparseable, so it was REVERTED and "
+                "the file is unchanged. Lines are inserted EXACTLY as you "
+                "write them -- nothing is re-indented for you, so check that "
+                "the indentation matches the block you are inserting into."
+                % rel)
+            return bad
+        try:
+            with open(full, encoding="utf-8") as _fh:
+                now = _fh.read().splitlines()
+        except OSError:
+            now = []
+        lo = max(0, after - 3)
+        hi = min(len(now), after + len(block) + 3)
+        echo = ["%s%5d  %s" % (">>" if after < i + 1 <= after + len(block)
+                               else "  ", i + 1, now[i][:110])
+                for i in range(lo, hi)]
+        _fr = state.setdefault("files_read", [])
+        if rel not in _fr:
+            _fr.append(rel)
+        state["patch_history"].append({"file": rel, "verdict": "unverified"})
+        _fired(state, "insert_lines")
+        return {"ok": True, "file": rel, "inserted_after": after,
+                "line_count": len(block), "now_reads": echo,
+                "next": ("lines inserted. Run verify_fix -- an insertion "
+                         "invalidates any earlier verification.")}
+
     def h_verify_fix(pcb, args):
         """Rerun the registered reproduction. GREEN when it exits 0."""
         shutil.rmtree(os.path.join(repo_dir, ".hypothesis"), ignore_errors=True)
@@ -3061,6 +3148,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.read_range":  h_read_range,
         "swe.patch":       h_patch,
         "swe.rewrite_function": h_rewrite_function,
+        "swe.insert_lines": h_insert_lines,
         "swe.edit_line":   h_edit_line,
         "swe.verify_fix":  h_verify_fix,
         "swe.run_tests":   h_run_tests,
@@ -3455,6 +3543,30 @@ FIX_TOOLS = [
             "end":   {"type": "integer"},
         }, "required": ["file", "start", "end"]}}},
     {"type": "function", "function": {
+        "name": "insert_lines",
+        "description": (
+            "ADD new lines to a file after a given line number. This ADDS; it "
+            "replaces nothing, so use it whenever the fix is new code rather "
+            "than changed code -- a new branch, a new helper, an extra guard, "
+            "an import, a new method on a class. patch and edit_line can only "
+            "REPLACE existing text, so do not contort a replacement into an "
+            "insertion by retyping a line you did not want to change. "
+            "after_line is the 1-based line the new block goes AFTER; 0 puts "
+            "it at the top of the file. Your lines are inserted EXACTLY as "
+            "written -- nothing is re-indented for you, so include the "
+            "indentation the surrounding block needs. The result echoes the "
+            "neighbourhood back so you can see what the file now says. If the "
+            "insertion would stop the file parsing, NOTHING is written."),
+        "parameters": {"type": "object", "properties": {
+            "file": {"type": "string"},
+            "after_line": {"type": "integer",
+                           "description": "1-based line to insert after; "
+                                          "0 = top of file"},
+            "new_lines": {"type": "string",
+                          "description": "the lines to add, with their own "
+                                         "indentation"},
+        }, "required": ["file", "after_line", "new_lines"]}}},
+    {"type": "function", "function": {
         "name": "rewrite_function",
         "description": (
             "Replace an ENTIRE function or method with new source. Use this "
@@ -3619,6 +3731,7 @@ FIX_TOOL2SYS = {
     "read_range":  "swe.read_range",
     "patch":       "swe.patch",
     "rewrite_function": "swe.rewrite_function",
+    "insert_lines": "swe.insert_lines",
     "edit_line":   "swe.edit_line",
     "verify_fix":  "swe.verify_fix",
     "run_tests":   "swe.run_tests",
