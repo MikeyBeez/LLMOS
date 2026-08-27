@@ -458,6 +458,26 @@ def _anchor_record(state):
             for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
 
 
+def _inside_repo(repo_dir, rel):
+    """Resolve rel under repo_dir and refuse anything that escapes it.
+
+    os.path.join(repo_dir, "/tmp/x") == "/tmp/x": an ABSOLUTE second argument
+    discards the root entirely. So "file": "/tmp/repro.py" walked straight out
+    of the checkout, and rewrite_function got as far as parsing that file
+    before failing for an unrelated reason. Symlinks and ".." are the same
+    class of escape, so this resolves both sides with realpath and compares.
+
+    Returns the absolute path, or None if it is not inside the checkout.
+    """
+    if os.path.isabs(rel):
+        return None
+    full = os.path.realpath(os.path.join(repo_dir, rel))
+    root = os.path.realpath(repo_dir)
+    if full == root or full.startswith(root + os.sep):
+        return full
+    return None
+
+
 def _atomic_write(path, text):
     """Replace a file's contents without ever leaving a truncated file behind.
 
@@ -1357,8 +1377,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         func = str(args.get("function", "") or "")
         role = str(args.get("role", "") or "")
         why = str(args.get("reason", "") or "")
-        full = os.path.join(repo_dir, path)
-        if not path or not os.path.isfile(full):
+        full = _inside_repo(repo_dir, path)
+        if not path or full is None or not os.path.isfile(full):
             return {"error": (_missing_file_hint(path, repo_dir)
                               if path else "file is required")}
         if func:
@@ -1924,8 +1944,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
-        full = os.path.join(repo_dir, path)
-        if not os.path.isfile(full):
+        full = _inside_repo(repo_dir, path)
+        if full is None or not os.path.isfile(full):
             return {"error": _missing_file_hint(path, repo_dir)}
         _fr = state.setdefault("files_read", [])
         _np = path.lstrip("./")
@@ -2126,8 +2146,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if _is_test_path(path):
             return {"error": "refusing to edit a test file — fix the source, "
                              "not the tests"}
-        full = os.path.join(repo_dir, path)
-        if not os.path.isfile(full):
+        full = _inside_repo(repo_dir, path)
+        if full is None or not os.path.isfile(full):
             return {"error": _missing_file_hint(path, repo_dir)}
         try:
             with open(full, encoding="utf-8", errors="ignore") as f:
@@ -2654,16 +2674,25 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         tool list is half the fix.
         """
         state["must_observe"] = False
-        rel = str(args.get("file", "") or "").lstrip("./")
+        # NOT lstrip("./") -- that strips the leading SLASH off an absolute
+        # path too, so "/tmp/repro.py" became "tmp/repro.py" and
+        # _missing_file_hint stopped recognising it as absolute. Measured
+        # 2026-08-27: 4 of the failed calls were the model trying to edit its
+        # own inline reproduction script and getting the generic "do not guess
+        # file paths" instead of the specific "reproduction scripts run inline,
+        # they are NOT saved files" that _missing_file_hint already had ready.
+        # I broke a working error message with a one-character habit.
+        _raw = str(args.get("file", "") or "")
+        rel = _raw[2:] if _raw.startswith("./") else _raw
         name = str(args.get("name", "") or "").strip()
         new_source = args.get("new_source") or ""
         if not rel or not name or not str(new_source).strip():
             return {"error": "file, name and new_source are all required"}
         if _is_test_path(rel):
             return {"error": "test files are refused -- patch the source"}
-        full = os.path.join(repo_dir, rel)
-        if not os.path.isfile(full):
-            return {"error": _missing_file_hint(rel, repo_dir)}
+        full = _inside_repo(repo_dir, rel)
+        if full is None or not os.path.isfile(full):
+            return {"error": _missing_file_hint(_raw, repo_dir)}
         try:
             with open(full, encoding="utf-8") as _fh:
                 src_text = _fh.read()
@@ -2739,7 +2768,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         is reverted.
         """
         state["must_observe"] = False
-        rel = str(args.get("file", "") or "").lstrip("./")
+        _raw = str(args.get("file", "") or "")   # see h_rewrite_function
+        rel = _raw[2:] if _raw.startswith("./") else _raw
         new_lines = args.get("new_lines")
         if isinstance(new_lines, list):
             new_lines = "\n".join(str(x) for x in new_lines)
@@ -2748,9 +2778,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             return {"error": "file and new_lines are required"}
         if _is_test_path(rel):
             return {"error": "test files are refused -- patch the source"}
-        full = os.path.join(repo_dir, rel)
-        if not os.path.isfile(full):
-            return {"error": _missing_file_hint(rel, repo_dir)}
+        full = _inside_repo(repo_dir, rel)
+        if full is None or not os.path.isfile(full):
+            return {"error": _missing_file_hint(_raw, repo_dir)}
         try:
             with open(full, encoding="utf-8") as _fh:
                 lines = _fh.read().splitlines(True)
@@ -3121,8 +3151,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if _is_test_path(path):
             return {"error": "refusing to edit a test file - fix the source, "
                              "not the tests"}
-        full = os.path.join(repo_dir, path)
-        if not os.path.isfile(full):
+        full = _inside_repo(repo_dir, path)
+        if full is None or not os.path.isfile(full):
             return {"error": _missing_file_hint(path, repo_dir)}
         try:
             with open(full, encoding="utf-8", errors="ignore") as f:

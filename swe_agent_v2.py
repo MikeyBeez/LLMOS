@@ -2712,7 +2712,8 @@ def _seed_churn(iid, f_state):
             if n:
                 seeded[fn] = seeded.get(fn, 0) + 1
         for e in (t.get("phase2_events") or []):
-            if e.get("tool") == "patch" and e.get("ok"):
+            if e.get("tool") in ("patch", "edit_line", "insert_lines",
+                                 "rewrite_function") and e.get("ok"):
                 a = e.get("args")
                 if isinstance(a, str):
                     try:
@@ -2790,7 +2791,14 @@ def _postmortem(inst, blob):
                     a = {}
             return a if isinstance(a, dict) else {}
 
-        pat = [e for e in ev if e.get("tool") == "patch"]
+        # EVERY EDIT TOOL, not just the one named "patch" (fixed 2026-08-27).
+        # This counter said attempts=0 for instances that had called
+        # insert_lines and rewrite_function successfully, because it matched
+        # the literal tool name. I added two edit tools and never updated it,
+        # then built two theories on "zero patch attempts". edit_line has been
+        # uncounted since it was added, for the same reason.
+        EDIT_TOOLS = ("patch", "edit_line", "insert_lines", "rewrite_function")
+        pat = [e for e in ev if e.get("tool") in EDIT_TOOLS]
         seen, repeats, failed = set(), 0, 0
         line_mode = esc_tot = esc_fail = 0
         for e in pat:
