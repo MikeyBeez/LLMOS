@@ -458,6 +458,84 @@ def _anchor_record(state):
             for v in sorted(fa.values(), key=lambda x: x["turn"])][:8]
 
 
+_MUTATING_CACHE = None
+
+
+def mutating_tool_names():
+    """Tool names whose handler writes to the checkout -- DERIVED, not listed.
+
+    THE DUPLICATE THIS DELETES. Until 2026-08-27 the answer to "which tools
+    edit files" was written down in three places: a tuple inside
+    _postmortem, the same tuple inline in _seed_churn, and the set of
+    handlers that actually call _atomic_write. Adding insert_lines and
+    rewrite_function updated the third and neither of the first two, so
+    every patch count in a 52-instance campaign was wrong and two theories
+    were built on the zero.
+
+    A checker that detects drift between two hand-maintained lists is a
+    smoke alarm for a fire that should not be possible. The fix is not a
+    better alarm, it is one source of truth: a handler writes to the
+    checkout if its code writes to the checkout, and that fact is read off
+    the code that does it. There is nothing left to keep in sync.
+
+    Delegation counts. edit_line writes nothing itself; it hands off to
+    h_patch in line mode. So the walk iterates to a fixed point over
+    handler-calls-handler rather than looking one level deep.
+
+    Raises rather than returning empty. A derived list has a failure mode a
+    literal does not -- coming back empty and silently zeroing every counter
+    downstream, which is the exact bug this replaces, wearing a nicer hat.
+    preflight.py calls this before a campaign starts, so the raise lands
+    where it costs a second instead of 300 x 45 minutes.
+    """
+    global _MUTATING_CACHE
+    if _MUTATING_CACHE is not None:
+        return _MUTATING_CACHE
+
+    import ast as _ast
+    import inspect as _inspect
+    import sys as _sys
+    tree = _ast.parse(_inspect.getsource(_sys.modules[__name__]))
+
+    maker = next((n for n in _ast.walk(tree)
+                  if isinstance(n, _ast.FunctionDef)
+                  and n.name == "make_fix_handlers"), None)
+    if maker is None:
+        raise RuntimeError("mutating_tool_names: make_fix_handlers not found")
+
+    bodies, registry = {}, {}
+    for node in _ast.walk(maker):
+        if isinstance(node, _ast.FunctionDef) and node is not maker:
+            bodies[node.name] = _ast.unparse(node)
+        elif isinstance(node, _ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if (isinstance(k, _ast.Constant) and isinstance(k.value, str)
+                        and k.value.startswith("swe.")
+                        and isinstance(v, _ast.Name)):
+                    registry[k.value] = v.id
+
+    writers = {n for n, b in bodies.items() if "_atomic_write(" in b}
+    while True:
+        grown = {n for n, b in bodies.items()
+                 if any(("%s(" % w) in b for w in writers)}
+        if grown <= writers:
+            break
+        writers |= grown
+
+    targets = {t for t, fn in registry.items() if fn in writers}
+    names = frozenset(tool for tool, target in FIX_TOOL2SYS.items()
+                      if target in targets)
+    if not names:
+        raise RuntimeError(
+            "mutating_tool_names derived an EMPTY set. Something structural "
+            "changed -- the handlers dict, the nesting, or the name "
+            "_atomic_write. Every edit counter downstream would silently "
+            "read zero. Fix the derivation; do not paper over it with a "
+            "literal list, which is what caused the bug this replaces.")
+    _MUTATING_CACHE = names
+    return names
+
+
 def _inside_repo(repo_dir, rel):
     """Resolve rel under repo_dir and refuse anything that escapes it.
 

@@ -103,61 +103,67 @@ def check_menu_dispatch_handlers():
 
 # --------------------------------------------------------------------------
 def check_edit_tools_are_counted(handlers):
-    """Every handler that WRITES A FILE must be counted as an edit.
+    """The DERIVED edit-tool set must agree with the handlers that write.
 
-    This is bug 1, generalised. A handler mutates the checkout if its source
-    calls _atomic_write; the postmortem counts a tool as an edit if its name
-    is in EDIT_TOOLS. Those two sets must match, and they silently did not
-    for two days after insert_lines and rewrite_function shipped.
+    This check changed shape on 2026-08-27, and the reason is the point. It
+    used to compare a hand-maintained EDIT_TOOLS tuple in swe_agent_v2
+    against the handlers that call _atomic_write -- a drift detector between
+    two lists of the same fact. The better fix was to delete one of the
+    lists: swe_fix_tools.mutating_tool_names now reads the answer off the
+    code that does the writing, so there is nothing to drift.
+
+    That removes a failure mode and introduces a different one. A derivation
+    can come back EMPTY or WRONG and silently zero every edit counter
+    downstream -- the same bug in nicer clothes. So this is now a
+    DIFFERENTIAL TEST: derive the set a second time, by a different method
+    (runtime introspection of the bound handlers rather than an AST walk of
+    the module source), and require the two to agree. Two independent
+    derivations agreeing is evidence; one derivation is an assumption.
     """
     if not handlers:
         return
-    src = open(os.path.join(LLMOS, "swe_agent_v2.py"), encoding="utf-8").read()
-    m = re.search(r"EDIT_TOOLS\s*=\s*\(([^)]*)\)", src)
-    if not m:
-        fail("edit-tools", "no EDIT_TOOLS tuple found in swe_agent_v2.py -- "
-                           "the postmortem is counting edits by some other "
-                           "rule and this check cannot see it")
+    try:
+        import swe_fix_tools as T
+        derived = set(T.mutating_tool_names())
+    except Exception as e:
+        fail("edit-tools", "mutating_tool_names() raised %s: %s -- every edit "
+                           "counter downstream would be wrong or empty"
+             % (type(e).__name__, e))
         return
-    counted = set(re.findall(r'"([^"]+)"', m.group(1)))
 
-    # A handler mutates the checkout if it calls _atomic_write -- OR if it
-    # calls a handler that does. edit_line writes nothing itself; it delegates
-    # to h_patch in line mode. This file's first run reported edit_line as a
-    # stale EDIT_TOOLS entry for exactly that reason, which would have been a
-    # very expensive thing to believe. Iterate to a fixed point so a chain of
-    # any length is caught.
-    src_by_fn = {}
+    # Second, independent derivation: bind the handlers and read their source.
+    src_by_target = {}
     for target, fn in handlers.items():
         if not target.startswith("swe."):
             continue
         try:
-            src_by_fn[target] = (getattr(fn, "__name__", ""), inspect.getsource(fn))
+            src_by_target[target] = (getattr(fn, "__name__", ""),
+                                     inspect.getsource(fn))
         except (OSError, TypeError):
             continue
-
-    mutating_fns = {nm for nm, body in src_by_fn.values()
-                    if "_atomic_write(" in body}
+    writers = {nm for nm, body in src_by_target.values()
+               if "_atomic_write(" in body}
     while True:
-        grown = {nm for nm, body in src_by_fn.values()
-                 if any(("%s(" % m) in body for m in mutating_fns)}
-        if grown <= mutating_fns:
+        grown = {nm for nm, body in src_by_target.values()
+                 if any(("%s(" % w) in body for w in writers)}
+        if grown <= writers:
             break
-        mutating_fns |= grown
+        writers |= grown
+    targets = {t for t, (nm, _b) in src_by_target.items() if nm in writers}
+    import swe_fix_tools as _T
+    independent = {tool for tool, tgt in _T.FIX_TOOL2SYS.items()
+                   if tgt in targets}
 
-    mutating = {t.split(".", 1)[1] for t, (nm, _b) in src_by_fn.items()
-                if nm in mutating_fns}
-
-    missing = mutating - counted
-    if missing:
+    if not independent:
+        fail("edit-tools", "no handler in the bound registry writes to the "
+                           "checkout -- either _atomic_write was renamed or "
+                           "the edit tools are gone")
+        return
+    if derived != independent:
         fail("edit-tools",
-             "these handlers write to the checkout but are NOT in EDIT_TOOLS, "
-             "so every patch count that includes them is wrong: %s"
-             % ", ".join(sorted(missing)))
-    stale = counted - mutating
-    if stale:
-        warn("edit-tools", "EDIT_TOOLS names tools that no longer write: %s"
-             % ", ".join(sorted(stale)))
+             "the two derivations of 'which tools edit files' disagree. "
+             "module-source says %s; bound handlers say %s"
+             % (sorted(derived), sorted(independent)))
 
 
 # --------------------------------------------------------------------------

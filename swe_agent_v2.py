@@ -28,8 +28,18 @@ from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS, auto_veri
                                    BOOTSTRAP_SYSTEM_PROMPT,
                                    make_bootstrap_handlers, env_ready)
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
-                            make_fix_handlers)
+                            make_fix_handlers, mutating_tool_names)
 import envcheck
+
+
+def _mutating_tools():
+    """Which tool names count as an edit. ONE source of truth, and it lives in
+    the module that owns the handlers -- see mutating_tool_names, which reads
+    it off the code that writes files. Kept as a call rather than a constant
+    so a structural change raises where preflight.py catches it, instead of
+    quietly returning an empty set and zeroing every edit counter in the
+    corpus."""
+    return mutating_tool_names()
 from trace_consumers import (remedies_for, format_remedy_context,
                              patterns_load, format_patterns_context,
                              harvest_trace, critic_review, error_signature,
@@ -2748,9 +2758,9 @@ def _seed_churn(iid, f_state):
             # historical corruption.
             if n:
                 seeded[fn] = seeded.get(fn, 0) + 1
+        _edits = _mutating_tools()
         for e in (t.get("phase2_events") or []):
-            if e.get("tool") in ("patch", "edit_line", "insert_lines",
-                                 "rewrite_function") and e.get("ok"):
+            if e.get("tool") in _edits and e.get("ok"):
                 a = e.get("args")
                 if isinstance(a, str):
                     try:
@@ -2828,14 +2838,18 @@ def _postmortem(inst, blob):
                     a = {}
             return a if isinstance(a, dict) else {}
 
-        # EVERY EDIT TOOL, not just the one named "patch" (fixed 2026-08-27).
-        # This counter said attempts=0 for instances that had called
-        # insert_lines and rewrite_function successfully, because it matched
-        # the literal tool name. I added two edit tools and never updated it,
-        # then built two theories on "zero patch attempts". edit_line has been
-        # uncounted since it was added, for the same reason.
-        EDIT_TOOLS = ("patch", "edit_line", "insert_lines", "rewrite_function")
-        pat = [e for e in ev if e.get("tool") in EDIT_TOOLS]
+        # DERIVED, not listed. This counter matched the literal tool name
+        # "patch" while three more edit tools existed, so attempts=0 was
+        # false for every instance that used them and two theories were
+        # built on that zero. The first fix was a tuple of four names --
+        # which only moved the problem, because the same tuple was also
+        # inline in _seed_churn and the real answer lived in the handlers
+        # that call _atomic_write. Three sources of truth for one fact.
+        # Now there is one: swe_fix_tools reads it off the code that does
+        # the writing, delegation included. Adding an edit tool can no
+        # longer forget to update anything, because there is nothing to
+        # update.
+        pat = [e for e in ev if e.get("tool") in _mutating_tools()]
         seen, repeats, failed = set(), 0, 0
         line_mode = esc_tot = esc_fail = 0
         for e in pat:
