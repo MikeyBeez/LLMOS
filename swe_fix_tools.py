@@ -616,6 +616,54 @@ def _deadline_guess(state):
     _cut = int(os.environ.get("EDIT_DEADLINE_CALLS", "50") or 50)
     if state.get("_probe_calls", 0) < _cut:
         return None
+    # ESCALATION LADDER (2026-08-28, design measured before it was built).
+    # Across every blank under the deadline: 5 of 6 racked up 24-51 refusals
+    # and kept going, so refusals are counted and the response escalates.
+    # Tier thresholds come from the one WINNER that ever saw refusals:
+    # 15213 took 12 refusals, then edited, then won -- so the confrontation
+    # begins at 12 (where a convertible run has already converted or is
+    # about to) and the give-up at 20 (no winner in campaign history ever
+    # needed more; the blanks that pass 20 never edit at all).
+    _n = state["_deadline_refusals"] = state.get("_deadline_refusals", 0) + 1
+    if _n >= 20:
+        # FAST-FAIL. Same constant string every time, on purpose: phase_run's
+        # stall watchdog ends the phase when results stop being novel, so an
+        # identical result every turn is what actually terminates the
+        # segment quickly instead of burning the wall. state persists across
+        # segments, so every later segment collapses the same way and the
+        # walk falls through to the candidate bank in minutes, not 45.
+        if not state.get("_deadline_giveup"):
+            state["_deadline_giveup"] = True
+            _fired(state, "deadline_giveup")
+        return {"error": (
+            "SEGMENT OVER: search is closed for this run. No further "
+            "information will be provided. The only useful moves left are "
+            "an edit tool (patch, edit_line, insert_lines, "
+            "rewrite_function) or submit.")}
+    if _n >= 12:
+        # THE CONFRONTATION -- Mikey's design, 2026-08-28: "tell the model
+        # that you found the answer, but you're refusing to produce it. Go
+        # and look at the context window and make your best guess." The
+        # strongest available evidence is the model's OWN diagnosis, so
+        # hand its words back to it. Both provable had-the-answer blanks
+        # (12747, 14017) wrote analyses naming the winning file; nothing
+        # in the harness ever showed them their own conclusion again.
+        _fired(state, "deadline_confronted")
+        _own = ""
+        _r = state.get("readiness") or []
+        if _r:
+            _own = (" YOUR OWN WORDS, from earlier in this context: \"%s\""
+                    % " ".join(_r[-1]["answer"].split())[:350])
+        _site = state.get("readiness_site")
+        if _site:
+            _own += (" You even named the site: %s :: %s."
+                     % (_site.get("file"), _site.get("name")))
+        return {"error": (
+            "YOU HAVE ALREADY FOUND THE ANSWER, AND YOU ARE REFUSING TO "
+            "PRODUCE IT.%s Look back at your context window: the diagnosis "
+            "is yours. You will get no new information from more searching. "
+            "Write your own conclusion as an edit NOW -- your best guess, "
+            "even if you are not certain." % _own)}
     _fired(state, "deadline_search_refused")
     return {"error": (
         "SEARCH IS OVER FOR THIS RUN. You have made %d searches and reads "
@@ -2271,6 +2319,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["must_observe"] = False
         state["rejected_repro_streak"] = 0
         state["_probe_calls"] = state.get("_probe_calls", 0) + 1
+        # The reading valve stays open through the whole escalation -- an
+        # edit needs line numbers -- and closes only at give-up (20+
+        # refusals, a population that has never once edited). Identical
+        # string as the other give-up result, for the stall watchdog.
+        if (state.get("_deadline_giveup")
+                and not state.get("patch_history")):
+            return {"error": (
+                "SEGMENT OVER: search is closed for this run. No further "
+                "information will be provided. The only useful moves left "
+                "are an edit tool (patch, edit_line, insert_lines, "
+                "rewrite_function) or submit.")}
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
