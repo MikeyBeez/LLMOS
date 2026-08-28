@@ -1212,17 +1212,60 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
     _seen_sigs = set()   # result signatures seen so far (no-progress watchdog)
     _novel_hist = []     # per-turn: 1 if the result was new, else 0
     for turn in range(budget):
+        # WHERE THE WORKSHEET GOES, and it is a KV-cache decision as much as a
+        # prompting one (env WORKSHEET_TAIL, default off).
+        #
+        # FRONT (the original): rewrite messages[1] in place. messages[1] is
+        # the SECOND message, right after the system prompt, and the
+        # worksheet's counters change every turn -- so the KV prefix diverges
+        # about 200 tokens in and EVERYTHING after it is recomputed, every
+        # turn, for the whole run.
+        #
+        # Measured 2026-08-27 against this server, 4-message conversation,
+        # max_tokens=1, reading timings.prompt_n:
+        #     identical repeat      ->    4 tokens,   58ms   (cache works)
+        #     tail-only edit        ->   16 tokens,  167ms   (near free)
+        #     messages[1] edited    -> 2534 tokens, 2000ms   (full price)
+        #     messages[1] edited    -> 2534 tokens, 1954ms   (full price again)
+        # llama-server prefix-caches and is good at it; we were defeating it.
+        # Real cost from 60 traces: median 278k total prompt tokens per
+        # instance at a measured 1267 tok/s = 219s = 3.7 minutes of a
+        # 38-minute instance, and that is a FLOOR because SEG_COMPACT purges
+        # earlier segments from the saved trace.
+        #
+        # TAIL: leave messages[1] as the stable goal, keep `messages`
+        # strictly append-only, and hand _chat messages + [worksheet] WITHOUT
+        # storing it. The whole conversation becomes a cacheable prefix and
+        # only the ~500-token worksheet is reprocessed.
+        #
+        # This is LMCache's CacheBlend principle -- recompute only what
+        # changed -- achieved by ORDERING instead of by a cache layer.
+        #
+        # GATED, because it is not a pure optimisation: it moves the
+        # worksheet from the front of the context to the end, and position
+        # changes salience. Recency may make the model attend to it more, or
+        # less. This whole week has been evidence that worksheet placement
+        # and wording matter, so it is a behaviour change and gets measured
+        # as one, on its own restart.
+        _tail_ws = None
         if worksheet is not None:
-            # the state object, written down and re-shown EVERY turn: the model
-            # reads its situation instead of having to remember it
             try:
-                messages[1]["content"] = user_goal + "\n\n" + worksheet()
+                _ws = worksheet()
             except Exception:
-                pass
+                _ws = None
+            if _ws is not None:
+                if os.environ.get("WORKSHEET_TAIL", "0") == "1":
+                    _tail_ws = {"role": "user", "content": _ws}
+                else:
+                    try:
+                        messages[1]["content"] = user_goal + "\n\n" + _ws
+                    except Exception:
+                        pass
+        _send = (messages + [_tail_ws]) if _tail_ws else messages
         msg = None
         for attempt in range(3):
             try:
-                msg, meta = cpu._chat(messages)
+                msg, meta = cpu._chat(_send)
                 break
             except Exception as e:
                 err = str(e)
