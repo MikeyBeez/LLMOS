@@ -4258,6 +4258,41 @@ if os.environ.get("EDIT_SURFACE", "0") != "1":
                  if _t.get("function", {}).get("name")
                  not in ("insert_lines", "rewrite_function")]
 
+# TOOL_NORMS (2026-08-28, from Mikey: "Can we give better instructions for
+# tool calling?"). Two facts the model provably never hears, injected into
+# the TOOL DESCRIPTIONS because that is where this model actually reads --
+# the evidence, measured this week: a directive re-rendered at the front of
+# the context fired 211 times and produced zero edit calls; the same message
+# delivered as a tool RESULT converted 10 of 19; and the system prompt
+# already shouts "the moment you can name the fix, make the edit" at a model
+# that then searched 118 calls without editing.
+#
+# Fact 1, for the edit tools: EDITS ARE SAFE. Every edit tool syntax-checks
+# and auto-reverts on failure, candidates are banked, the tree is restored
+# between segments. Nothing tells the model this, and its revealed behaviour
+# (endless verification before the first edit, readiness answers that state
+# the fix and keep reading) is exactly that of an agent treating an edit as
+# an irreversible commitment. Say it where the choice is made.
+#
+# Fact 2, for the search tools: THE NORM. Winning runs make ~20 probes
+# before their first edit (median 28th call, from n=35 resolved); no run in
+# campaign history reached ~50 probes with zero edits and recovered. A norm
+# stated at the decision point beats a rule stated at the top.
+if os.environ.get("TOOL_NORMS", "0") == "1":
+    _SAFE = ("SAFE TO TRY: this edit is syntax-checked and automatically "
+             "reverted if it fails -- an edit is a cheap experiment, not a "
+             "commitment. ")
+    _NORM = (" NORM: successful runs make about 20 searches/reads IN TOTAL "
+             "before their first edit. If you are well past that, stop "
+             "searching and make your best-guess edit.")
+    for _t in FIX_TOOLS:
+        _fn = _t.get("function", {})
+        _n = _fn.get("name")
+        if _n in ("patch", "edit_line", "insert_lines", "rewrite_function"):
+            _fn["description"] = _SAFE + _fn.get("description", "")
+        elif _n in ("locate", "read_range", "check", "symbol"):
+            _fn["description"] = _fn.get("description", "") + _NORM
+
 # DIAG_GATE menu gate: the diagnosis tools appear only when the ladder is on.
 if os.environ.get("DIAG_GATE", "0") != "1":
     FIX_TOOLS = [_t for _t in FIX_TOOLS
