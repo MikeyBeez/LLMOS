@@ -602,7 +602,19 @@ def _deadline_guess(state):
         return None
     if state.get("patch_history"):
         return None                      # it has edited; search freely
-    if state.get("_probe_calls", 0) < 50:
+    # Threshold from env so it can be tuned per campaign without a code
+    # change. 50 was the safe backstop (winners' max first edit: 67, one
+    # instance). Mikey moved it to 30 on 2026-08-27: "why don't we try to
+    # force a write after 30." The known cost, measured before agreeing:
+    # 12 of 34 winners made their first edit after call 30, so at 30 we
+    # push about a third of natural winners to write earlier than they
+    # chose to. The bet is that this is cheap -- winners had their fix
+    # file in hand by call ~25 and normally write within ~8 calls of
+    # touching it, and the FIRST landed edit unlocks search again, so an
+    # early rough edit costs a revert, not the run. The was-passing rate
+    # is the judge.
+    _cut = int(os.environ.get("EDIT_DEADLINE_CALLS", "50") or 50)
+    if state.get("_probe_calls", 0) < _cut:
         return None
     _fired(state, "deadline_search_refused")
     return {"error": (
@@ -1018,14 +1030,15 @@ def render_worksheet(state):
     _probes = state.get("_probe_calls", 0)
     # Advance notice of the deadline, so the refusal is never a surprise.
     # One line, only in the window where it is true, best-guess framing.
+    _cut = int(os.environ.get("EDIT_DEADLINE_CALLS", "50") or 50)
     if (os.environ.get("EDIT_DEADLINE", "0") == "1" and not ph
-            and 40 <= _probes < 50):
+            and _cut - 10 <= _probes < _cut):
         _fired(state, "deadline_warned")
         lines.append(
-            "  DEADLINE      : you have %d searches and 0 edits. At 50, "
+            "  DEADLINE      : you have %d searches and 0 edits. At %d, "
             "search tools stop working. Stop trying to be certain -- give "
             "your BEST GUESS as an edit now. A guess can score; a blank "
-            "never does." % _probes)
+            "never does." % (_probes, _cut))
     if _probes >= 8 and not ph and not state.get("_readiness_asked"):
         state["_readiness_asked"] = True
         state["_readiness_pending"] = True
