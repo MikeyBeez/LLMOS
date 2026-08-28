@@ -571,6 +571,52 @@ def _class_span(source, name):
     return (start, node.end_lineno, node.col_offset)
 
 
+def _deadline_guess(state):
+    """Near the end of the budget: stop solving, give the best guess.
+
+    MIKEY'S DIRECTIVE, 2026-08-27, his words: "even if you think it may not
+    be correct you have to write a fix ... when we are getting near the end
+    of the number of turns" and "Don't solve it, give us your best guess."
+
+    WHY THE FRAMING IS THE POINT. His own earlier observation: the model
+    will not do something it believes is wrong, and submitting an unsure
+    edit reads to it as wrong. "Give your best guess" REDEFINES the correct
+    behaviour -- at this point in the run, a guess is not a violation of
+    care, it IS the careful move. The numbers agree: across every campaign
+    run ever resolved, the first edit came by call 67 (median 28), and no
+    run that reached ~50 probe calls with zero edits has ever recovered. A
+    wrong patch scores exactly like a blank one, and sometimes it scores
+    like a right one -- 13660 resolved on a fallback candidate the walk
+    itself never verified.
+
+    ENFORCED AT THE TOOL BOUNDARY, not the worksheet. The NO-EDIT-YET
+    directive was shown 211 times in the worksheet and produced zero edit
+    calls -- repeated advice is wallpaper. A refusal in the tool result is
+    read, because it arrives as the answer to something the model just
+    asked. Gated on EDIT_DEADLINE.
+
+    Returns an error dict to hand back instead of running the search, or
+    None to proceed.
+    """
+    if os.environ.get("EDIT_DEADLINE", "0") != "1":
+        return None
+    if state.get("patch_history"):
+        return None                      # it has edited; search freely
+    if state.get("_probe_calls", 0) < 50:
+        return None
+    _fired(state, "deadline_search_refused")
+    return {"error": (
+        "SEARCH IS OVER FOR THIS RUN. You have made %d searches and reads "
+        "and attempted 0 edits; no run in this campaign's history has "
+        "recovered from here by searching more. Stop trying to be certain. "
+        "GIVE YOUR BEST GUESS NOW: pick the most likely site from what you "
+        "have already read and write the fix with patch, edit_line, "
+        "insert_lines or rewrite_function (read_range still works if you "
+        "need line numbers). An imperfect fix is the CORRECT move at this "
+        "point -- a blank submission never scores, a best guess sometimes "
+        "does." % state.get("_probe_calls", 0))}
+
+
 def _readiness_site(repo_dir, text, max_lines=60):
     """Turn a readiness ANSWER into the bytes it is about.
 
@@ -970,6 +1016,16 @@ def render_worksheet(state):
     # ASKED ONCE. If the harness cannot supply what it asks for, asking again
     # teaches it the question is empty, which is how the last one died.
     _probes = state.get("_probe_calls", 0)
+    # Advance notice of the deadline, so the refusal is never a surprise.
+    # One line, only in the window where it is true, best-guess framing.
+    if (os.environ.get("EDIT_DEADLINE", "0") == "1" and not ph
+            and 40 <= _probes < 50):
+        _fired(state, "deadline_warned")
+        lines.append(
+            "  DEADLINE      : you have %d searches and 0 edits. At 50, "
+            "search tools stop working. Stop trying to be certain -- give "
+            "your BEST GUESS as an edit now. A guess can score; a blank "
+            "never does." % _probes)
     if _probes >= 8 and not ph and not state.get("_readiness_asked"):
         state["_readiness_asked"] = True
         state["_readiness_pending"] = True
@@ -1961,6 +2017,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     def h_locate(pcb, args):
         state["must_observe"] = False
         state["_probe_calls"] = state.get("_probe_calls", 0) + 1
+        _dl = _deadline_guess(state)
+        if _dl:
+            return _dl
         """grep for a pattern, then ask the LLM which hit is most likely the
         actual site to investigate."""
         pat = str(args.get("pattern", ""))
@@ -3255,6 +3314,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
     def h_check(pcb, args):
         state["must_observe"] = False
         state["stuck"] = 0   # a probe ran -> unstick
+        _dl = _deadline_guess(state)
+        if _dl:
+            return _dl
         """Answer ONE small question. Registers nothing, gates nothing."""
         snippet = args.get("snippet") or args.get("python") or ""
         if not snippet.strip():
@@ -3486,6 +3548,9 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         # 2026-08-24 (Mikey: "standard stuff that gets used ... pull it
         # out and put it into some object"): the symbol map IS that
         # object, built mechanically per checkout (~2s, stdlib ast).
+        _dl = _deadline_guess(state)
+        if _dl:
+            return _dl
         name = str((args or {}).get("name", "")).strip()
         if not name:
             return {"error": "give name: a function, class or method "
