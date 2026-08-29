@@ -649,7 +649,11 @@ def _deadline_guess(state):
             "SEGMENT OVER: search is closed for this run. No further "
             "information will be provided. The only useful moves left are "
             "an edit tool (patch, edit_line, insert_lines, "
-            "rewrite_function) or submit.")}
+            "rewrite_function) or submit."),
+            # Not advice -- an interrupt. phase_run ends the phase when it
+            # sees this key (2026-08-29: 9 blanks in 31 rows burned the full
+            # ~2700s wall AFTER give-up fired, waiting on the stall watchdog).
+            "_phase_over": "deadline_giveup"}
     if _n >= 15:
         # THE CONFRONTATION -- Mikey's design, 2026-08-28: "tell the model
         # that you found the answer, but you're refusing to produce it. Go
@@ -2350,7 +2354,8 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                         "further information will be provided. The only "
                         "useful moves left are an edit tool (patch, "
                         "edit_line, insert_lines, rewrite_function) or "
-                        "submit.")}
+                        "submit."),
+                        "_phase_over": "deadline_giveup"}
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))

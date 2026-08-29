@@ -665,6 +665,7 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     _walk_t0 = _wt.time()
     _walk_cap = float(os.environ.get("REPERTOIRE_WALL", "0") or 0)
     _walk_capped = False
+    _walk_giveup = False
     # EXT-BUDGET (2026-08-24): wall seconds already spent per segment
     # index, so an extension pass is charged against the SAME budget
     # instead of receiving a fresh cap (django-11910: seg 1 ran twice,
@@ -916,6 +917,15 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             except Exception as _le:
                 log(" -- LEARNED extraction skipped (%s: %s)"
                     % (type(_le).__name__, _le))
+        if reason == "giveup":
+            # The phase ended on the deadline interrupt. state persists, so
+            # every later segment would re-fire the same give-up within a few
+            # turns -- running them buys nothing. Stop the walk and fall
+            # through to the candidate bank / fallback restore below.
+            _walk_giveup = True
+            log(" -- REPERTOIRE: deadline give-up interrupt at segment %d; "
+                "stopping the walk" % (i + 1))
+            break
         if reason == "solved" or state.get("repro_green"):
             log(" -- REPERTOIRE solved at segment %d (%s)" % (i + 1, name))
             # COVERAGE GAP (django-11910): green only proves the lines the
@@ -1102,7 +1112,8 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
     # Borrowed framing: pi-agents gives every budget a name and records
     # WHICH limit a run hit, rather than collapsing every ending into one.
     _end_reason = "%s_%s" % (
-        "wall" if _walk_capped else "exhausted",
+        "giveup" if _walk_giveup
+        else ("wall" if _walk_capped else "exhausted"),
         ("green" if [c for c in candidates if len(c) > 2 and c[2]]
          else "candidate") if candidates else "nothing")
     if candidates:
@@ -1442,6 +1453,24 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                 result = h(None, args)
             except Exception as e:
                 result = {"error": f"handler crashed: {type(e).__name__}: {e}"}
+        # DEADLINE GIVE-UP INTERRUPT (2026-08-29). The fix-tools ladder sets
+        # _phase_over on its result once the model has made 40 post-deadline
+        # probes with no edit. The old design returned a constant string and
+        # waited for the stall watchdog -- measured on rows 97-127: nine
+        # blanks each burned the FULL ~2700s wall after give-up fired. A
+        # give-up is a decision, not information; end the phase on it.
+        _po = result.pop("_phase_over", None) if isinstance(result, dict) else None
+        if _po:
+            messages.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"id": f"t{turn}", "type": "function",
+                                             "function": {"name": tool,
+                                                          "arguments": args}}]})
+            messages.append({"role": "tool", "tool_call_id": f"t{turn}",
+                             "content": json.dumps(result, default=str)[:4800]})
+            log("PHASE-OVER (%s) at turn %d; ending phase now" % (_po, turn))
+            if emit:
+                emit("phase_over", {"turn": turn, "why": _po})
+            return "giveup", messages, meta_log
         # SIBLING-SITE SWEEP (env SIBLING_SWEEP, default off). Measured failure:
         # on astropy-14365 the model added re.IGNORECASE (correct, matches gold)
         # and never touched the sibling `if v == "NO"` at line 309 -- a plain
