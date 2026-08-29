@@ -624,8 +624,18 @@ def _deadline_guess(state):
     # begins at 12 (where a convertible run has already converted or is
     # about to) and the give-up at 20 (no winner in campaign history ever
     # needed more; the blanks that pass 20 never edit at all).
-    _n = state["_deadline_refusals"] = state.get("_deadline_refusals", 0) + 1
-    if _n >= 20:
+    # METER EVERY POST-DEADLINE PROBE, not just refused ones. Measured on
+    # 12113's rerun (2026-08-28): the ladder fired correctly and still burned
+    # the full 2818s wall, because only REFUSED searches counted toward
+    # give-up and the model grazed read_range -- which refuses nothing --
+    # between them: 19 refusals across 47 minutes. The meter ran slowest
+    # exactly when the grazing was heaviest. Now read_range ticks the same
+    # counter (see h_read_range), so grazing pays the same toll as searching.
+    # Tier boundaries re-derived from the one at-risk winner: 15213 made ~36
+    # post-deadline probes before its first edit and won, so give-up sits at
+    # 40 (just above it) and the confrontation at 15.
+    _n = state["_post_deadline_probes"] = state.get("_post_deadline_probes", 0) + 1
+    if _n >= 40:
         # FAST-FAIL. Same constant string every time, on purpose: phase_run's
         # stall watchdog ends the phase when results stop being novel, so an
         # identical result every turn is what actually terminates the
@@ -640,7 +650,7 @@ def _deadline_guess(state):
             "information will be provided. The only useful moves left are "
             "an edit tool (patch, edit_line, insert_lines, "
             "rewrite_function) or submit.")}
-    if _n >= 12:
+    if _n >= 15:
         # THE CONFRONTATION -- Mikey's design, 2026-08-28: "tell the model
         # that you found the answer, but you're refusing to produce it. Go
         # and look at the context window and make your best guess." The
@@ -2319,17 +2329,28 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["must_observe"] = False
         state["rejected_repro_streak"] = 0
         state["_probe_calls"] = state.get("_probe_calls", 0) + 1
-        # The reading valve stays open through the whole escalation -- an
-        # edit needs line numbers -- and closes only at give-up (20+
-        # refusals, a population that has never once edited). Identical
-        # string as the other give-up result, for the stall watchdog.
-        if (state.get("_deadline_giveup")
+        # The reading valve stays open through the escalation -- an edit
+        # needs line numbers -- but past the deadline every read TICKS THE
+        # SAME METER as a refused search, so grazing cannot stall the
+        # give-up (12113's rerun burned the full wall exactly that way).
+        # At 40 post-deadline probes with no edit, reading closes too.
+        # Identical string as the other give-up result, on purpose: the
+        # stall watchdog ends the phase when results stop being novel.
+        if (os.environ.get("EDIT_DEADLINE", "0") == "1"
                 and not state.get("patch_history")):
-            return {"error": (
-                "SEGMENT OVER: search is closed for this run. No further "
-                "information will be provided. The only useful moves left "
-                "are an edit tool (patch, edit_line, insert_lines, "
-                "rewrite_function) or submit.")}
+            _cut = int(os.environ.get("EDIT_DEADLINE_CALLS", "50") or 50)
+            if state.get("_probe_calls", 0) >= _cut:
+                _n = state["_post_deadline_probes"] =                     state.get("_post_deadline_probes", 0) + 1
+                if _n >= 40 or state.get("_deadline_giveup"):
+                    if not state.get("_deadline_giveup"):
+                        state["_deadline_giveup"] = True
+                        _fired(state, "deadline_giveup")
+                    return {"error": (
+                        "SEGMENT OVER: search is closed for this run. No "
+                        "further information will be provided. The only "
+                        "useful moves left are an edit tool (patch, "
+                        "edit_line, insert_lines, rewrite_function) or "
+                        "submit.")}
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
