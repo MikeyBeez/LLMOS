@@ -917,6 +917,69 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
             except Exception as _le:
                 log(" -- LEARNED extraction skipped (%s: %s)"
                     % (type(_le).__name__, _le))
+        # INTROSPECTION PROBES (env INTROSPECT, default off). Mikey 2026-08-29:
+        # "After so many turns, we might ask why arent you answering? What is
+        # it that you think you need that you dont have? ... what do you think
+        # you have that can help you answer this ... This way well have some
+        # of that information in the traces."
+        # Detached sidebar, the critic_review/LEARNED pattern: a SEPARATE
+        # context reads a digest of the run, answers, and the window is
+        # dumped. Deliberately not asked in the main loop -- instrumentation
+        # must not perturb the run it is measuring, and the in-band worksheet
+        # channel is measured ~98 percent lossy anyway. One interview per
+        # stage per instance: no_edit_20 (still searching at 20 probes),
+        # deadline (past the edit deadline), giveup (refused to the end).
+        # Answers land in state["introspection"] -> fix_state -> the trace.
+        if (os.environ.get("INTROSPECT", "0") == "1"
+                and not state.get("patch_history")
+                and state.get("_probe_calls", 0) >= 20):
+            _iv_done = state.setdefault("introspection", [])
+            _iv_stage = ("giveup" if state.get("_deadline_giveup")
+                         else "deadline" if state.get("_post_deadline_probes")
+                         else "no_edit_20")
+            if not any(d.get("stage") == _iv_stage for d in _iv_done):
+                try:
+                    from repo_bootstrap_tools import llm_call as _ivcall
+                    from repo_bootstrap_tools import _extract_json as _ivexj
+                    from trace_consumers import (events_from_messages as _ivefm,
+                                                 _events_digest as _ivedg)
+                    _ivev = _ivefm(msgs)
+                    _ivdg = _ivedg(_ivev[-40:], max_chars=30000,
+                                   arg_chars=1500) if _ivev else ""
+                    _NL = chr(10)
+                    _ivprompt = _NL.join([
+                        "Transcript digest of your bug-fixing run so far. "
+                        "You have made NO edit yet.",
+                        _ivdg,
+                        "",
+                        "1. why_not: Why are you not answering yet -- what "
+                        "is stopping you from writing a fix?",
+                        "2. have: What do you have, from the work above, "
+                        "that can help you answer this problem?",
+                        "3. need: What do you think you need that you do "
+                        "not have?"])
+                    _ivraw = _ivcall(
+                        system=("You are the agent whose work transcript is "
+                                "shown. Answer three questions about your own "
+                                "run, honestly and concretely. Respond ONLY "
+                                "with a JSON object with keys why_not, have, "
+                                "need. Short plain sentences. I dont know is "
+                                "an acceptable answer."),
+                        prompt=_ivprompt,
+                        max_tokens=500)
+                    _ivans = _ivexj(_ivraw)
+                    if not isinstance(_ivans, dict):
+                        _ivans = {"raw": str(_ivraw)[:800]}
+                    _iv_done.append({"stage": _iv_stage,
+                                     "probes": state.get("_probe_calls", 0),
+                                     "answers": _ivans})
+                    log(" -- INTROSPECT (%s): why_not=%s | need=%s"
+                        % (_iv_stage,
+                           str(_ivans.get("why_not", ""))[:120],
+                           str(_ivans.get("need", ""))[:120]))
+                except Exception as _ive:
+                    log(" -- INTROSPECT skipped (%s: %s)"
+                        % (type(_ive).__name__, _ive))
         if reason == "giveup":
             # The phase ended on the deadline interrupt. state persists, so
             # every later segment would re-fire the same give-up within a few
