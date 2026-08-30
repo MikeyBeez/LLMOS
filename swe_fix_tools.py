@@ -688,7 +688,13 @@ def _deadline_guess(state):
         "insert_lines or rewrite_function (read_range still works if you "
         "need line numbers). An imperfect fix is the CORRECT move at this "
         "point -- a blank submission never scores, a best guess sometimes "
-        "does." % state.get("_probe_calls", 0))}
+        "does. AND YOU DO NOT HAVE TO BE SURE, BECAUSE TRYING IS FREE: "
+        "the working tree is disposable and every edit is reversible. "
+        "Apply your candidate fix, run your reproduction, and READ THE "
+        "RESULT. If it fails, revert and adjust. The test result you get "
+        "by trying IS the certainty you have been searching for -- one "
+        "try tells you more than ten more searches." \
+        % state.get("_probe_calls", 0))}
 
 
 def _readiness_site(repo_dir, text, max_lines=60):
