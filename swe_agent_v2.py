@@ -981,13 +981,64 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                     _ivans = _ivexj(_ivclean)
                     if not isinstance(_ivans, dict):
                         _ivans = {"raw": str(_ivraw)[:800]}
+                    # THE PRESS (Mikey 2026-08-30): "It doesnt say I think I
+                    # need X or Y in order to feel confident. We should press
+                    # on that. We need to know what would convince the model."
+                    # Second turn: quote its own stated need back and demand
+                    # the concrete evidence, plus whether its own tools could
+                    # produce that evidence. If yes -> stubbornness is a
+                    # planning failure. If CANNOT -> that is the real wall.
+                    _ivneed = str(_ivans.get("need")
+                                  or _ivans.get("raw") or "")[:400]
+                    if _ivneed.strip():
+                        _pressprompt = _NL.join([
+                            "Earlier you said you have not written a fix "
+                            "yet, and that what you need is:",
+                            _ivneed,
+                            "",
+                            "That is too vague to act on. Be specific.",
+                            "1. convince: Name the CONCRETE evidence that "
+                            "would convince you to write the fix -- an exact "
+                            "test result, an exact observation, an exact "
+                            "line or behavior. Finish this sentence: if I "
+                            "saw X, I would write the fix. What is X?",
+                            "2. how_to_get_it: With the tools you already "
+                            "have (read files, search, run scripts, run "
+                            "tests), how would you obtain that evidence? If "
+                            "you believe you cannot, say CANNOT and why."])
+                        try:
+                            _pressraw = _ivcall(
+                                system=("Answer about your own run. Respond "
+                                        "ONLY with a JSON object with keys "
+                                        "convince and how_to_get_it. Short "
+                                        "plain sentences."),
+                                prompt=_pressprompt,
+                                max_tokens=600)
+                            _pclean = str(_pressraw).strip()
+                            if _pclean.startswith(_FENCE):
+                                _pp = _pclean.split(_FENCE)
+                                _pclean = _pp[1] if len(_pp) > 1 else _pclean
+                                if _pclean.startswith("json"):
+                                    _pclean = _pclean[4:]
+                            _pans = _ivexj(_pclean)
+                            if isinstance(_pans, dict):
+                                _ivans["convince"] = _pans.get("convince")
+                                _ivans["how_to_get_it"] = _pans.get(
+                                    "how_to_get_it")
+                            else:
+                                _ivans["press_raw"] = str(_pressraw)[:600]
+                        except Exception as _pe:
+                            _ivans["press_error"] = "%s: %s" % (
+                                type(_pe).__name__, _pe)
                     _iv_done.append({"stage": _iv_stage,
                                      "probes": state.get("_probe_calls", 0),
                                      "answers": _ivans})
-                    log(" -- INTROSPECT (%s): why_not=%s | need=%s"
+                    log(" -- INTROSPECT (%s): need=%s | convince=%s | "
+                        "how=%s"
                         % (_iv_stage,
-                           str(_ivans.get("why_not", ""))[:120],
-                           str(_ivans.get("need", ""))[:120]))
+                           str(_ivans.get("need", ""))[:100],
+                           str(_ivans.get("convince", ""))[:140],
+                           str(_ivans.get("how_to_get_it", ""))[:100]))
                 except Exception as _ive:
                     log(" -- INTROSPECT skipped (%s: %s)"
                         % (type(_ive).__name__, _ive))
