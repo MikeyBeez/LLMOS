@@ -426,7 +426,7 @@ def capture_readiness(state, text, force=False):
         "probes": state.get("_probe_calls", 0),
         "edits": len(state.get("patch_history") or []),
         "seen_red": bool(state.get("seen_red")),
-        "answer": text[:1500],
+        "answer": text[:6000],
     })
     state["_readiness_pending"] = False
     _fired(state, "readiness_answered")
@@ -635,49 +635,40 @@ def _deadline_guess(state):
     # post-deadline probes before its first edit and won, so give-up sits at
     # 40 (just above it) and the confrontation at 15.
     _n = state["_post_deadline_probes"] = state.get("_post_deadline_probes", 0) + 1
-    if _n >= 40:
-        # FAST-FAIL. Same constant string every time, on purpose: phase_run's
-        # stall watchdog ends the phase when results stop being novel, so an
-        # identical result every turn is what actually terminates the
-        # segment quickly instead of burning the wall. state persists across
-        # segments, so every later segment collapses the same way and the
-        # walk falls through to the candidate bank in minutes, not 45.
-        if not state.get("_deadline_giveup"):
-            state["_deadline_giveup"] = True
-            _fired(state, "deadline_giveup")
+    # EDIT-ONLY MODE (2026-08-30) -- replaces the confrontation tier.
+    # MEASURED over 179 all300 traces: deadline_confronted fired in 29 runs,
+    # 0 resolved, and only 4 of the 29 ever produced an edit afterwards.
+    # Every INFORMATION intervention has now been tried and measured --
+    # enrich the search, hand the model back its own words, resolve the site
+    # it named and print the real lines (readiness dispatch: 41 runs, 18
+    # edits, 5 wins), warn, refuse, confront. None of them reliably turns
+    # prose into a tool call, because none of them changed what the model
+    # COULD do: swe_agent_v2 built ToolCallCPU(tools=FIX_TOOLS) once per
+    # phase and never filtered it, so "search is closed" was a string
+    # returned by tools still sitting in the schema on the very next turn.
+    #
+    # So the kernel REVOKES THE CAPABILITY instead of asking for compliance.
+    # At EDIT_ONLY_AT post-deadline probes with no edit, phase_run swaps the
+    # tool list for EDIT_ONLY_TOOLS (patch, edit_line, insert_lines,
+    # rewrite_function, submit). The message below asserts only facts about
+    # the BUDGET and the TOOL LIST, never about what the model knows -- the
+    # line Mikey drew on 2026-08-29 between benchmark and production
+    # directives. The first landed edit reopens everything (the
+    # patch_history check at the top of this function).
+    _lock = int(os.environ.get("EDIT_ONLY_AT", "15") or 15)
+    if _n >= _lock:
+        if not state.get("_edit_only"):
+            state["_edit_only"] = True
+            _fired(state, "edit_only_entered")
         return {"error": (
-            "SEGMENT OVER: search is closed for this run. No further "
-            "information will be provided. The only useful moves left are "
-            "an edit tool (patch, edit_line, insert_lines, "
-            "rewrite_function) or submit."),
-            # Not advice -- an interrupt. phase_run ends the phase when it
-            # sees this key (2026-08-29: 9 blanks in 31 rows burned the full
-            # ~2700s wall AFTER give-up fired, waiting on the stall watchdog).
-            "_phase_over": "deadline_giveup"}
-    if _n >= 15:
-        # THE CONFRONTATION -- Mikey's design, 2026-08-28: "tell the model
-        # that you found the answer, but you're refusing to produce it. Go
-        # and look at the context window and make your best guess." The
-        # strongest available evidence is the model's OWN diagnosis, so
-        # hand its words back to it. Both provable had-the-answer blanks
-        # (12747, 14017) wrote analyses naming the winning file; nothing
-        # in the harness ever showed them their own conclusion again.
-        _fired(state, "deadline_confronted")
-        _own = ""
-        _r = state.get("readiness") or []
-        if _r:
-            _own = (" YOUR OWN WORDS, from earlier in this context: \"%s\""
-                    % " ".join(_r[-1]["answer"].split())[:350])
-        _site = state.get("readiness_site")
-        if _site:
-            _own += (" You even named the site: %s :: %s."
-                     % (_site.get("file"), _site.get("name")))
-        return {"error": (
-            "YOU HAVE ALREADY FOUND THE ANSWER, AND YOU ARE REFUSING TO "
-            "PRODUCE IT.%s Look back at your context window: the diagnosis "
-            "is yours. You will get no new information from more searching. "
-            "Write your own conclusion as an edit NOW -- your best guess, "
-            "even if you are not certain." % _own)}
+            "SEARCH IS CLOSED FOR THIS RUN. You have made %d searches and "
+            "reads and attempted 0 edits. The search tools have been "
+            "REMOVED from your tool list -- patch, edit_line, insert_lines, "
+            "rewrite_function and submit are what remain. Write your best "
+            "guess as an edit now. An imperfect edit can score; a blank "
+            "never does. The working tree is disposable and every edit is "
+            "reversible, so trying is free."
+            % state.get("_probe_calls", 0))}
     _fired(state, "deadline_search_refused")
     return {"error": (
         "SEARCH IS OVER FOR THIS RUN. You have made %d searches and reads "
@@ -2351,17 +2342,17 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             _cut = int(os.environ.get("EDIT_DEADLINE_CALLS", "50") or 50)
             if state.get("_probe_calls", 0) >= _cut:
                 _n = state["_post_deadline_probes"] =                     state.get("_post_deadline_probes", 0) + 1
-                if _n >= 40 or state.get("_deadline_giveup"):
-                    if not state.get("_deadline_giveup"):
-                        state["_deadline_giveup"] = True
-                        _fired(state, "deadline_giveup")
+                _lock = int(os.environ.get("EDIT_ONLY_AT", "15") or 15)
+                if _n >= _lock or state.get("_edit_only"):
+                    if not state.get("_edit_only"):
+                        state["_edit_only"] = True
+                        _fired(state, "edit_only_entered")
                     return {"error": (
-                        "SEGMENT OVER: search is closed for this run. No "
-                        "further information will be provided. The only "
-                        "useful moves left are an edit tool (patch, "
-                        "edit_line, insert_lines, rewrite_function) or "
-                        "submit."),
-                        "_phase_over": "deadline_giveup"}
+                        "SEARCH IS CLOSED FOR THIS RUN. The search and read "
+                        "tools have been removed from your tool list; "
+                        "patch, edit_line, insert_lines, rewrite_function "
+                        "and submit are what remain. Write your best-guess "
+                        "edit now.")}
         path = str(args.get("file", ""))
         start = max(1, int(args.get("start", 1)))
         end = int(args.get("end", start + 40))
@@ -4506,6 +4497,28 @@ if os.environ.get("ISOLATE_DISCIPLINE") == "1":
 from repo_bootstrap_tools import RECALL_TOOL as _RECALL_TOOL
 FIX_TOOLS = FIX_TOOLS + [_RECALL_TOOL]
 FIX_TOOL2SYS["recall"] = "recall"
+
+# ---- EDIT-ONLY TOOL LIST (2026-08-30) ------------------------------------
+# What the model is left holding once the deadline ladder revokes search.
+# phase_run swaps cpu.tools to this while state["_edit_only"] is set; the
+# first landed edit puts the full list back. Deliberately strict: read_range
+# is NOT here, because the measured failure mode is grazing -- reads refuse
+# nothing, so leaving reading open leaves an alternative to writing open,
+# which is the whole thing this change removes.
+EDIT_ONLY_NAMES = {"patch", "edit_line", "insert_lines", "rewrite_function",
+                   "submit"}
+EDIT_ONLY_TOOLS = [t for t in FIX_TOOLS
+                   if (t.get("function") or {}).get("name") in EDIT_ONLY_NAMES]
+# edit_line / insert_lines / rewrite_function are behind the EDIT_LINE and
+# EDIT_SURFACE gates above (run_all300.sh sets both), so the size of this list
+# depends on the env -- do not assert on it. What must NEVER be empty is the
+# pair that exists unconditionally: without patch there is no way to write and
+# without submit there is no way to end, and an empty tool list would hang the
+# turn instead of failing loudly.
+_EDIT_ONLY_HAVE = set((t.get("function") or {}).get("name")
+                      for t in EDIT_ONLY_TOOLS)
+assert {"patch", "submit"} <= _EDIT_ONLY_HAVE, (
+    "EDIT_ONLY_TOOLS is unusable: %s" % sorted(_EDIT_ONLY_HAVE))
 
 # CYCLE-1 FINDING (2026-08-12, single-example loop, matplotlib-23299 rerun):
 # with DIAG_GATE on, the model never patched at all -- 25 locate calls, zero

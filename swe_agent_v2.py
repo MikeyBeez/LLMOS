@@ -28,7 +28,8 @@ from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS, auto_veri
                                    BOOTSTRAP_SYSTEM_PROMPT,
                                    make_bootstrap_handlers, env_ready)
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
-                            make_fix_handlers, mutating_tool_names)
+                            make_fix_handlers, mutating_tool_names,
+                            EDIT_ONLY_TOOLS)
 import envcheck
 
 
@@ -1309,7 +1310,7 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, wall_cap=None,
               gate=None, log=print, checkpoint=None, worksheet=None,
               emit=None, stall_window=None, init_messages=None,
-              success=None, free_text=None):
+              success=None, free_text=None, tools_filter=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -1397,6 +1398,23 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                         messages[1]["content"] = user_goal + "\n\n" + _ws
                     except Exception:
                         pass
+        # CAPABILITY REVOCATION (2026-08-30). The one lever never pulled:
+        # change what the model CAN call, not what it is told. tools_filter
+        # returns None (leave the full list alone), a tool list (use it for
+        # this turn), or the string "over" (the bounded edit-only window
+        # expired with no edit -- end the phase here rather than grind).
+        # cpu.tools is read at request time in ToolCallCPU._chat, so this is
+        # a per-turn swap with no rebuild and no cache penalty beyond the
+        # schema itself.
+        if tools_filter is not None:
+            try:
+                _tf = tools_filter()
+            except Exception:
+                _tf = None
+            if _tf == "over":
+                log(" -- EDIT_ONLY window expired with no edit; phase over")
+                return "giveup", messages, meta_log
+            cpu.tools = _tf if _tf else tools
         _send = (messages + [_tail_ws]) if _tail_ws else messages
         msg = None
         for attempt in range(3):
@@ -2848,6 +2866,36 @@ def run_one(inst):
     _fix_gate.reject_message = None
     _fix_gate.reject_detail = None
 
+    # EDIT-ONLY WINDOW (2026-08-30). swe_fix_tools sets state["_edit_only"]
+    # when the deadline ladder revokes search; this is the half that makes it
+    # real. Bounded on purpose: EDIT_ONLY_TURNS turns to write something, then
+    # the phase ends. The old give-up sat 25 probes past the point where no
+    # run has ever recovered (0 of 29 confronted runs resolved), and those
+    # probes were pure wall.
+    from swe_fix_tools import _fired as _fired_ft
+    _edit_only_max = int(os.environ.get("EDIT_ONLY_TURNS", "8") or 8)
+
+    def _edit_only_filter(st):
+        if not st.get("_edit_only"):
+            return None
+        if st.get("patch_history"):
+            # An edit landed. Search reopens -- same rule the deadline gate
+            # has always used, applied to the schema instead of the prose.
+            st["_edit_only"] = False
+            st["_edit_only_turns"] = 0
+            return None
+        n = st["_edit_only_turns"] = st.get("_edit_only_turns", 0) + 1
+        if n > _edit_only_max:
+            # Set the flag the walk and the end-reason bookkeeping already
+            # read (repertoire_fix line ~1046, _iv_stage ~938), so this ends
+            # the run through the tested path rather than a new one.
+            if not st.get("_deadline_giveup"):
+                st["_deadline_giveup"] = True
+                _fired_ft(st, "deadline_giveup")
+            _fired_ft(st, "edit_only_expired")
+            return "over"
+        return EDIT_ONLY_TOOLS
+
     _emit2 = make_emitter(inst["instance_id"], "fix")
     _emit2("phase_start", {"budget": FIX_BUDGET, "repo": inst["repo"]})
     if os.environ.get("REPERTOIRE_SEGMENTS") == "1":
@@ -2860,7 +2908,8 @@ def run_one(inst):
             max_ops=int(os.environ.get("REPERTOIRE_MAX", "6")),
             worksheet=lambda: _rw(f_state), gate=_fix_gate,
             free_text=lambda _t: _cap_ready(f_state, _t),
-            checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL)
+            checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL,
+            tools_filter=lambda: _edit_only_filter(f_state))
     else:
         f_reason, f_msgs, f_meta = phase_run(cpu2, FIX_TOOLS, FIX_TOOL2SYS,
                                               f_handlers, FIX_SYSTEM_PROMPT,
@@ -2868,7 +2917,8 @@ def run_one(inst):
                                               worksheet=lambda: _rw(f_state),
                                               free_text=lambda _t: _cap_ready(f_state, _t),
                                               gate=_fix_gate,
-                                              checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL)
+                                              checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL,
+                                              tools_filter=lambda: _edit_only_filter(f_state))
     _emit2("phase_end", {"reason": f_reason})
     # THE GIVEN TESTS (Mikey): rerun the repo's own base-commit tests that
     # passed before any patch. Self-authored checks are recorded but decide
