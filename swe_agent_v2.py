@@ -966,8 +966,19 @@ def repertoire_fix(cpu, tools, tool2sys, handlers, system_prompt, goal,
                                 "need. Short plain sentences. I dont know is "
                                 "an acceptable answer."),
                         prompt=_ivprompt,
-                        max_tokens=500)
-                    _ivans = _ivexj(_ivraw)
+                        max_tokens=900)
+                    # Strip markdown code fences before parsing: measured
+                    # on requests-2148, the model wraps its JSON in a fence
+                    # and truncation at the old max_tokens=500 broke the
+                    # object -- both landed in the raw fallback.
+                    _FENCE = chr(96) * 3
+                    _ivclean = str(_ivraw).strip()
+                    if _ivclean.startswith(_FENCE):
+                        _parts = _ivclean.split(_FENCE)
+                        _ivclean = _parts[1] if len(_parts) > 1 else _ivclean
+                        if _ivclean.startswith("json"):
+                            _ivclean = _ivclean[4:]
+                    _ivans = _ivexj(_ivclean)
                     if not isinstance(_ivans, dict):
                         _ivans = {"raw": str(_ivraw)[:800]}
                     _iv_done.append({"stage": _iv_stage,
