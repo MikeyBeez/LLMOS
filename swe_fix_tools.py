@@ -1580,6 +1580,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                   % (restore_err, pth), flush=True)
             state["repro_green"] = False
             state["fix_verified"] = False
+            state["widened"] = False
             return False
         try:
             os.unlink(pth)
@@ -2358,34 +2359,33 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         end = int(args.get("end", start + 40))
         full = _inside_repo(repo_dir, path)
         if full is None or not os.path.isfile(full):
+            # NEVER NAME A TOOL YOU HAVE REVOKED (2026-09-01). In edit-only
+            # mode the search tools are gone from the schema, but this hint
+            # still said "use locate(pattern=...) to find the real location".
+            # sphinx-doc__sphinx-8474 spent its whole window issuing the same
+            # patch against an invented path while being told three times to
+            # call a tool it could not call. So when search is closed, resolve
+            # the candidates here and hand back the paths themselves -- the
+            # same principle as the readiness dispatch: the bytes, not advice.
             _hint = _missing_file_hint(path, repo_dir)
-        # NEVER NAME A TOOL YOU HAVE REVOKED (2026-09-01). In edit-only mode the
-        # search tools are gone from the schema, but this hint still said "use
-        # locate(pattern=...) to find the real location". sphinx-doc__sphinx-8474
-        # spent its whole window issuing the same patch against an invented path,
-        # sphinx/domains/numref.py, being told three times to call a tool it could
-        # not call, and was recorded as "would not write" because patch_history
-        # only counts edits that LAND. So when search is closed, resolve the
-        # candidates here and hand back the paths themselves -- the same principle
-        # as the readiness dispatch: give it the bytes, not advice.
-        if state.get("_edit_only"):
-            import os as _os
-            _base = _os.path.basename(path)
-            _stem = _os.path.splitext(_base)[0]
-            _cands = []
-            for _root, _dirs, _files in _os.walk(repo_dir):
-                _dirs[:] = [d for d in _dirs if not d.startswith(".")
-                            and d not in ("node_modules", "__pycache__", ".venv")]
-                for _f in _files:
-                    if _f == _base or (_stem and _stem in _f and _f.endswith(".py")):
-                        _cands.append(_os.path.relpath(_os.path.join(_root, _f), repo_dir))
-                if len(_cands) > 12:
-                    break
-            _hint = ("file not found: %r. Search is closed, so here are the real "
-                     "paths instead of advice. Closest matches in this repo: %s. "
-                     "Pick one and edit it." %
-                     (path, ", ".join(sorted(_cands)[:10]) or "none matched that name"))
-        return {"error": _hint}
+            if state.get("_edit_only"):
+                _base = os.path.basename(path)
+                _stem = os.path.splitext(_base)[0]
+                _cands = []
+                for _root, _dirs, _files in os.walk(repo_dir):
+                    _dirs[:] = [_d for _d in _dirs if not _d.startswith(".")
+                                and _d not in ("node_modules", "__pycache__", ".venv")]
+                    for _f in _files:
+                        if _f == _base or (_stem and _stem in _f and _f.endswith(".py")):
+                            _cands.append(os.path.relpath(os.path.join(_root, _f), repo_dir))
+                    if len(_cands) > 12:
+                        break
+                _hint = ("file not found: %r. Search is closed for this run, so "
+                         "here are the real paths instead of advice. Closest "
+                         "matches in this repo: %s. Pick one and edit it."
+                         % (path, ", ".join(sorted(_cands)[:10])
+                            or "none matched that name"))
+            return {"error": _hint}
         _fr = state.setdefault("files_read", [])
         _np = path.lstrip("./")
         if _np not in _fr:
@@ -2728,6 +2728,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             _remember_state(state, path, _newtext)
             state["repro_green"] = False
             state["fix_verified"] = False
+            state["widened"] = False
             state["same_verify_count"] = 0
             state["last_verify_sig"] = None
             state["rejected_repro_streak"] = 0
@@ -2927,6 +2928,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         state["stuck"] = 0
         state["repro_green"] = False
         state["fix_verified"] = False
+        state["widened"] = False
         state["same_verify_count"] = 0
         state["last_verify_sig"] = None
         state["rejected_repro_streak"] = 0
@@ -3433,6 +3435,81 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                          "KEEP your fix and ALSO make these pass -- a fix that "
                          "regresses the neighborhood is not done.")}
 
+    def h_widen_check(pcb, args):
+        """WIDEN AFTER GREEN (2026-09-01). Survey of the campaign: 40 of 129
+        misses were GREEN-REFUSED -- the model's own reproduction passed and
+        the hidden tests did not. 34 of those 40 edited the SAME file as
+        gold, at the same single hunk, with a diff about HALF the size:
+        right file, right spot, half the fix. The reproduction is one
+        example lifted from the issue; the minimal edit that satisfies that
+        one example goes green, and the general case the hidden test covers
+        is never exercised.
+
+        So a green reproduction must be WIDENED before it counts. The model
+        writes 2-4 VARIANT scripts -- same bug, different inputs: other
+        values, the empty/None case, another type, the other direction of a
+        symmetric API -- each exiting 0 only if the fix holds for that case.
+        All green -> widened, and _corroborated may declare SOLVED. Any red
+        -> the fix is narrower than the feature; keep working.
+
+        Guards against gaming: at least 2 variants; each must differ from the
+        registered reproduction and from each other beyond whitespace.
+        """
+        state["stuck"] = 0
+        vs = args.get("variants") or []
+        if isinstance(vs, str):
+            vs = [vs]
+        vs = [v for v in vs if isinstance(v, str) and v.strip()]
+        if len(vs) < 2:
+            return {"error": ("widen_check needs `variants`: a list of 2-4 short "
+                              "python scripts, each a DIFFERENT input to the same "
+                              "bug (other values, empty/None, another type, the "
+                              "reverse direction). Each must exit 0 only if the "
+                              "fix holds for that case, non-zero otherwise.")}
+        norm = lambda t: re.sub(r"\s+", " ", t).strip()
+        seen = {norm(state.get("repro_script") or "")}
+        dup = []
+        for i, v in enumerate(vs):
+            n = norm(v)
+            if n in seen:
+                dup.append(i + 1)
+            seen.add(n)
+        if dup:
+            return {"error": ("variant(s) %s are the same as your reproduction or "
+                              "as each other (whitespace aside). A variant must "
+                              "exercise a DIFFERENT input." % dup)}
+        results, all_green = [], True
+        for i, v in enumerate(vs[:4]):
+            try:
+                r = _exec_repro(v, "script", timeout=120)
+                rc, so, se = r.returncode, (r.stdout or ""), (r.stderr or "")
+            except Exception as e:   # a broken variant is red, not a crash
+                rc, so, se = 99, "", "%s: %s" % (type(e).__name__, e)
+            green = (rc == 0)
+            all_green = all_green and green
+            results.append({"variant": i + 1, "exit": rc,
+                            "green": green,
+                            "stdout_tail": so[-400:], "stderr_tail": se[-600:]})
+        state["widen_runs"] = state.get("widen_runs", 0) + 1
+        if all_green:
+            state["widened"] = True
+            state["widen_pending"] = False
+            _fired(state, "widen_green")
+            return {"widened": True, "variants": results,
+                    "note": ("all %d variants green -- the fix holds beyond the "
+                             "issue's example. Verification is now complete." % len(results))}
+        state["widened"] = False
+        _fired(state, "widen_red")
+        red = [r["variant"] for r in results if not r["green"]]
+        return {"widened": False, "variants": results,
+                "red_variants": red,
+                "note": ("variant(s) %s are RED. Your fix handles the issue's "
+                         "example but NOT these cases -- the fix is narrower than "
+                         "the feature. This is the most common way a green "
+                         "reproduction still fails the real tests. Widen the fix "
+                         "at the same site, then verify_fix and widen_check again."
+                         % red)}
+
     def h_check(pcb, args):
         state["must_observe"] = False
         state["stuck"] = 0   # a probe ran -> unstick
@@ -3772,6 +3849,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.run_tests":   h_run_tests,
         "swe.neighbor_tests": h_neighbor_tests,
         "swe.check":       h_check,
+        "swe.widen_check": h_widen_check,
         "swe.submit":      h_submit,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
@@ -3836,6 +3914,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                 capture_output=True, timeout=60)
         state["probe_green"] = False
         state["repro_green"] = False      # the fix is gone; so is its evidence
+        state["widened"] = False
         return {"reverted": True}
 
     def h_neighborhood(pcb, args):
@@ -4115,6 +4194,23 @@ FIX_TOOLS = [
                 "A few lines of python that PRINT the fact you want. Keep it "
                 "under ~15 lines and print explicitly.")}},
             "required": ["snippet"]}}},
+    {"type": "function", "function": {
+        "name": "widen_check",
+        "description": (
+            "Run 2-4 VARIANT reproductions after your fix goes green. Your "
+            "reproduction is ONE example from the issue; the real tests cover "
+            "the general case. Give scripts that hit the SAME bug with DIFFERENT "
+            "inputs -- other values, the empty/None case, another type, the "
+            "reverse direction of a read/write or load/dump pair. Each script "
+            "must exit 0 only if the fix holds for that case (assert, or "
+            "sys.exit(1)). All green completes verification; any red means the "
+            "fix is narrower than the feature -- widen it at the same site."),
+        "parameters": {"type": "object", "properties": {
+            "variants": {"type": "array", "items": {"type": "string"},
+                         "description": (
+                "2-4 short python scripts, each a different input to the same "
+                "bug. Must differ from your reproduction and from each other.")}},
+            "required": ["variants"]}}},
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (
@@ -4412,6 +4508,7 @@ if os.environ.get("DIAG_GATE", "0") != "1":
 FIX_TOOL2SYS = {
     "ready":       "swe.ready",
     "check": "swe.check",
+    "widen_check": "swe.widen_check",
     "reproduce":   "swe.reproduce",
     "differential": "swe.differential",
     "declare_site": "swe.declare_site",

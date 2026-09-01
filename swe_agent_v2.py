@@ -48,7 +48,12 @@ from trace_consumers import (remedies_for, format_remedy_context,
 from repo_bootstrap_tools import _ddg_search
 
 HOST = "http://127.0.0.1:8080"   # llama-server direct (ollama retired)
-MODEL = "ornith:35b"
+# Env-overridable 2026-09-01 so a second model can be evaluated without
+# editing source. This name is also what lands in the results row's "model"
+# field, which is the only reason bonsai-27b is still identifiable while
+# runs/qwen36 is not: an exploratory run that writes no model name teaches
+# nothing afterwards.
+MODEL = os.environ.get("SWE_MODEL", "ornith:35b")
 NUMCTX = 65536          # must match llama-server --ctx-size (see start_ornith.sh)
 # Sampling temperature. The vendor model card for Ornith-1.0 recommends 0.6
 # (top_p 0.95 / top_k 20 are already sent by tool_call_cpu). The old
@@ -458,6 +463,11 @@ def _corroborated(state, handlers, log=print):
     (baseline_pass are green PRE-patch, so FAIL_TO_PASS can never be in it).
     """
     def check():
+        # WIDEN notice lives in the shared handlers dict so phase_run (which
+        # has no `state`) can hand it to the model; cleared on every call and
+        # re-set only while actually holding a green.
+        if isinstance(handlers, dict):
+            handlers.pop("_widen_notice", None)
         if not state.get("repro_green"):
             return False
         state["green_seen"] = True          # nominate, regardless of what follows
@@ -467,6 +477,47 @@ def _corroborated(state, handlers, log=print):
             nb = {}
         reg = nb.get("regressed") if isinstance(nb, dict) else None
         if reg == 0:
+            # WIDEN AFTER GREEN (env WIDEN_AFTER_GREEN, default off), 2026-09-01.
+            # Third signal. Green + neighbours was two signals and it still let
+            # through 40 of 129 misses: right file, right spot, half the fix --
+            # the repro is one example from the issue and the minimal edit that
+            # satisfies it is narrower than the feature the hidden test covers.
+            # So the green must survive 2-4 VARIANT inputs the model writes
+            # itself (widen_check) before it may terminate. Bounded: after
+            # WIDEN_MAX_TURNS tool calls without a widened result we accept the
+            # green as-is -- this gate must never trap a real fix.
+            if (os.environ.get("WIDEN_AFTER_GREEN") == "1"
+                    and not state.get("widened")):
+                if not state.get("widen_pending"):
+                    state["widen_pending"] = True
+                    state["widen_turns"] = 0
+                    log("WIDEN: reproduction green + neighbours OK, but the "
+                        "repro is one example -- holding SOLVED until "
+                        "widen_check passes")
+                state["widen_turns"] = state.get("widen_turns", 0) + 1
+                _max = int(os.environ.get("WIDEN_MAX_TURNS", "6") or 6)
+                if state["widen_turns"] > _max:
+                    log("WIDEN: no widened result after %d tool calls; "
+                        "accepting the green as-is" % _max)
+                    state["widen_pending"] = False
+                    state["widen_gave_up"] = True
+                else:
+                    if isinstance(handlers, dict):
+                        handlers["_widen_notice"] = (
+                            "Your reproduction is GREEN and no neighbour test "
+                            "regressed. That is NOT yet solved: your reproduction "
+                            "is one example taken from the issue, and most fixes "
+                            "that pass it still fail the real tests because they "
+                            "handle only that example. Call "
+                            "widen_check(variants=[...]) with 2-4 short scripts "
+                            "that hit the SAME bug with DIFFERENT inputs -- other "
+                            "values, the empty/None case, another type, the "
+                            "reverse direction of a read/write or load/dump pair. "
+                            "Each exits 0 only if the fix holds for that case. All "
+                            "green completes verification; any red means widen the "
+                            "fix at the same site. (%d/%d)"
+                            % (state["widen_turns"], _max))
+                    return False
             log("CORROBORATED: reproduction green AND %s neighbour tests still pass"
                 % nb.get("neighbor_tests", "?"))
             return True
@@ -1761,6 +1812,13 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                     return "solved", messages, meta_log
             except Exception:
                 pass          # a broken predicate must never trap the agent
+        # WIDEN AFTER GREEN: the gate above may be HOLDING a green result.
+        # Tell the model in the tool result it is about to read -- a fact in
+        # the path, not advice in a document (the model does not go and look
+        # when told to; it acts on what is in front of it).
+        _wn = handlers.get("_widen_notice") if isinstance(handlers, dict) else None
+        if _wn and isinstance(result, dict):
+            result["widen_required"] = _wn
 
         if stall_window:
             _sig = _result_sig(tool, result)
