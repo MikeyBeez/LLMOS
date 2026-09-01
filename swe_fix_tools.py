@@ -2358,7 +2358,34 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         end = int(args.get("end", start + 40))
         full = _inside_repo(repo_dir, path)
         if full is None or not os.path.isfile(full):
-            return {"error": _missing_file_hint(path, repo_dir)}
+            _hint = _missing_file_hint(path, repo_dir)
+        # NEVER NAME A TOOL YOU HAVE REVOKED (2026-09-01). In edit-only mode the
+        # search tools are gone from the schema, but this hint still said "use
+        # locate(pattern=...) to find the real location". sphinx-doc__sphinx-8474
+        # spent its whole window issuing the same patch against an invented path,
+        # sphinx/domains/numref.py, being told three times to call a tool it could
+        # not call, and was recorded as "would not write" because patch_history
+        # only counts edits that LAND. So when search is closed, resolve the
+        # candidates here and hand back the paths themselves -- the same principle
+        # as the readiness dispatch: give it the bytes, not advice.
+        if state.get("_edit_only"):
+            import os as _os
+            _base = _os.path.basename(path)
+            _stem = _os.path.splitext(_base)[0]
+            _cands = []
+            for _root, _dirs, _files in _os.walk(repo_dir):
+                _dirs[:] = [d for d in _dirs if not d.startswith(".")
+                            and d not in ("node_modules", "__pycache__", ".venv")]
+                for _f in _files:
+                    if _f == _base or (_stem and _stem in _f and _f.endswith(".py")):
+                        _cands.append(_os.path.relpath(_os.path.join(_root, _f), repo_dir))
+                if len(_cands) > 12:
+                    break
+            _hint = ("file not found: %r. Search is closed, so here are the real "
+                     "paths instead of advice. Closest matches in this repo: %s. "
+                     "Pick one and edit it." %
+                     (path, ", ".join(sorted(_cands)[:10]) or "none matched that name"))
+        return {"error": _hint}
         _fr = state.setdefault("files_read", [])
         _np = path.lstrip("./")
         if _np not in _fr:
