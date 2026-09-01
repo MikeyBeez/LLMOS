@@ -3456,6 +3456,23 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         registered reproduction and from each other beyond whitespace.
         """
         state["stuck"] = 0
+        # GENERAL FORM FIRST (Mikey, 2026-09-01: "once we find a patch that
+        # passes the initial test, do we ask it to write a general form?").
+        # Variants test whatever the model thinks the rule is, so the rule
+        # has to be said out loud before the variants mean anything. The
+        # measured gap is model 4 lines vs gold 8 at the same hunk: gold IS
+        # the general form of the model's patch. Ask for it by name.
+        rule = (args.get("rule") or "").strip()
+        if len(rule) < 15:
+            return {"error": ("widen_check needs `rule`: ONE sentence stating the "
+                              "general form your patch implements -- what must "
+                              "hold for EVERY input, not just the issue's example. "
+                              "Read your diff first. If the patch only handles the "
+                              "example, edit it at the same site so it implements "
+                              "the rule, then call widen_check(rule=..., variants=[...]) "
+                              "with variants derived from that rule.")}
+        state["general_rule"] = rule
+        _fired(state, "widen_rule")
         vs = args.get("variants") or []
         if isinstance(vs, str):
             vs = [vs]
@@ -3495,13 +3512,14 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             state["widened"] = True
             state["widen_pending"] = False
             _fired(state, "widen_green")
-            return {"widened": True, "variants": results,
-                    "note": ("all %d variants green -- the fix holds beyond the "
-                             "issue's example. Verification is now complete." % len(results))}
+            return {"widened": True, "rule": rule, "variants": results,
+                    "note": ("all %d variants green -- the fix holds for the rule, "
+                             "not just the issue's example. Verification is now "
+                             "complete." % len(results))}
         state["widened"] = False
         _fired(state, "widen_red")
         red = [r["variant"] for r in results if not r["green"]]
-        return {"widened": False, "variants": results,
+        return {"widened": False, "rule": rule, "variants": results,
                 "red_variants": red,
                 "note": ("variant(s) %s are RED. Your fix handles the issue's "
                          "example but NOT these cases -- the fix is narrower than "
@@ -4197,7 +4215,8 @@ FIX_TOOLS = [
     {"type": "function", "function": {
         "name": "widen_check",
         "description": (
-            "Run 2-4 VARIANT reproductions after your fix goes green. Your "
+            "After your fix goes green: state the GENERAL RULE it implements, then "
+            "run 2-4 VARIANT reproductions derived from that rule. Your "
             "reproduction is ONE example from the issue; the real tests cover "
             "the general case. Give scripts that hit the SAME bug with DIFFERENT "
             "inputs -- other values, the empty/None case, another type, the "
@@ -4206,11 +4225,17 @@ FIX_TOOLS = [
             "sys.exit(1)). All green completes verification; any red means the "
             "fix is narrower than the feature -- widen it at the same site."),
         "parameters": {"type": "object", "properties": {
+            "rule": {"type": "string", "description": (
+                "ONE sentence: the general form your patch implements -- what "
+                "must hold for every input, not just the issue's example. If "
+                "your patch only handles the example, edit it first so it "
+                "implements this rule.")},
             "variants": {"type": "array", "items": {"type": "string"},
                          "description": (
-                "2-4 short python scripts, each a different input to the same "
-                "bug. Must differ from your reproduction and from each other.")}},
-            "required": ["variants"]}}},
+                "2-4 short python scripts DERIVED FROM THE RULE, each a "
+                "different input to the same bug. Must differ from your "
+                "reproduction and from each other.")}},
+            "required": ["rule", "variants"]}}},
     {"type": "function", "function": {
         "name": "reproduce",
         "description": (

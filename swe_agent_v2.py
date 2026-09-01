@@ -503,19 +503,29 @@ def _corroborated(state, handlers, log=print):
                     state["widen_gave_up"] = True
                 else:
                     if isinstance(handlers, dict):
+                        _diff = ""
+                        try:
+                            _diff = (handlers["_capture_diff"]() or "")[:1800]
+                        except Exception:
+                            pass
                         handlers["_widen_notice"] = (
                             "Your reproduction is GREEN and no neighbour test "
-                            "regressed. That is NOT yet solved: your reproduction "
-                            "is one example taken from the issue, and most fixes "
-                            "that pass it still fail the real tests because they "
-                            "handle only that example. Call "
-                            "widen_check(variants=[...]) with 2-4 short scripts "
-                            "that hit the SAME bug with DIFFERENT inputs -- other "
-                            "values, the empty/None case, another type, the "
-                            "reverse direction of a read/write or load/dump pair. "
-                            "Each exits 0 only if the fix holds for that case. All "
-                            "green completes verification; any red means widen the "
-                            "fix at the same site. (%d/%d)"
+                            "regressed. That is NOT yet solved. Your reproduction "
+                            "is ONE example from the issue; most fixes that pass it "
+                            "fail the real tests because they fix the example, not "
+                            "the rule. Here is your current patch:\n" + _diff +
+                            "\nSTEP 1 -- read it and state the GENERAL RULE it should "
+                            "implement, in one sentence: what must hold for EVERY "
+                            "input, not just the example. STEP 2 -- if the patch "
+                            "implements only the example, edit it AT THE SAME SITE so "
+                            "it implements the rule; add nothing the rule does not "
+                            "need. STEP 3 -- call widen_check(rule=<your sentence>, "
+                            "variants=[2-4 short scripts derived from the rule: other "
+                            "values, the empty/None case, another type, the reverse "
+                            "direction of a read/write or load/dump pair]). Each exits "
+                            "0 only if the fix holds for that case. All green completes "
+                            "verification; any red means the rule is not yet "
+                            "implemented. (%d/%d)"
                             % (state["widen_turns"], _max))
                     return False
             log("CORROBORATED: reproduction green AND %s neighbour tests still pass"
