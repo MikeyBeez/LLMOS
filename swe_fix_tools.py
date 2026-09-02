@@ -3700,15 +3700,98 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         if ln < 1 or ln > len(_lines):
             return {"error": ("line %d is outside %s (file has %d lines). "
                               "read_range first." % (ln, path, len(_lines)))}
+        # RECOVERABLE MISSES (2026-09-01). Survey of the 43 zero-byte misses in
+        # all300: 20 attempted edits and EVERY one bounced; 29 of those bounces
+        # were this tool saying "fragment not found on line N" -- and reading
+        # the pairs, the fragment WAS there. Two shapes, both the model's
+        # honest attempt colliding with an exact-match contract:
+        #   (1) `old` spans lines ('i += 1\n    ') -- a block handed to a
+        #       one-line tool. requests-1963 failed FIVE times on the same
+        #       site this way; the "copy it exactly" hint sent it back to do
+        #       the same thing again.
+        #   (2) off-by-one/two on the line number, with the fragment sitting
+        #       on the neighbour (mpl-23476: 3047 vs 3048).
+        # Refusing was the right default when the alternative was writing
+        # garbage; it is the wrong default when the intent is unambiguous.
+        # So: normalise a one-line fragment with a stray newline tail; treat a
+        # real multi-line `old` as a block replacement; and when the fragment
+        # is not on line N, look at N+-3 and then the whole file, and use it
+        # only if it is UNIQUE. Every recovery is reported in the result so
+        # the model learns the real line. Ambiguity still refuses.
+        _corr = None
+        if chr(10) in old:
+            _blk = old.split(chr(10))
+            while len(_blk) > 1 and not _blk[-1].strip():
+                _blk.pop()
+            if len(_blk) == 1:
+                old = _blk[0]                      # one-line fragment, stray tail
+            else:
+                # MULTI-LINE BLOCK: find a unique start near ln (then anywhere)
+                # whose lines match the block, tolerant of trailing whitespace.
+                def _blk_at(s0):
+                    if s0 < 1 or s0 - 1 + len(_blk) > len(_lines):
+                        return False
+                    return all(_lines[s0 - 1 + i].rstrip(chr(10)).rstrip()
+                               == _blk[i].rstrip() for i in range(len(_blk)))
+                _near = [s0 for s0 in range(ln - 3, ln + 4) if _blk_at(s0)]
+                _cands = _near if _near else [s0 for s0 in range(1, len(_lines) + 1)
+                                              if _blk_at(s0)]
+                if len(_cands) != 1:
+                    return {"error": ("multi-line `old` (%d lines) %s starting near "
+                                      "line %d" % (len(_blk),
+                                      "not found" if not _cands else
+                                      "matches %d places" % len(_cands), ln)),
+                            "lines_%d_to_%d_are" % (ln, ln + len(_blk) - 1):
+                                [repr(x.rstrip(chr(10))) for x in
+                                 _lines[ln - 1:ln - 1 + len(_blk)]],
+                            "hint": ("nothing was written. edit_line is for ONE line; "
+                                     "for a block give `old` exactly as the file has it, "
+                                     "or use patch with start_line/end_line.")}
+                _s0 = _cands[0]; _e0 = _s0 + len(_blk) - 1
+                _newtxt = new if new.endswith(chr(10)) else new + chr(10)
+                if path.endswith(".py"):
+                    _cand = "".join(_lines[:_s0 - 1]) + _newtxt + "".join(_lines[_e0:])
+                    try:
+                        compile(_cand, path, "exec")
+                    except SyntaxError as _se:
+                        return {"error": ("refused: that block edit would stop %s parsing "
+                                          "(%s at line %s)" % (path, _se.msg, _se.lineno)),
+                                "hint": "nothing was written"}
+                _fired(state, "edit_line_block_recovered")
+                res = h_patch(pcb, {"file": path, "start_line": _s0, "end_line": _e0,
+                                    "new_snippet": _newtxt})
+                if isinstance(res, dict) and not res.get("error"):
+                    res["edited_lines"] = "%d-%d" % (_s0, _e0)
+                    res["note"] = ("`old` spanned %d lines; treated as a block "
+                                   "replacement at %d-%d%s" % (len(_blk), _s0, _e0,
+                                   "" if _s0 == ln else " (you said line %d)" % ln))
+                return res
         raw = _lines[ln - 1]
         body = raw.rstrip(chr(10))
         eol = raw[len(body):]
         hits = body.count(old)
         if hits == 0:
-            return {"error": "fragment not found on line %d" % ln,
-                    "line_is": repr(body),
-                    "hint": "nothing was written; copy the fragment exactly "
-                            "as it appears above"}
+            # OFF-BY-N: the fragment is on a neighbour, or unique elsewhere.
+            _one = lambda i: _lines[i - 1].rstrip(chr(10)).count(old) == 1
+            _near = [i for i in range(max(1, ln - 3), min(len(_lines), ln + 3) + 1)
+                     if i != ln and _one(i)]
+            _cands = _near if _near else [i for i in range(1, len(_lines) + 1) if _one(i)]
+            if len(_cands) == 1:
+                _corr = _cands[0]
+                _fired(state, "edit_line_offby_recovered")
+                ln = _corr
+                raw = _lines[ln - 1]
+                body = raw.rstrip(chr(10))
+                eol = raw[len(body):]
+                hits = 1
+            else:
+                return {"error": "fragment not found on line %d" % ln,
+                        "line_is": repr(body),
+                        "also_on_lines": _cands[:6] if _cands else [],
+                        "hint": ("nothing was written; copy the fragment exactly "
+                                 "as it appears above" if not _cands else
+                                 "nothing was written; the fragment appears on %d "
+                                 "lines -- name the one you mean" % len(_cands))}
         if hits > 1:
             return {"error": ("fragment occurs %d times on line %d - lengthen "
                               "it until it is unique ON THAT LINE"
@@ -3733,6 +3816,10 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
             res["edited_line"] = ln
             res["before"] = repr(body)
             res["after"] = repr(new_body)
+            if _corr is not None:
+                res["corrected_line"] = _corr
+                res["note"] = ("fragment was not on the line you named; it was "
+                               "unique on line %d, edited there" % _corr)
         return res
 
     def _file_defs(path, limit=40):
