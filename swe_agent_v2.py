@@ -476,62 +476,79 @@ def _corroborated(state, handlers, log=print):
         except Exception:
             nb = {}
         reg = nb.get("regressed") if isinstance(nb, dict) else None
+        _no_baseline = bool(isinstance(nb, dict) and nb.get("error"))
+        if reg not in (0, None) and not _no_baseline:
+            log("green reproduction, but neighbour tests regressed (%s); continuing" % reg)
+            return False
+        # WIDEN AFTER GREEN (env WIDEN_AFTER_GREEN, default off), 2026-09-01.
+        # Third signal. Green + neighbours was two signals and it still let
+        # through 40 of 129 misses: right file, right spot, half the fix --
+        # the repro is one example from the issue and the minimal edit that
+        # satisfies it is narrower than the feature the hidden test covers.
+        # So the green must survive 2-4 VARIANT inputs the model writes
+        # itself (widen_check) before it may terminate. Bounded: after
+        # WIDEN_MAX_TURNS tool calls without a widened result we accept the
+        # green as-is -- this gate must never trap a real fix.
+        #
+        # Placed BEFORE the neighbour-baseline split (fix 2026-09-01 19:05,
+        # mpl-22835): the first version lived inside `reg == 0`, so on an
+        # instance with no neighbour baseline it never fired at all and the
+        # model was told "continuing" after every green tool call until the
+        # segment died. Rare (7 of ~130 greens in all300) but exactly the
+        # case where a second signal is otherwise UNAVAILABLE -- so here a
+        # widened green is allowed to stand in for the missing neighbours.
+        _widen_on = os.environ.get("WIDEN_AFTER_GREEN") == "1"
+        if _widen_on and not state.get("widened"):
+            if not state.get("widen_pending"):
+                state["widen_pending"] = True
+                state["widen_turns"] = 0
+                log("WIDEN: reproduction green%s, but the repro is one example "
+                    "-- holding SOLVED until widen_check passes"
+                    % ("" if _no_baseline else " + neighbours OK"))
+            state["widen_turns"] = state.get("widen_turns", 0) + 1
+            _max = int(os.environ.get("WIDEN_MAX_TURNS", "6") or 6)
+            if state["widen_turns"] > _max:
+                log("WIDEN: no widened result after %d tool calls; "
+                    "accepting the green as-is" % _max)
+                state["widen_pending"] = False
+                state["widen_gave_up"] = True
+            else:
+                if isinstance(handlers, dict):
+                    _diff = ""
+                    try:
+                        _diff = (handlers["_capture_diff"]() or "")[:1800]
+                    except Exception:
+                        pass
+                    handlers["_widen_notice"] = (
+                        "Your reproduction is GREEN%s. That is NOT yet solved. "
+                        "Your reproduction is ONE example from the issue; most "
+                        "fixes that pass it fail the real tests because they fix "
+                        "the example, not the rule. Here is your current patch:\n"
+                        % ("" if _no_baseline else " and no neighbour test regressed")
+                        + _diff +
+                        "\nSTEP 1 -- read it and state the GENERAL RULE it should "
+                        "implement, in one sentence: what must hold for EVERY "
+                        "input, not just the example. STEP 2 -- if the patch "
+                        "implements only the example, edit it AT THE SAME SITE so "
+                        "it implements the rule; add nothing the rule does not "
+                        "need. STEP 3 -- call widen_check(rule=<your sentence>, "
+                        "variants=[2-4 short scripts derived from the rule: other "
+                        "values, the empty/None case, another type, the reverse "
+                        "direction of a read/write or load/dump pair]). Each exits "
+                        "0 only if the fix holds for that case. All green completes "
+                        "verification; any red means the rule is not yet "
+                        "implemented. (%d/%d)"
+                        % (state["widen_turns"], _max))
+                return False
         if reg == 0:
-            # WIDEN AFTER GREEN (env WIDEN_AFTER_GREEN, default off), 2026-09-01.
-            # Third signal. Green + neighbours was two signals and it still let
-            # through 40 of 129 misses: right file, right spot, half the fix --
-            # the repro is one example from the issue and the minimal edit that
-            # satisfies it is narrower than the feature the hidden test covers.
-            # So the green must survive 2-4 VARIANT inputs the model writes
-            # itself (widen_check) before it may terminate. Bounded: after
-            # WIDEN_MAX_TURNS tool calls without a widened result we accept the
-            # green as-is -- this gate must never trap a real fix.
-            if (os.environ.get("WIDEN_AFTER_GREEN") == "1"
-                    and not state.get("widened")):
-                if not state.get("widen_pending"):
-                    state["widen_pending"] = True
-                    state["widen_turns"] = 0
-                    log("WIDEN: reproduction green + neighbours OK, but the "
-                        "repro is one example -- holding SOLVED until "
-                        "widen_check passes")
-                state["widen_turns"] = state.get("widen_turns", 0) + 1
-                _max = int(os.environ.get("WIDEN_MAX_TURNS", "6") or 6)
-                if state["widen_turns"] > _max:
-                    log("WIDEN: no widened result after %d tool calls; "
-                        "accepting the green as-is" % _max)
-                    state["widen_pending"] = False
-                    state["widen_gave_up"] = True
-                else:
-                    if isinstance(handlers, dict):
-                        _diff = ""
-                        try:
-                            _diff = (handlers["_capture_diff"]() or "")[:1800]
-                        except Exception:
-                            pass
-                        handlers["_widen_notice"] = (
-                            "Your reproduction is GREEN and no neighbour test "
-                            "regressed. That is NOT yet solved. Your reproduction "
-                            "is ONE example from the issue; most fixes that pass it "
-                            "fail the real tests because they fix the example, not "
-                            "the rule. Here is your current patch:\n" + _diff +
-                            "\nSTEP 1 -- read it and state the GENERAL RULE it should "
-                            "implement, in one sentence: what must hold for EVERY "
-                            "input, not just the example. STEP 2 -- if the patch "
-                            "implements only the example, edit it AT THE SAME SITE so "
-                            "it implements the rule; add nothing the rule does not "
-                            "need. STEP 3 -- call widen_check(rule=<your sentence>, "
-                            "variants=[2-4 short scripts derived from the rule: other "
-                            "values, the empty/None case, another type, the reverse "
-                            "direction of a read/write or load/dump pair]). Each exits "
-                            "0 only if the fix holds for that case. All green completes "
-                            "verification; any red means the rule is not yet "
-                            "implemented. (%d/%d)"
-                            % (state["widen_turns"], _max))
-                    return False
             log("CORROBORATED: reproduction green AND %s neighbour tests still pass"
                 % nb.get("neighbor_tests", "?"))
             return True
-        if isinstance(nb, dict) and nb.get("error"):
+        if _no_baseline and _widen_on and state.get("widened"):
+            log("CORROBORATED: reproduction green AND widened (no neighbour "
+                "baseline; widening is the second signal)")
+            return True
+        if _no_baseline:
             # no baseline to corroborate against -- cannot confirm, so keep going
             log("green reproduction, but no neighbour baseline to corroborate; continuing")
             return False
