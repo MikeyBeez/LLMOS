@@ -3508,6 +3508,42 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                             "green": green,
                             "stdout_tail": so[-400:], "stderr_tail": se[-600:]})
         state["widen_runs"] = state.get("widen_runs", 0) + 1
+        # ADVERSARIAL ONE-SHOT (2026-09-02, from Mikey's "how do you know add or
+        # subtract?"). requests-863 was the closest miss of the failset: the rule
+        # said "a LIST of callables is flattened", every variant passed a list,
+        # all green, and gold accepted (list, tuple, set). The rule was one type
+        # short and confirming variants could never show it. When the rule names
+        # a concrete type but the variants never exercise a SIBLING type of the
+        # same family, the widen is confirmation-only -- ask ONCE for the sibling
+        # case, then accept regardless (never trap: the DIAGNOSIS one-shot).
+        if all_green and not state.get("widen_adv_nudged"):
+            _FAMILIES = [{"list", "tuple", "set", "frozenset", "dict"},
+                         {"str", "bytes", "bytearray"},
+                         {"int", "float", "complex", "bool"}]
+            _rl = rule.lower()
+            _vtext = " ".join(vs).lower()
+            _missing = []
+            for _fam in _FAMILIES:
+                _named = {t for t in _fam if re.search(r"\b%s\b" % t, _rl)}
+                if not _named or _named == _fam:
+                    continue
+                _sibs = _fam - _named
+                if not any(re.search(r"\b%s\b" % _x, _vtext) for _x in _sibs):
+                    _missing.append(" or a ".join(sorted(_sibs)[:3]))
+            if _missing:
+                state["widen_adv_nudged"] = True
+                _fired(state, "widen_adversarial_nudge")
+                return {"widened": False, "rule": rule, "variants": results,
+                        "adversarial_required": True,
+                        "note": ("your variants all pass, but every one exercises "
+                                 "the type your rule already names. The commonest "
+                                 "way a green fix still fails the hidden tests is "
+                                 "being ONE TYPE too narrow (accepting a list but "
+                                 "not a tuple). Add one variant that passes a %s "
+                                 "instead, then call widen_check again. If your fix "
+                                 "SHOULD reject those, widen your rule to say so and "
+                                 "call again -- this asks exactly once."
+                                 % "; a ".join(_missing))}
         if all_green:
             state["widened"] = True
             state["widen_pending"] = False
@@ -4303,7 +4339,9 @@ FIX_TOOLS = [
         "name": "widen_check",
         "description": (
             "After your fix goes green: state the GENERAL RULE it implements, then "
-            "run 2-4 VARIANT reproductions derived from that rule. Your "
+            "run 2-4 VARIANT reproductions derived from that rule -- at least one "
+            "ADVERSARIAL (a case you suspect your fix does NOT handle: a sibling "
+            "type, the empty case, the reverse direction). Your "
             "reproduction is ONE example from the issue; the real tests cover "
             "the general case. Give scripts that hit the SAME bug with DIFFERENT "
             "inputs -- other values, the empty/None case, another type, the "
@@ -4320,7 +4358,9 @@ FIX_TOOLS = [
             "variants": {"type": "array", "items": {"type": "string"},
                          "description": (
                 "2-4 short python scripts DERIVED FROM THE RULE, each a "
-                "different input to the same bug. Must differ from your "
+                "different input to the same bug, and at least one ADVERSARIAL "
+                "-- a case you suspect the fix does NOT handle (a sibling type, "
+                "empty/None, the reverse direction). Must differ from your "
                 "reproduction and from each other.")}},
             "required": ["rule", "variants"]}}},
     {"type": "function", "function": {
