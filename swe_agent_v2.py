@@ -30,6 +30,7 @@ from repo_bootstrap_tools import (BOOTSTRAP_TOOLS, BOOTSTRAP_TOOL2SYS, auto_veri
 from swe_fix_tools import (FIX_TOOLS, FIX_TOOL2SYS, FIX_SYSTEM_PROMPT,
                             make_fix_handlers, mutating_tool_names,
                             EDIT_ONLY_TOOLS)
+from kernel_syscall import Capabilities, Gate
 import envcheck
 
 
@@ -1396,7 +1397,8 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
               budget, wall_cap=None,
               gate=None, log=print, checkpoint=None, worksheet=None,
               emit=None, stall_window=None, init_messages=None,
-              success=None, free_text=None, tools_filter=None):
+              success=None, free_text=None, tools_filter=None,
+              write_root=None):
     """Drive one phase: chat, dispatch tool calls, repeat until the model
     calls a RETURN-typed tool (env_ready/submit) or budget is exhausted.
 
@@ -1417,6 +1419,20 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
             {"role": "user",   "content": user_goal},
         ]
     meta_log = []
+    # LLMOS CAPABILITY GATE (ARCHITECTURE.md 4.7 / 4.13, build-list item 4).
+    # The allow-list IS the tool list this phase was handed, so there is no
+    # second list to drift out of sync; write_root confines the mutating
+    # tools to this task's checkout. No write_root means no gate, so every
+    # existing call site is unchanged until it opts in. Mode comes from
+    # LLMOS_CAPS (off/warn/enforce, default warn: record, do not block).
+    _sysgate = None
+    if write_root:
+        try:
+            _sysgate = Gate(Capabilities.from_tools(
+                tools, write_roots=(write_root,),
+                label=os.path.basename(str(write_root).rstrip("/")) or "phase"))
+        except Exception as _ce:
+            log("  [caps] gate NOT built (%s) -- phase runs ungated" % _ce)
     # WALL-CLOCK CAP (env PHASE_WALL_CAP seconds, 0/unset = off). Measured
     # 2026-07-27/28: four flails, django-11019 at 9850s and django-11283 at
     # 11792s, both misses -- 6 of one night\'s 10 hours spent on two problems
@@ -1603,6 +1619,27 @@ def phase_run(cpu, tools, tool2sys, handlers, system_prompt, user_goal,
                                          "per call, or split a long script across "
                                          "several calls."})})
             continue
+        # ONE DOOR: every syscall is checked here, before anything runs. A
+        # permission test spread across the handlers is a test one handler
+        # forgets -- which is exactly how agents find a wiki they were never
+        # given. In warn mode admit() records the denial and returns allowed.
+        if _sysgate is not None:
+            _v = _sysgate.admit(tool, args, turn=turn,
+                                phase=_sysgate.caps.label)
+            if not _v.allowed:
+                log("DENIED (%s)" % _v.rule)
+                if emit:
+                    emit("syscall_denied", {"turn": turn, "tool": tool,
+                                            "rule": _v.rule,
+                                            "reason": _v.reason})
+                messages.append({"role": "assistant", "content": "",
+                                 "tool_calls": [{"id": f"t{turn}",
+                                                 "type": "function",
+                                                 "function": {"name": tool,
+                                                              "arguments": json.dumps(args) if isinstance(args, dict) else "{}"}}]})
+                messages.append({"role": "tool", "tool_call_id": f"t{turn}",
+                                 "content": _v.as_tool_error()})
+                continue
         # Recall: hand back the FULL, un-summarized output of an earlier call.
         if tool == "recall":
             _r = str((args or {}).get("ref", "")).strip()
@@ -2722,6 +2759,7 @@ def run_one(inst):
                                           b_handlers, BOOTSTRAP_SYSTEM_PROMPT,
                                           goal, BOOTSTRAP_BUDGET,
                                           gate=_boot_gate,
+                                          write_root=repo,
                                           checkpoint=ckpt, emit=_emit1)
     env_ok = env_ready(b_state)
     _emit1("phase_end", {"reason": b_reason, "env_ok": env_ok})
@@ -3000,6 +3038,7 @@ def run_one(inst):
             seg_turns=int(os.environ.get("SEG_TURNS", "10")),
             max_ops=int(os.environ.get("REPERTOIRE_MAX", "6")),
             worksheet=lambda: _rw(f_state), gate=_fix_gate,
+            write_root=repo,
             free_text=lambda _t: _cap_ready(f_state, _t),
             checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL,
             tools_filter=lambda: _edit_only_filter(f_state))
@@ -3010,6 +3049,7 @@ def run_one(inst):
                                               worksheet=lambda: _rw(f_state),
                                               free_text=lambda _t: _cap_ready(f_state, _t),
                                               gate=_fix_gate,
+                                              write_root=repo,
                                               checkpoint=ckpt, emit=_emit2, stall_window=FIX_STALL,
                                               tools_filter=lambda: _edit_only_filter(f_state))
     _emit2("phase_end", {"reason": f_reason})
