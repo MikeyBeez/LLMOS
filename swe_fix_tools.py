@@ -668,7 +668,11 @@ def _deadline_guess(state):
             "guess as an edit now. An imperfect edit can score; a blank "
             "never does. The working tree is disposable and every edit is "
             "reversible, so trying is free."
-            % state.get("_probe_calls", 0))}
+            % state.get("_probe_calls", 0)
+            + (" If you genuinely cannot name a site, report_no_fix with "
+               "what you ruled out is a legitimate ending -- better than a "
+               "patch you do not believe in."
+               if os.environ.get("NO_FIX_REPORT", "0") == "1" else ""))}
     _fired(state, "deadline_search_refused")
     return {"error": (
         "SEARCH IS OVER FOR THIS RUN. You have made %d searches and reads "
@@ -3971,6 +3975,53 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
                          "read_range for a file's contents, symbol for the "
                          "names in a module, reproduce for a runtime value.")}
 
+    def h_report_no_fix(pcb, args):
+        """PRODUCTION ENDING (2026-09-12, env NO_FIX_REPORT=1, default off).
+
+        Mikey's line, 2026-08-29: budgets are kernel policy and valid
+        anywhere, but WHAT A FORCED OUTPUT MAY CLAIM differs by mode. In a
+        benchmark a blank scores zero, so forcing a guess is free. In
+        production a forced guess looks exactly like an answer and gets
+        built on. So production needs a legal ending that is neither a patch
+        nor a timeout: "could not determine; here is what I ruled out."
+        The kernel asserts facts about the budget, never about what the
+        model knows; this tool lets the model assert the one thing it does
+        know -- what it eliminated.
+
+        It ends the phase through the existing _phase_over path, so the
+        walk, the fallback restore and the end-reason bookkeeping all run
+        the code they already run for a give-up. Nothing new to trust.
+        The report has to contain something ruled out: a surrender with an
+        empty ruled_out is a blank, and the whole point is that a blank is
+        not a report."""
+        if os.environ.get("NO_FIX_REPORT", "0") != "1":
+            return {"error": "report_no_fix is not enabled in this run"}
+        summary = str(args.get("summary", "") or "").strip()
+        ruled = args.get("ruled_out") or []
+        if isinstance(ruled, str):
+            ruled = [x.strip(" -*") for x in re.split(r"[\n;]", ruled)
+                     if x.strip(" -*")]
+        ruled = [str(x)[:300] for x in ruled if str(x).strip()][:12]
+        if not summary or not ruled:
+            return {"error": (
+                "summary and ruled_out (at least one item) are both "
+                "required. Say what you looked at and why each candidate "
+                "is NOT the fix. A surrender that rules nothing out is a "
+                "blank, and a blank is not a report.")}
+        if state.get("patch_history"):
+            return {"error": (
+                "you have a landed edit in the tree. Either verify_fix and "
+                "submit it, or say so in the summary and leave it -- but a "
+                "no-fix report next to an edit is two answers. Rejected.")}
+        rep = {"summary": summary[:1500], "ruled_out": ruled,
+               "best_guess": str(args.get("best_guess", "") or "")[:600],
+               "probes": state.get("_probe_calls", 0)}
+        state["no_fix_report"] = rep
+        _fired(state, "no_fix_reported")
+        return {"recorded": rep,
+                "next": "the run ends here; this report is its output",
+                "_phase_over": "no_fix_report"}
+
     state["_sibling_fn"] = _sibling_sites
     state["_defs_fn"] = _file_defs
     state["_dispatch_fn"] = lambda _t: _readiness_site(repo_dir, _t)
@@ -3992,6 +4043,7 @@ def make_fix_handlers(repo_dir, env_vars=None, env_kind="uv", repo=None):
         "swe.check":       h_check,
         "swe.widen_check": h_widen_check,
         "swe.submit":      h_submit,
+        "swe.report_no_fix": h_report_no_fix,
     }
     handlers["_lock_probe"] = lock_probe   # runner-only; stripped from tool menu
     handlers["_diff_nonempty"] = _diff_nonempty  # runner-only; the fix-phase gate
@@ -4650,6 +4702,31 @@ if os.environ.get("TOOL_NORMS", "0") == "1":
         elif _n in ("locate", "read_range", "check", "symbol"):
             _fn["description"] = _fn.get("description", "") + _NORM
 
+# PRODUCTION NO-FIX REPORT (2026-09-12, env NO_FIX_REPORT=1, default off).
+# Benchmark runs keep their contract -- any bytes beat no bytes, so the tool
+# is not even on the menu there. run_all300.sh does not set this.
+NO_FIX_REPORT = os.environ.get("NO_FIX_REPORT", "0") == "1"
+if NO_FIX_REPORT:
+    FIX_TOOLS.append({"type": "function", "function": {
+        "name": "report_no_fix",
+        "description": (
+            "Terminal call for when you CANNOT determine the fix. A legitimate "
+            "ending, not a failure: say what you ruled out and why, and your "
+            "best guess if you have one. Use this instead of guessing when a "
+            "wrong patch would be worse than no patch. Rejected if you have "
+            "an edit in the tree -- submit that or say why you are not."),
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string",
+                        "description": "2-4 sentences: what the bug is, what "
+                                       "you looked at, why you are stopping."},
+            "ruled_out": {"type": "array", "items": {"type": "string"},
+                          "description": "each candidate site or cause you "
+                                         "eliminated, with the evidence."},
+            "best_guess": {"type": "string",
+                           "description": "optional: the site you would edit "
+                                          "if forced, labelled as a guess."},
+        }, "required": ["summary", "ruled_out"]}}})
+
 # DIAG_GATE menu gate: the diagnosis tools appear only when the ladder is on.
 if os.environ.get("DIAG_GATE", "0") != "1":
     FIX_TOOLS = [_t for _t in FIX_TOOLS
@@ -4676,6 +4753,7 @@ FIX_TOOL2SYS = {
     "neighbor_tests": "swe.neighbor_tests",
     "neighborhood":   "swe.neighborhood",
     "submit":      "RETURN",   # terminal
+    "report_no_fix": "swe.report_no_fix",  # terminal via _phase_over
 }
 
 
@@ -4783,6 +4861,8 @@ FIX_TOOL2SYS["recall"] = "recall"
 # which is the whole thing this change removes.
 EDIT_ONLY_NAMES = {"patch", "edit_line", "insert_lines", "rewrite_function",
                    "submit"}
+if NO_FIX_REPORT:
+    EDIT_ONLY_NAMES.add("report_no_fix")
 EDIT_ONLY_TOOLS = [t for t in FIX_TOOLS
                    if (t.get("function") or {}).get("name") in EDIT_ONLY_NAMES]
 # edit_line / insert_lines / rewrite_function are behind the EDIT_LINE and

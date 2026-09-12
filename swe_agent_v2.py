@@ -3279,6 +3279,7 @@ def _postmortem(inst, blob):
                                 "fix_verified": fs.get("fix_verified")},
                "features": dict(fs.get("features_fired") or {}),
                "readiness": list(fs.get("readiness") or []),
+               "no_fix_report": fs.get("no_fix_report"),
                "funcs_edited": dict(fs.get("func_edits") or {}),
                "top_errors": errs.most_common(4)}
         d = os.path.expanduser("~/swe/research/postmortem")
